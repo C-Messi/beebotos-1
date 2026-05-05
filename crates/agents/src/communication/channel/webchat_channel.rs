@@ -51,6 +51,9 @@ impl ChannelConfig for WebChatConfig {
 
     fn is_valid(&self) -> bool {
         true
+    }
+
+    fn allowlist(&self) -> Vec<String> {
         vec![]
     }
 
@@ -97,6 +100,18 @@ impl WebChatChannel {
             _ => "assistant",
         };
 
+        serde_json::json!({
+            "type": "chat_message",
+            "session_id": channel_id,
+            "message": {
+                "id": message.id.to_string(),
+                "role": role,
+                "content": message.content,
+                "timestamp": message.timestamp.to_rfc3339(),
+                "attachments": [],
+                "metadata": {},
+                "token_usage": null
+            }
         })
     }
 }
@@ -126,6 +141,17 @@ impl Channel for WebChatChannel {
         self.connected.store(false, Ordering::Relaxed);
         Ok(())
     }
+
+    async fn send(&self, channel_id: &str, message: &Message) -> Result<()> {
+        let ws = self.ws_manager.read().await;
+        if let Some(ref manager) = *ws {
+            let payload = self.build_payload(channel_id, message);
+            manager
+                .broadcast_to_channel("webchat", payload)
+                .await
+                .map_err(|e| AgentError::platform(format!("WebSocket broadcast failed: {}", e)))?;
+            debug!("WebChatChannel: reply broadcasted to channel {}", channel_id);
+            Ok(())
         } else {
             warn!("WebChatChannel: WebSocket manager not set, cannot send reply");
             Err(AgentError::platform(
