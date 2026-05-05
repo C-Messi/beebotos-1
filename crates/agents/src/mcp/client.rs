@@ -10,7 +10,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 use super::transport::{HttpTransport, HttpTransportConfig, StdioTransport, StdioTransportConfig, TransportBridge};
-use super::types::*;
+use super::types::{Tool, *};
 use super::MCPError;
 
 /// MCP Client configuration
@@ -43,6 +43,8 @@ pub struct MCPClient {
     request_tx: mpsc::UnboundedSender<JsonRpcRequest>,
     /// ARCHITECTURE FIX: Map of pending requests (request_id -> response channel)
     pending_requests: Arc<Mutex<HashMap<RequestId, tokio::sync::oneshot::Sender<JsonRpcResponse>>>>,
+    /// Cached tools from list_tools to avoid repeated RPC calls
+    tools_cache: Arc<RwLock<Option<Vec<Tool>>>>,
 }
 
 impl MCPClient {
@@ -126,6 +128,7 @@ impl MCPClient {
             server_capabilities: RwLock::new(None),
             request_tx,
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
+            tools_cache: Arc::new(RwLock::new(None)),
         };
 
         // ARCHITECTURE FIX: Start response handler task
@@ -211,18 +214,45 @@ impl MCPClient {
     }
 
     /// List available tools
+    ///
+    /// Results are cached after the first successful call to avoid repeated RPC round-trips.
     pub async fn list_tools(&self, cursor: Option<&str>) -> Result<ListToolsResult, MCPError> {
         self.ensure_initialized()?;
+
+        // Return cached tools if available and no cursor is requested
+        if cursor.is_none() {
+            let cache = self.tools_cache.read().await;
+            if let Some(ref tools) = *cache {
+                return Ok(ListToolsResult {
+                    tools: tools.clone(),
+                    next_cursor: None,
+                });
+            }
+        }
 
         let params = cursor.map(|c| serde_json::json!({ "cursor": c }));
         let response = self.request("tools/list", params).await?;
 
-        serde_json::from_value(
+        let result: ListToolsResult = serde_json::from_value(
             response
                 .result
                 .ok_or_else(|| MCPError::RequestFailed("No result".to_string()))?,
         )
-        .map_err(|e| MCPError::RequestFailed(e.to_string()))
+        .map_err(|e| MCPError::RequestFailed(e.to_string()))?;
+
+        // Cache the tools (only for non-paginated requests)
+        if cursor.is_none() {
+            let mut cache = self.tools_cache.write().await;
+            *cache = Some(result.tools.clone());
+        }
+
+        Ok(result)
+    }
+
+    /// Get cached tools without making an RPC call.
+    /// Returns `None` if tools have not been fetched yet.
+    pub async fn get_cached_tools(&self) -> Option<Vec<Tool>> {
+        self.tools_cache.read().await.clone()
     }
 
     /// Call a tool
@@ -402,9 +432,12 @@ impl MCPClient {
         }
 
         // Send request
-        self.request_tx
-            .send(request)
-            .map_err(|_| MCPError::ConnectionFailed("Channel closed".to_string()))?;
+        if let Err(_) = self.request_tx.send(request) {
+            // Clean up pending request on send failure to prevent memory leak
+            let mut pending = self.pending_requests.lock().await;
+            pending.remove(&request_id);
+            return Err(MCPError::ConnectionFailed("Channel closed".to_string()));
+        }
 
         // Wait for matching response with timeout
         match tokio::time::timeout(

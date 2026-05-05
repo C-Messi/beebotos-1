@@ -238,16 +238,6 @@ pub struct WebSocketManager {
     #[allow(dead_code)]
     global_tx: broadcast::Sender<WsMessage>,
 }
-
-impl WebSocketManager {
-    /// Create new WebSocket manager
-    pub fn new(config: WebSocketConfig) -> Self {
-        let (global_tx, _) = broadcast::channel(1024);
-
-        let manager = Self {
-            config,
-            connections: Arc::new(RwLock::new(HashMap::new())),
-            states: Arc::new(RwLock::new(HashMap::new())),
             broadcast_channels: Arc::new(RwLock::new(HashMap::new())),
             global_tx,
         };
@@ -317,16 +307,6 @@ impl WebSocketManager {
             state.user_id = user_id;
             states.insert(connection_id.clone(), state);
             // Note: connection_count is already incremented atomically in handle_upgrade
-        }
-
-        // Send connection info
-        let connect_msg = WsMessage::Connected {
-            connection_id: connection_id.clone(),
-        };
-        if let Ok(json) = serde_json::to_string(&connect_msg) {
-            let _ = self
-                .send_to_connection(&connection_id, InternalMessage::Text(json))
-                .await;
         }
 
         // Split socket into sender and receiver
@@ -665,11 +645,12 @@ impl WebSocketManager {
     }
 
     /// Broadcast message to all connections in channel
+    /// Returns the number of connections the message was delivered to.
     pub async fn broadcast_to_channel(
         &self,
         channel: &str,
         payload: serde_json::Value,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         // Send the raw payload directly so clients receive the expected format
         let json = serde_json::to_string(&payload)
             .map_err(|e| GatewayError::internal(format!("Serialization error: {}", e)))?;
@@ -677,17 +658,20 @@ impl WebSocketManager {
         let states = self.states.read().await;
         let connections = self.connections.read().await;
 
+        let mut delivered = 0usize;
         for (id, state) in states.iter() {
             if state.channels.iter().any(|c| c == channel) {
                 if let Some(tx) = connections.get(id) {
                     if tx.send(InternalMessage::Text(json.clone())).is_err() {
                         warn!(connection_id = %id, "Failed to send broadcast to connection");
+                    } else {
+                        delivered += 1;
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok(delivered)
     }
 
     /// Broadcast to all connected clients

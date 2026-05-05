@@ -175,15 +175,43 @@ pub fn WebchatPage() -> impl IntoView {
                 client.set_auth_token(auth_state_refresh.get_token());
                 let service = create_webchat_service(client);
                 if let Some(session_id) = chat_state_refresh.current_session_id.get() {
+                    // 1. 先刷新全部消息
                     match service.get_messages(&session_id).await {
                         Ok(msgs) => {
                             chat_state_refresh.current_messages.set(msgs.clone());
                             chat_state_refresh.message_cache.update(|cache| {
-                                cache.insert(session_id, msgs);
+                                cache.insert(session_id.clone(), msgs);
                             });
                         }
                         Err(e) => {
                             let _ = web_sys::console::warn_1(&format!("[webchat] refresh messages failed: {}", e).into());
+                        }
+                    }
+
+                    // 2. 拉取 WebSocket 断开期间未投递的助手消息并补全
+                    match service.get_undelivered_messages(&session_id).await {
+                        Ok(undelivered) => {
+                            if !undelivered.is_empty() {
+                                let _ = web_sys::console::log_1(&format!("[webchat] recovering {} undelivered messages", undelivered.len()).into());
+                                chat_state_refresh.current_messages.update(|msgs| {
+                                    let existing_ids: std::collections::HashSet<String> = msgs.iter().map(|m| m.id.clone()).collect();
+                                    for msg in undelivered {
+                                        if !existing_ids.contains(&msg.id) {
+                                            msgs.push(msg.clone());
+                                            // 3. 标记为已投递，避免下次重复拉取
+                                            let msg_id = msg.id.clone();
+                                            let svc = create_webchat_service(create_client());
+                                            wasm_bindgen_futures::spawn_local(async move {
+                                                let _ = svc.ack_message(&msg_id).await;
+                                            });
+                                        }
+                                    }
+                                });
+                                chat_state_refresh.is_sending.set(false);
+                            }
+                        }
+                        Err(e) => {
+                            let _ = web_sys::console::warn_1(&format!("[webchat] get undelivered messages failed: {}", e).into());
                         }
                     }
                 }

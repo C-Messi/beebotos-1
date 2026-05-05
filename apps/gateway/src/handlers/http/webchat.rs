@@ -451,3 +451,42 @@ pub async fn send_message_streaming(
         "session_id": id,
     })))
 }
+
+/// Get undelivered assistant messages for a session (WebSocket fallback)
+pub async fn get_undelivered_messages(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<MessageResponse>>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+
+    let messages = state
+        .webchat_service
+        .as_ref()
+        .ok_or_else(|| GatewayError::internal("Webchat service not initialized"))?
+        .get_undelivered_messages(&id, &user.user_id)
+        .await?;
+
+    Ok(Json(messages.into_iter().map(MessageResponse::from).collect()))
+}
+
+/// Acknowledge (mark as delivered) a chat message via WebSocket
+pub async fn ack_message(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+
+    state
+        .webchat_service
+        .as_ref()
+        .ok_or_else(|| GatewayError::internal("Webchat service not initialized"))?
+        .mark_ws_delivered(&id)
+        .await?;
+
+    Ok(Json(json!({
+        "success": true,
+        "message_id": id,
+    })))
+}

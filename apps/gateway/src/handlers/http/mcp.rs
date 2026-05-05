@@ -79,13 +79,17 @@ pub async fn list_servers(
 ) -> Result<Json<Vec<McpServerInfo>>, GatewayError> {
     let servers = if let Some(ref manager) = state.mcp_manager {
         let client_names = manager.list_clients().await;
-        client_names
-            .into_iter()
-            .map(|name| McpServerInfo {
-                name,
-                connected: true,
-            })
-            .collect()
+        let mut servers = Vec::new();
+        for name in client_names {
+            // Health check: try to ping the client
+            let connected = if let Some(client) = manager.get_client(&name).await {
+                client.ping().await.is_ok()
+            } else {
+                false
+            };
+            servers.push(McpServerInfo { name, connected });
+        }
+        servers
     } else {
         vec![]
     };

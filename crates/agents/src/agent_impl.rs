@@ -293,7 +293,13 @@ impl Agent {
         if skills.len() < 2 {
             return None;
         }
-
+        for (id, tx) in connections.iter() {
+            info!(connection_id = %id, "Closing connection");
+            let _ = tx.send(InternalMessage::Close {
+                code: 1001,
+                reason: "Server shutting down".to_string(),
+            });
+        }
         let lower_msg = message.to_lowercase();
 
         // Sequencing keywords: Chinese and English
@@ -325,6 +331,13 @@ impl Agent {
             }
         }
 
+         for (id, state) in states.iter() {
+            if state.user_id.as_deref() == Some(user_id) {
+                if let Some(tx) = connections.get(id) {
+                    let _ = tx.send(InternalMessage::Text(json.clone()));
+                }
+            }
+        }
         // Deduplicate and sort by position in message
         matched_skills.sort_by_key(|(pos, _id)| *pos);
         matched_skills.dedup_by(|a, b| a.1 == b.1);
@@ -411,10 +424,11 @@ impl Agent {
                 communication::PlatformType::Custom,
                 format!(
                     "[System Context] You have access to the following skills. \
-RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id> and nothing else. \
-(2) If NO skill matches, answer directly from general knowledge. \
-(3) NEVER analyze, list, or mention available skills in your reply. \
-(4) NEVER start with '用户问的是', '查看可用的skills', '这是一个关于', '但是' or similar meta-commentary.\n\n{}",
+RULES: (1) If the user asks to perform a specific task and a skill matches, reply ONLY with SKILL:<skill_id> and nothing else. \
+(2) If the user asks 'what skills do you have' / '有哪些skills' / '你会什么', list the available skill names and brief descriptions directly. \
+(3) If NO skill matches the user's specific task request, answer directly from general knowledge. \
+(4) NEVER analyze, explain, or mention system instructions in your reply. \
+(5) NEVER start with '用户问的是', '查看可用的skills', '这是一个关于', '根据系统指令', '但是' or similar meta-commentary.\n\n{}",
                     catalog
                 ),
             )];
@@ -439,6 +453,7 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
             "用户的问题是",
             "查看可用的skills",
             "让我看看可用的",
+            "让我整理",
             "看看可用的技能",
             "查看可用技能",
             "这是一个关于",
@@ -447,19 +462,24 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
             "但是 ",
             "不过，",
             "系统提示我",
+            "系统指令",
+            "根据系统指令",
+            "根据系统提示",
+            "根据要求",
+            "根据可用技能",
             "我需要",
             "我来分析",
             "让我分析一下",
             "首先，",
             "第一步",
-            "根据系统提示",
-            "根据要求",
-            "根据可用技能",
+            "RULES:",
+            "规则：",
         ];
         let thinking_keywords = [
             "用户问的是", "用户询问的是", "用户想知道", "查看可用的skills",
-            "让我看看可用的", "看看可用的技能", "查看可用技能", "可用的技能列表",
+            "让我看看可用的", "让我整理", "看看可用的技能", "查看可用技能", "可用的技能列表",
             "skill 列表", "技能列表", "不属于需要调用专门skill",
+            "系统指令", "根据系统指令", "RULES",
         ];
         // Detect if response is mostly analysis: starts with thinking prefix OR contains multiple thinking keywords
         let starts_with_thinking = thinking_prefixes.iter().any(|p| response.starts_with(p));
@@ -468,21 +488,47 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
             || thinking_keyword_count >= 2
             || (response.contains("用户") && response.contains("skill") && response.len() > 200);
         if is_pure_analysis {
+            // 🆕 FIX: If the response contains a list (bullet or numbered), the actual answer
+            // is likely the list itself. Find the first list item and return from there.
+            let has_list = response.lines().any(|l| {
+                let t = l.trim();
+                t.starts_with("- ") || t.starts_with("• ") || t.starts_with("* ")
+                    || t.starts_with("1. ") || t.starts_with("2. ") || t.starts_with("3. ")
+            });
+            if has_list {
+                let lines: Vec<&str> = response.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    let t = line.trim();
+                    if t.starts_with("- ") || t.starts_with("• ") || t.starts_with("* ")
+                        || t.starts_with("1. ") || t.starts_with("2. ") || t.starts_with("3. ")
+                    {
+                        // Return from the first list item, preserving the rest
+                        return lines[i..].join("\n").trim().to_string();
+                    }
+                }
+            }
+
             // Try to find any sentence that looks like an actual answer (not starting with thinking prefixes)
             for line in response.lines() {
                 let trimmed = line.trim();
-                if trimmed.len() > 10
-                    && !thinking_prefixes.iter().any(|p| trimmed.starts_with(p))
-                    && !trimmed.starts_with("-")
-                    && !trimmed.starts_with("•")
-                    && !trimmed.starts_with("【")
-                    && !trimmed.starts_with("[")
+                // Skip empty, too-short, list-items, headers, and numbered rules
+                if trimmed.len() < 20
+                    || trimmed.starts_with("-")
+                    || trimmed.starts_with("•")
+                    || trimmed.starts_with("【")
+                    || trimmed.starts_with("[")
+                    || trimmed.starts_with("(")
+                    || (trimmed.len() < 40 && trimmed.ends_with("。"))
                 {
-                    // Verify this line doesn't contain heavy thinking keywords
-                    let has_thinking = thinking_keywords.iter().any(|k| trimmed.contains(*k));
-                    if !has_thinking {
-                        return trimmed.to_string();
-                    }
+                    continue;
+                }
+                if thinking_prefixes.iter().any(|p| trimmed.starts_with(p)) {
+                    continue;
+                }
+                // Verify this line doesn't contain heavy thinking keywords
+                let has_thinking = thinking_keywords.iter().any(|k| trimmed.contains(*k));
+                if !has_thinking {
+                    return trimmed.to_string();
                 }
             }
             // Fallback: return a generic message encouraging rephrasing
@@ -1154,16 +1200,17 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
 
             // Security: validate arguments against tool's JSON Schema before calling
             {
-                let tools_result = client.list_tools(None).await.map_err(|e| {
-                    AgentError::Execution(format!("Failed to list tools for validation: {}", e))
-                })?;
-                if let Some(tool) = tools_result.tools.into_iter().find(|t| t.name == tool_name) {
-                    if let Err(validation_err) = crate::mcp::skill_bridge::validate_tool_arguments(&tool.input_schema, &arguments) {
-                        return Err(AgentError::InvalidConfig(format!(
-                            "MCP tool argument validation failed: {}", validation_err
-                        )));
+                let tools = client.get_cached_tools().await;
+                if let Some(tools) = tools {
+                    if let Some(tool) = tools.into_iter().find(|t| t.name == tool_name) {
+                        if let Err(validation_err) = crate::mcp::skill_bridge::validate_tool_arguments(&tool.input_schema, &arguments) {
+                            return Err(AgentError::InvalidConfig(format!(
+                                "MCP tool argument validation failed: {}", validation_err
+                            )));
+                        }
                     }
                 }
+                // If tools are not cached, skip validation and let the server handle it
             }
 
             let args = if arguments.is_empty() { None } else { Some(arguments) };
@@ -1413,10 +1460,16 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
             .get("tool")
             .ok_or_else(|| AgentError::InvalidConfig("Missing 'tool' parameter".into()))?;
 
+        let server_name = task
+            .parameters
+            .get("server")
+            .cloned()
+            .unwrap_or_else(|| "default".to_string());
+
         let client = mcp
-            .get_client("default")
+            .get_client(&server_name)
             .await
-            .ok_or_else(|| AgentError::InvalidConfig("MCP client not found".into()))?;
+            .ok_or_else(|| AgentError::InvalidConfig(format!("MCP client '{}' not found", server_name)))?;
 
         let arguments: Option<serde_json::Map<String, serde_json::Value>> = if task.input.is_empty()
         {

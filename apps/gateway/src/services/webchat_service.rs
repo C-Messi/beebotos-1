@@ -23,19 +23,6 @@ pub struct ChatSession {
     pub updated_at: DateTime<Utc>,
 }
 
-/// SQLite-compatible row for ChatSession
-#[derive(sqlx::FromRow)]
-struct ChatSessionRow {
-    id: String,
-    user_id: String,
-    channel: String,
-    title: String,
-    is_pinned: i32,
-    is_archived: i32,
-    created_at: String,
-    updated_at: String,
-}
-
 impl TryFrom<ChatSessionRow> for ChatSession {
     type Error = String;
 
@@ -123,25 +110,10 @@ impl WebchatService {
             VALUES (?1, ?2, ?3, ?4, ?4)
             "#,
         )
-        .bind(user_id)
-        .bind(channel)
-        .bind(title)
-        .bind(&now)
-        .execute(&self.db)
-        .await
-        .map_err(|e| {
-            error!("Failed to create chat session: {}", e);
-            AppError::database(e)
-        })?;
 
         let row: ChatSessionRow = sqlx::query_as(
             "SELECT * FROM chat_sessions WHERE user_id = ?1 AND created_at = ?2"
         )
-        .bind(user_id)
-        .bind(&now)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| AppError::database(e))?;
 
         let session: ChatSession = row.try_into()
             .map_err(|e: String| AppError::Internal(format!("Failed to parse session: {}", e)))?;
@@ -159,14 +131,6 @@ impl WebchatService {
         let row: ChatSessionRow = sqlx::query_as(
             "SELECT * FROM chat_sessions WHERE id = ?1 AND user_id = ?2"
         )
-        .bind(session_id)
-        .bind(user_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::RowNotFound => AppError::not_found("Session", session_id),
-            _ => AppError::database(e),
-        })?;
 
         row.try_into()
             .map_err(|e: String| AppError::Internal(format!("Failed to parse session: {}", e)))
@@ -203,11 +167,6 @@ impl WebchatService {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM chat_sessions WHERE id = ?1 AND user_id = ?2"
         )
-        .bind(session_id)
-        .bind(user_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| AppError::database(e))?;
 
         if count == 0 {
             return Err(AppError::not_found("Session", session_id));
@@ -389,6 +348,62 @@ impl WebchatService {
         .await
         .map_err(|e| AppError::database(e))?;
         Ok(count > 0)
+    }
+
+    /// Mark a message as successfully delivered via WebSocket
+    pub async fn mark_ws_delivered(&self, message_id: &str) -> Result<(), AppError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE chat_messages SET ws_delivered_at = ?1 WHERE id = ?2"
+        )
+        .bind(&now)
+        .bind(message_id)
+        .execute(&self.db)
+        .await
+        .map_err(|e| {
+            error!("Failed to mark message {} as ws_delivered: {}", message_id, e);
+            AppError::database(e)
+        })?;
+        Ok(())
+    }
+
+    /// Get assistant messages that have not been delivered via WebSocket
+    pub async fn get_undelivered_messages(
+        &self,
+        session_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<ChatMessage>, AppError> {
+        // Verify ownership
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM chat_sessions WHERE id = ?1 AND user_id = ?2"
+        )
+        .bind(session_id)
+        .bind(user_id)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| AppError::database(e))?;
+
+        if count == 0 {
+            return Err(AppError::not_found("Session", session_id));
+        }
+
+        let rows: Vec<ChatMessageRow> = sqlx::query_as(
+            r#"
+            SELECT * FROM chat_messages
+            WHERE session_id = ?1 AND role = 'assistant' AND ws_delivered_at IS NULL
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(session_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| AppError::database(e))?;
+
+        let messages: Result<Vec<_>, _> = rows.into_iter()
+            .map(|r| r.try_into())
+            .collect();
+
+        messages.map_err(|e: String| AppError::Internal(format!("Failed to parse messages: {}", e)))
     }
 
     /// Get or create a session for external channels (personal_wechat, lark, etc.)

@@ -9,6 +9,7 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -26,8 +27,6 @@ pub struct HttpTransportConfig {
     /// Optional Bearer token for authentication
     pub auth_token: Option<SecretString>,
     /// Additional HTTP headers
-    pub headers: HashMap<String, String>,
-    /// Request timeout in milliseconds
     pub timeout_ms: u64,
     /// Whether to use SSE for receiving responses
     pub use_sse: bool,
@@ -37,7 +36,6 @@ impl std::fmt::Debug for HttpTransportConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpTransportConfig")
             .field("base_url", &self.base_url)
-            .field("auth_token", &self.auth_token.as_ref().map(|_| "[REDACTED]"))
             .field("headers", &self.headers)
             .field("timeout_ms", &self.timeout_ms)
             .field("use_sse", &self.use_sse)
@@ -51,7 +49,7 @@ impl Default for HttpTransportConfig {
             base_url: String::new(),
             auth_token: None,
             headers: HashMap::new(),
-            timeout_ms: 30000,
+            timeout_ms: 3,
             use_sse: false,
         }
     }
@@ -64,6 +62,8 @@ pub struct HttpTransport {
     connected: Arc<std::sync::atomic::AtomicBool>,
     // For SSE mode: a background task reads the SSE stream and pushes responses
     sse_response_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<JsonRpcResponse>>>>,
+    // For non-SSE mode: responses from HTTP POST are queued here
+    response_queue: Arc<Mutex<VecDeque<JsonRpcResponse>>>,
 }
 
 impl HttpTransport {
@@ -79,6 +79,7 @@ impl HttpTransport {
             client,
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sse_response_tx: Arc::new(Mutex::new(None)),
+            response_queue: Arc::new(Mutex::new(VecDeque::new())),
         })
     }
 
@@ -116,7 +117,7 @@ impl HttpTransport {
     }
 
     /// Start SSE listener (for SSE mode).
-    pub async fn start_sse_listener(
+    pub async fn start_sse(
         &self,
         response_tx: tokio::sync::mpsc::UnboundedSender<JsonRpcResponse>,
     ) -> Result<(), MCPError> {
@@ -133,6 +134,9 @@ impl HttpTransport {
 
         tokio::spawn(async move {
             let sse_url = format!("{}/events", base_url.trim_end_matches('/'));
+            // Buffer for incomplete SSE events across chunk boundaries
+            let mut line_buffer = String::new();
+
             loop {
                 if !connected.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
@@ -149,8 +153,20 @@ impl HttpTransport {
                         while let Some(chunk_result) = stream.next().await {
                             match chunk_result {
                                 Ok(chunk) => {
-                                    if let Ok(text) = String::from_utf8(chunk.to_vec()) {
-                                        Self::parse_sse_events(&text, &response_tx);
+                                    if let Ok(text) = std::str::from_utf8(&chunk) {
+                                        line_buffer.push_str(text);
+                                        // Extract complete lines, keep remainder in buffer
+                                        let mut last_newline = 0;
+                                        for (i, ch) in line_buffer.char_indices() {
+                                            if ch == '\n' {
+                                                let line = &line_buffer[last_newline..i];
+                                                Self::parse_sse_line(line.trim_end_matches('\r'), &response_tx);
+                                                last_newline = i + ch.len_utf8();
+                                            }
+                                        }
+                                        if last_newline > 0 {
+                                            line_buffer.drain(..last_newline);
+                                        }
                                     }
                                 }
                                 Err(_) => break,
@@ -169,25 +185,22 @@ impl HttpTransport {
         Ok(())
     }
 
-    /// Parse SSE event text and extract JSON-RPC responses.
-    fn parse_sse_events(
-        text: &str,
+    /// Parse a single SSE line and extract JSON-RPC responses.
+    fn parse_sse_line(
+        line: &str,
         tx: &tokio::sync::mpsc::UnboundedSender<JsonRpcResponse>,
     ) {
-        for line in text.lines() {
-            let line = line.trim();
-            if line.starts_with("data:") {
-                let data = line[5..].trim();
-                if data.is_empty() {
-                    continue;
+        if line.starts_with("data:") {
+            let data = line[5..].trim();
+            if data.is_empty() {
+                return;
+            }
+            match serde_json::from_str::<JsonRpcResponse>(data) {
+                Ok(response) => {
+                    let _ = tx.send(response);
                 }
-                match serde_json::from_str::<JsonRpcResponse>(data) {
-                    Ok(response) => {
-                        let _ = tx.send(response);
-                    }
-                    Err(e) => {
-                        tracing::debug!("MCP SSE non-JSON data: {} (err: {})", data, e);
-                    }
+                Err(e) => {
+                    tracing::debug!("MCP SSE non-JSON data: {} (err: {})", data, e);
                 }
             }
         }
@@ -202,7 +215,27 @@ impl Transport for HttpTransport {
                 "HTTP transport not connected".to_string(),
             ));
         }
+                for id in stale_connections {
+                    warn!(connection_id = %id, "Removing stale connection");
 
+                    // Try to close gracefully
+                    let connections_guard = connections.read().await;
+                    if let Some(tx) = connections_guard.get(&id) {
+                        let _ = tx.send(InternalMessage::Close {
+                            code: 1001,
+                            reason: "Connection timeout".to_string(),
+                        });
+                    }
+                    drop(connections_guard);
+
+                    // Remove from state
+                    let mut connections_guard = connections.write().await;
+                    connections_guard.remove(&id);
+                    drop(connections_guard);
+
+                    let mut states_guard = states.write().await;
+                    states_guard.remove(&id);
+                }
         let url = format!("{}/rpc", self.config.base_url.trim_end_matches('/'));
         let headers = self.build_headers();
 
@@ -231,7 +264,7 @@ impl Transport for HttpTransport {
             )));
         }
 
-        // If not using SSE, read the response directly
+        // If not using SSE, read the response directly and queue it
         if !self.config.use_sse {
             let body = response
                 .text()
@@ -241,33 +274,46 @@ impl Transport for HttpTransport {
             let rpc_response: JsonRpcResponse = serde_json::from_str(&body)
                 .map_err(|e| MCPError::SerializationFailed(format!("Invalid JSON-RPC response: {}", e)))?;
 
-            // Forward to the response channel
-            if let Some(ref tx) = *self.sse_response_tx.lock().await {
-                let _ = tx.send(rpc_response);
-            }
+            // Queue the response for receive() to pick up
+            let mut queue = self.response_queue.lock().await;
+            queue.push_back(rpc_response);
         }
 
         Ok(())
     }
 
     async fn receive(&self) -> Result<JsonRpcResponse, MCPError> {
-        // In non-SSE mode, receive() is not used (response comes back via HTTP POST response)
-        // In SSE mode, this would read from a channel populated by the SSE listener
-        // For simplicity, we return an error here and expect non-SSE mode
         if self.config.use_sse {
             return Err(MCPError::RequestFailed(
                 "SSE mode: use start_sse_listener() instead of receive()".to_string(),
             ));
         }
-        Err(MCPError::ConnectionFailed(
-            "HTTP transport does not support blocking receive in non-SSE mode".to_string(),
-        ))
+
+        // Non-SSE mode: wait for a response to appear in the queue
+        let deadline = tokio::time::Instant::now()
+            + tokio::time::Duration::from_millis(self.config.timeout_ms);
+
+        loop {
+            {
+                let mut queue = self.response_queue.lock().await;
+                if let Some(response) = queue.pop_front() {
+                    return Ok(response);
+                }
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MCPError::Timeout);
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
     }
 
     async fn close(&self) -> Result<(), MCPError> {
         self.connected
             .store(false, std::sync::atomic::Ordering::SeqCst);
         *self.sse_response_tx.lock().await = None;
+        self.response_queue.lock().await.clear();
         tracing::info!("MCP HTTP transport closed");
         Ok(())
     }

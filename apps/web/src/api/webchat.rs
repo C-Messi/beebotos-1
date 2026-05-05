@@ -102,6 +102,21 @@ impl WebchatApiService {
         Ok(responses.into_iter().map(Into::into).collect())
     }
 
+    /// 获取未通过 WebSocket 投递的助手消息（断线重连后补发）
+    pub async fn get_undelivered_messages(&self, session_id: &str) -> Result<Vec<ChatMessage>, ApiError> {
+        let responses: Vec<BackendMessageResponse> = self.client
+            .get(&format!("/webchat/sessions/{}/undelivered", js_sys::encode_uri_component(session_id)))
+            .await?;
+        Ok(responses.into_iter().map(Into::into).collect())
+    }
+
+    /// 标记消息已通过 WebSocket 投递
+    pub async fn ack_message(&self, message_id: &str) -> Result<serde_json::Value, ApiError> {
+        self.client
+            .post(&format!("/webchat/messages/{}/ack", js_sys::encode_uri_component(message_id)), &serde_json::json!({}))
+            .await
+    }
+
     /// 发送消息到 WebChat Channel
     pub async fn send_message(
         &self,
