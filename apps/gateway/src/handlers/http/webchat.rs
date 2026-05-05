@@ -451,3 +451,50 @@ pub async fn send_message_streaming(
         "session_id": id,
     })))
 }
+
+/// Get undelivered assistant messages (for WebSocket reconnect recovery)
+pub async fn get_undelivered_messages(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+
+    let svc = state
+        .webchat_service
+        .as_ref()
+        .ok_or_else(|| GatewayError::internal("Webchat service not initialized"))?;
+
+    // Get messages from the last 5 minutes as undelivered candidates
+    let since = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let messages = svc.get_undelivered_messages(&id, since).await
+        .map_err(|e| GatewayError::internal(format!("Failed to get undelivered messages: {}", e)))?;
+
+    Ok(Json(json!({
+        "success": true,
+        "messages": messages,
+        "count": messages.len(),
+    })))
+}
+
+/// Acknowledge a message as delivered via WebSocket
+pub async fn ack_message(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+
+    let svc = state
+        .webchat_service
+        .as_ref()
+        .ok_or_else(|| GatewayError::internal("Webchat service not initialized"))?;
+
+    svc.mark_ws_delivered(&id).await
+        .map_err(|e| GatewayError::internal(format!("Failed to ack message: {}", e)))?;
+
+    Ok(Json(json!({
+        "success": true,
+        "message_id": id,
+    })))
+}

@@ -194,6 +194,8 @@ pub struct AppState {
     pub agent_event_bus: Option<beebotos_agents::events::AgentEventBus>,
     /// MCP manager for external tool/resource/prompt access
     pub mcp_manager: Option<Arc<beebotos_agents::mcp::MCPManager>>,
+    /// Cron job service for scheduled task management
+    pub cron_job_service: Option<Arc<crate::services::CronJobService>>,
 }
 
 impl AppState {
@@ -299,6 +301,13 @@ impl AppState {
         let webchat_service = {
             let svc = crate::services::webchat_service::WebchatService::new(db.clone());
             info!("✅ WebchatService initialized");
+            Some(Arc::new(svc))
+        };
+
+        // Initialize CronJobService
+        let cron_job_service = {
+            let svc = crate::services::CronJobService::new(db.clone());
+            info!("✅ CronJobService initialized");
             Some(Arc::new(svc))
         };
 
@@ -744,6 +753,7 @@ impl AppState {
             config_manager,
             agent_event_bus: Some(beebotos_agents::events::AgentEventBus::new()),
             mcp_manager,
+            cron_job_service,
         })
     }
 }
@@ -1024,6 +1034,15 @@ async fn main() -> anyhow::Result<()> {
         state_mut.workflow_cron_scheduler = Some(Arc::new(cron_scheduler));
         state_mut.workflow_cron_job_uuids = Arc::new(tokio::sync::RwLock::new(boot_cron_uuids));
     }
+
+    // 🟢 Register all enabled standalone cron jobs with the scheduler
+    if let Err(e) = handlers::http::cron_jobs::register_all_enabled_jobs(&app_state).await {
+        warn!("⚠️ Failed to register standalone cron jobs on startup: {}", e);
+    }
+
+    // 🟢 Start background checker for one-shot (at) cron jobs
+    handlers::http::cron_jobs::start_at_job_checker(app_state.clone(), 30).await;
+    info!("✅ Cron at-job checker started (30s interval)");
 
     // 🟢 P2 FIX: Start TriggerEngine event listener for event-based workflow triggers
     if let (Some(ref trigger_engine), Some(ref event_bus)) = (
@@ -1718,6 +1737,15 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         .route("/api/v1/workflow-instances/:id", delete(handlers::http::workflows::delete_workflow_instance))
         // Workflow webhook triggers (catch-all for registered webhook paths)
         .route("/api/v1/workflows/webhook/*path", post(handlers::http::workflows::workflow_webhook_trigger))
+        // Cron Jobs API
+        .route("/api/v1/cron/jobs", get(handlers::http::cron_jobs::list_jobs))
+        .route("/api/v1/cron/jobs", post(handlers::http::cron_jobs::create_job))
+        .route("/api/v1/cron/jobs/:id", get(handlers::http::cron_jobs::get_job))
+        .route("/api/v1/cron/jobs/:id", put(handlers::http::cron_jobs::update_job))
+        .route("/api/v1/cron/jobs/:id", delete(handlers::http::cron_jobs::delete_job))
+        .route("/api/v1/cron/jobs/:id/toggle", post(handlers::http::cron_jobs::toggle_job))
+        .route("/api/v1/cron/jobs/:id/run", post(handlers::http::cron_jobs::run_job))
+        .route("/api/v1/cron/jobs/:id/runs", get(handlers::http::cron_jobs::list_runs))
         // Workflow dashboard APIs
         .route("/api/v1/workflows/dashboard/stats", get(handlers::http::workflows::dashboard_stats))
         .route("/api/v1/workflows/dashboard/recent-instances", get(handlers::http::workflows::recent_instances))

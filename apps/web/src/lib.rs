@@ -80,6 +80,7 @@ fn PageTitle() -> impl IntoView {
             p if p.starts_with("/llm-config") => i18n.t("nav-llm-config"),
             p if p.starts_with("/browser") => i18n.t("nav-browser"),
             p if p.starts_with("/workflows") => i18n.t("nav-workflows"),
+            p if p.starts_with("/cron-jobs") => i18n.t("nav-cron-jobs"),
             p if p.starts_with("/chat") => i18n.t("nav-chat"),
             _ => i18n.t("nav-home"),
         }
@@ -316,6 +317,16 @@ pub fn App() -> impl IntoView {
                                     view=move || view! {
                                         <AuthGuard>
                                             <WorkflowDetailPage />
+                                        </AuthGuard>
+                                    }
+                                />
+
+                                // Cron Jobs
+                                <Route
+                                    path=StaticSegment("cron-jobs")
+                                    view=move || view! {
+                                        <AuthGuard>
+                                            <pages::CronJobsPage />
                                         </AuthGuard>
                                     }
                                 />

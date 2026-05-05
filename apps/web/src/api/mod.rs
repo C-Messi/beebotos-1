@@ -8,6 +8,7 @@
 
 pub mod browser;
 pub mod client;
+pub mod cron_jobs;
 pub mod gateway;
 pub mod services;
 pub mod webchat;

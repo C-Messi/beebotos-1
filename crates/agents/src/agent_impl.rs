@@ -412,9 +412,10 @@ impl Agent {
                 format!(
                     "[System Context] You have access to the following skills. \
 RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id> and nothing else. \
-(2) If NO skill matches, answer directly from general knowledge. \
-(3) NEVER analyze, list, or mention available skills in your reply. \
-(4) NEVER start with '用户问的是', '查看可用的skills', '这是一个关于', '但是' or similar meta-commentary.\n\n{}",
+(2) If the user asks what skills are available, DIRECTLY list the available skill names and brief descriptions. \
+(3) If NO skill matches, answer directly from general knowledge. \
+(4) NEVER analyze, list, or mention available skills in your reply unless asked. \
+(5) NEVER start with '用户问的是', '查看可用的skills', '根据系统指令', 'RULES:', '规则：', '让我整理' or similar meta-commentary.\n\n{}",
                     catalog
                 ),
             )];
@@ -447,19 +448,25 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
             "但是 ",
             "不过，",
             "系统提示我",
+            "系统指令",
+            "根据系统指令",
             "我需要",
             "我来分析",
             "让我分析一下",
+            "让我整理",
             "首先，",
             "第一步",
             "根据系统提示",
             "根据要求",
             "根据可用技能",
+            "RULES:",
+            "规则：",
         ];
         let thinking_keywords = [
             "用户问的是", "用户询问的是", "用户想知道", "查看可用的skills",
             "让我看看可用的", "看看可用的技能", "查看可用技能", "可用的技能列表",
             "skill 列表", "技能列表", "不属于需要调用专门skill",
+            "系统指令", "RULES",
         ];
         // Detect if response is mostly analysis: starts with thinking prefix OR contains multiple thinking keywords
         let starts_with_thinking = thinking_prefixes.iter().any(|p| response.starts_with(p));
@@ -468,10 +475,28 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
             || thinking_keyword_count >= 2
             || (response.contains("用户") && response.contains("skill") && response.len() > 200);
         if is_pure_analysis {
+            // Check if response contains a list - if so, keep everything from first list item
+            let lines: Vec<&str> = response.lines().collect();
+            let mut first_list_idx = None;
+            for (idx, line) in lines.iter().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("-") || trimmed.starts_with("•") ||
+                   (trimmed.len() > 2 && trimmed.as_bytes()[0].is_ascii_digit() && trimmed.as_bytes()[1] == b'.') {
+                    first_list_idx = Some(idx);
+                    break;
+                }
+            }
+            if let Some(start_idx) = first_list_idx {
+                let result = lines[start_idx..].join("\n");
+                if result.len() >= 20 {
+                    return result;
+                }
+            }
+
             // Try to find any sentence that looks like an actual answer (not starting with thinking prefixes)
             for line in response.lines() {
                 let trimmed = line.trim();
-                if trimmed.len() > 10
+                if trimmed.len() > 20
                     && !thinking_prefixes.iter().any(|p| trimmed.starts_with(p))
                     && !trimmed.starts_with("-")
                     && !trimmed.starts_with("•")

@@ -102,6 +102,12 @@ pub fn Sidebar() -> impl IntoView {
                             current_path=current_path
                         />
                         <NavItem
+                            href="/cron-jobs"
+                            icon="⏰"
+                            label=move || i18n_stored.get_value().t("nav-cron-jobs")
+                            current_path=current_path
+                        />
+                        <NavItem
                             href="/llm-settings"
                             icon="🧠"
                             label=move || i18n_stored.get_value().t("nav-llm-settings")

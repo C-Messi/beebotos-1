@@ -418,4 +418,42 @@ impl WebchatService {
         info!("Created new channel session {} for {} / {}", session.id, channel, user_id);
         Ok(session.id)
     }
+
+    /// Mark a message as successfully delivered via WebSocket
+    pub async fn mark_ws_delivered(&self, message_id: &str) -> Result<(), AppError> {
+        sqlx::query("UPDATE chat_messages SET ws_delivered_at = datetime('now') WHERE id = ?1")
+            .bind(message_id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| {
+                error!("Failed to mark message {} as ws_delivered: {}", message_id, e);
+                AppError::database(e)
+            })?;
+        Ok(())
+    }
+
+    /// Get assistant messages that have not been delivered via WebSocket
+    pub async fn get_undelivered_messages(
+        &self,
+        session_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<ChatMessage>, AppError> {
+        let rows: Vec<ChatMessageRow> = sqlx::query_as(
+            r#"
+            SELECT * FROM chat_messages
+            WHERE session_id = ?1 AND role = 'assistant' AND ws_delivered_at IS NULL AND created_at > ?2
+            ORDER BY created_at ASC
+            "#
+        )
+        .bind(session_id)
+        .bind(since.to_rfc3339())
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| AppError::database(e))?;
+
+        rows.into_iter()
+            .map(|r| r.try_into())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Internal(e))
+    }
 }

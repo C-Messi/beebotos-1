@@ -23,7 +23,9 @@ pub mod task_monitor;
 pub mod wallet_service;
 pub mod webchat_service;
 pub mod auth_service;
+pub mod cron_job_service;
 pub use auth_service::AuthService;
+pub use cron_job_service::CronJobService;
 
 // Re-export chain event types
 #[allow(unused_imports)]

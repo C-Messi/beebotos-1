@@ -90,6 +90,11 @@ impl AppError {
     pub fn validation(errors: Vec<ValidationError>) -> Self {
         Self::Validation(errors)
     }
+
+    /// Create a bad request error
+    pub fn bad_request(msg: impl Into<String>) -> Self {
+        Self::Internal(format!("Bad request: {}", msg.into()))
+    }
 }
 
 impl From<AppError> for GatewayError {

@@ -176,6 +176,11 @@ impl AppState {
         CompositionService::new(self.api_client())
     }
 
+    /// Get cron job service
+    pub fn cron_job_service(&self) -> crate::api::cron_jobs::CronJobApiService {
+        crate::api::cron_jobs::CronJobApiService::new(self.api_client())
+    }
+
     /// Set online status
     pub fn set_online(&self, online: bool) {
         self.is_online.set(online);

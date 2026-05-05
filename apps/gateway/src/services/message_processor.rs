@@ -166,8 +166,15 @@ impl MessageProcessor {
                         .add_message(&session.id, "assistant", &result_text, false, vec![])
                         .await
                         .ok();
-                    // Send reply
-                    self.send_reply(platform, channel_id, &message, &result_text).await?;
+                    // Persist and send reply
+                    let msg_id = if let Some(ref svc) = self.webchat_service {
+                        svc.save_message(&db_session_id, "assistant", &result_text, Some(serde_json::json!({"platform": platform.to_string(), "channel_id": channel_id})), None).await.ok()
+                    } else { None };
+                    if self.send_reply(platform, channel_id, &message, &result_text).await.is_ok() {
+                        if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
+                            let _ = svc.mark_ws_delivered(&id).await;
+                        }
+                    }
                     return Ok(());
                 }
                 Err(e) => {
@@ -190,7 +197,14 @@ impl MessageProcessor {
                         .add_message(&session.id, "assistant", &result_text, false, vec![])
                         .await
                         .ok();
-                    self.send_reply(platform, channel_id, &message, &result_text).await?;
+                    let msg_id = if let Some(ref svc) = self.webchat_service {
+                        svc.save_message(&db_session_id, "assistant", &result_text, Some(serde_json::json!({"platform": platform.to_string(), "channel_id": channel_id})), None).await.ok()
+                    } else { None };
+                    if self.send_reply(platform, channel_id, &message, &result_text).await.is_ok() {
+                        if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
+                            let _ = svc.mark_ws_delivered(&id).await;
+                        }
+                    }
                     return Ok(());
                 }
                 Err(e) => {
@@ -199,6 +213,11 @@ impl MessageProcessor {
                     return Ok(());
                 }
             }
+        }
+
+        // 🆕 FIX: 元问题快速路径（如"有哪些skills"），直接回答不走LLM
+        if self.try_answer_meta_question(platform, channel_id, &message, &content, &session.id, &db_session_id).await? {
+            return Ok(());
         }
 
         // 4. 添加用户消息到会话历史
@@ -262,13 +281,14 @@ impl MessageProcessor {
             })?;
 
         // 7.5 持久化 AI 回复
+        let mut saved_message_id: Option<String> = None;
         if let Some(ref svc) = self.webchat_service {
             let token_usage = serde_json::json!({
                 "model": "kimi-k2.5",
                 "prompt_tokens": history.len(),
                 "completion_tokens": llm_response.len(),
             });
-            let _ = svc.save_message(
+            if let Ok(id) = svc.save_message(
                 &db_session_id,
                 "assistant",
                 &llm_response,
@@ -277,11 +297,23 @@ impl MessageProcessor {
                     "channel_id": channel_id,
                 })),
                 Some(token_usage),
-            ).await;
+            ).await {
+                saved_message_id = Some(id);
+            }
         }
 
         // 8. 发送回复
-        self.send_reply(platform, channel_id, &message, &llm_response).await?;
+        match self.send_reply(platform, channel_id, &message, &llm_response).await {
+            Ok(()) => {
+                // WebSocket 投递成功，标记已投递
+                if let (Some(ref svc), Some(ref msg_id)) = (self.webchat_service.as_ref(), saved_message_id.as_ref()) {
+                    let _ = svc.mark_ws_delivered(msg_id).await;
+                }
+            }
+            Err(e) => {
+                warn!("Failed to send reply via WebSocket (will be available for polling): {}", e);
+            }
+        }
 
         // 9. Memory 回写
         if let Some(ref memory) = self.memory_system {
@@ -327,6 +359,82 @@ impl MessageProcessor {
         }
 
         Ok(())
+    }
+
+    /// 检测并直接回答元问题（如"有哪些skills"），避免走LLM产生不可靠回复
+    async fn try_answer_meta_question(
+        &self,
+        platform: PlatformType,
+        channel_id: &str,
+        original_message: &Message,
+        content: &str,
+        session_id: &str,
+        db_session_id: &str,
+    ) -> Result<bool, GatewayError> {
+        let query_lower = content.to_lowercase();
+        let is_skill_list_query = query_lower.contains("有哪些skill")
+            || query_lower.contains("有什么skill")
+            || query_lower.contains("skill列表")
+            || query_lower.contains("技能列表")
+            || query_lower.contains("你会什么")
+            || query_lower.contains("有什么技能")
+            || query_lower.contains("有哪些技能")
+            || query_lower.contains("本机有哪些")
+            || query_lower.contains("可用skill");
+
+        if !is_skill_list_query {
+            return Ok(false);
+        }
+
+        let mut reply = String::from("本机可用的技能：\n\n");
+        let mut has_skills = false;
+
+        if let Some(ref registry) = self.skill_registry {
+            let skills = registry.list_enabled().await;
+            if skills.is_empty() {
+                reply.push_str("暂无已注册的技能。");
+            } else {
+                for skill in skills {
+                    has_skills = true;
+                    let desc = skill.skill.manifest.description.chars().take(60).collect::<String>();
+                    reply.push_str(&format!("• {}（{}）\n  {}\n", skill.skill.name, skill.skill.id, desc));
+                }
+            }
+        } else {
+            reply.push_str("暂无已注册的技能。");
+        }
+
+        if !has_skills && reply.ends_with("本机可用的技能：\n\n") {
+            reply.push_str("暂无已注册的技能。");
+        }
+
+        // 添加用户消息到历史
+        self.session_manager
+            .add_message(session_id, "user", content, false, vec![])
+            .await
+            .ok();
+        self.session_manager
+            .add_message(session_id, "assistant", &reply, false, vec![])
+            .await
+            .ok();
+
+        // 持久化
+        let msg_id = if let Some(ref svc) = self.webchat_service {
+            svc.save_message(db_session_id, "assistant", &reply, Some(serde_json::json!({
+                "platform": platform.to_string(),
+                "channel_id": channel_id,
+                "meta_answer": true,
+            })), None).await.ok()
+        } else { None };
+
+        // 发送
+        if self.send_reply(platform, channel_id, original_message, &reply).await.is_ok() {
+            if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
+                let _ = svc.mark_ws_delivered(&id).await;
+            }
+        }
+
+        Ok(true)
     }
 
     /// 处理消息（通过 AgentRuntime）
@@ -399,6 +507,11 @@ impl MessageProcessor {
         // 3. 处理多模态内容（下载图片等）
         let (content, images) = self.process_multimodal(&message).await?;
 
+        // 🆕 FIX: 元问题快速路径（如"有哪些skills"），直接回答不走LLM
+        if self.try_answer_meta_question(platform, channel_id, &message, &content, &session.id, &db_session_id).await? {
+            return Ok(());
+        }
+
         // 🟢 P1 FIX: Check for /workflow command trigger (same as handle_message)
         if let Some(workflow_result) = self.try_execute_workflow_command(&content).await {
             match workflow_result {
@@ -411,7 +524,14 @@ impl MessageProcessor {
                         .add_message(&session.id, "assistant", &result_text, false, vec![])
                         .await
                         .ok();
-                    self.send_reply(platform, channel_id, &message, &result_text).await?;
+                    let msg_id = if let Some(ref svc) = self.webchat_service {
+                        svc.save_message(&db_session_id, "assistant", &result_text, Some(serde_json::json!({"platform": platform.to_string(), "channel_id": channel_id})), None).await.ok()
+                    } else { None };
+                    if self.send_reply(platform, channel_id, &message, &result_text).await.is_ok() {
+                        if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
+                            let _ = svc.mark_ws_delivered(&id).await;
+                        }
+                    }
                     return Ok(());
                 }
                 Err(e) => {
@@ -522,8 +642,15 @@ impl MessageProcessor {
                     message: format!("Failed to add assistant message: {}", e),
                     correlation_id: Uuid::new_v4().to_string(),
                 })?;
-            // 发送回复
-            self.send_reply(platform, channel_id, &message, &answer).await?;
+            // 持久化并发送回复
+            let msg_id = if let Some(ref svc) = self.webchat_service {
+                svc.save_message(&db_session_id, "assistant", &answer, Some(serde_json::json!({"platform": platform.to_string(), "channel_id": channel_id})), None).await.ok()
+            } else { None };
+            if self.send_reply(platform, channel_id, &message, &answer).await.is_ok() {
+                if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
+                    let _ = svc.mark_ws_delivered(&id).await;
+                }
+            }
             return Ok(());
         }
 
@@ -657,8 +784,9 @@ impl MessageProcessor {
                 .await;
 
             // 持久化 AI 回复
+            let mut saved_message_id: Option<String> = None;
             if let Some(ref svc) = processor.webchat_service {
-                let _ = svc.save_message(
+                if let Ok(id) = svc.save_message(
                     &db_session_id_bg,
                     "assistant",
                     &llm_response,
@@ -667,11 +795,22 @@ impl MessageProcessor {
                         "channel_id": channel_id_bg.clone(),
                     })),
                     None,
-                ).await;
+                ).await {
+                    saved_message_id = Some(id);
+                }
             }
 
             // 发送最终回复
-            let _ = processor.send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response).await;
+            match processor.send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response).await {
+                Ok(()) => {
+                    if let (Some(ref svc), Some(ref msg_id)) = (processor.webchat_service.as_ref(), saved_message_id.as_ref()) {
+                        let _ = svc.mark_ws_delivered(msg_id).await;
+                    }
+                }
+                Err(e) => {
+                    warn!("[BG] Failed to send reply via WebSocket (will be available for polling): {}", e);
+                }
+            }
 
             // Memory 回写
             if let Some(ref memory) = processor.memory_system {

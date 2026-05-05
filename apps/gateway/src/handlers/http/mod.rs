@@ -9,6 +9,7 @@ pub mod agents_v2;
 pub mod auth;
 pub mod browser;
 pub mod chain;
+pub mod cron_jobs;
 pub mod chain_v2;
 pub mod channels;
 pub mod compositions;
