@@ -62,6 +62,18 @@ pub struct SkillInfoResponse {
     pub tags: Vec<String>,
     pub downloads: u64,
     pub rating: f32,
+    /// Source of the skill: "local", "mcp", "hub"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Marketplace price (wei or token units)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<String>,
+    /// Royalty percentage (0-100)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub royalty_percent: Option<u8>,
+    /// On-chain NFT token ID (if registered)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nft_token_id: Option<String>,
 }
 
 /// Execute skill request
@@ -279,7 +291,7 @@ pub async fn install_skill(
 
 /// List installed skills or search from hub
 pub async fn list_skills(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(query): Query<ListSkillsQuery>,
 ) -> Result<Json<Vec<SkillInfoResponse>>, GatewayError> {
     let hub_type = query.hub
@@ -338,35 +350,64 @@ pub async fn list_skills(
                 tags: s.tags,
                 downloads: s.downloads,
                 rating: s.rating,
+                source: Some("hub".to_string()),
+                price: None,
+                royalty_percent: None,
+                nft_token_id: None,
             })
             .collect();
         
         return Ok(Json(responses));
     }
     
-    // Otherwise, list locally installed skills
-    let skills = list_installed_skills()
+    // Otherwise, list locally installed skills + MCP bridged skills
+    let mut skills = list_installed_skills()
         .await
         .map_err(|e| GatewayError::Internal {
             message: format!("Failed to list installed skills: {}", e),
             correlation_id: uuid::Uuid::new_v4().to_string(),
         })?;
-    
+
+    // Merge MCP skills from SkillRegistry
+    if let Some(ref registry) = state.skill_registry {
+        for registered in registry.list_all().await {
+            if registered.skill.id.starts_with("mcp:") {
+                skills.push(SkillInfoResponse {
+                    id: registered.skill.id.clone(),
+                    name: registered.skill.name.clone(),
+                    version: registered.skill.version.to_string(),
+                    description: registered.skill.manifest.description.clone(),
+                    author: registered.skill.manifest.author.clone(),
+                    license: registered.skill.manifest.license.clone(),
+                    installed: true,
+                    capabilities: registered.skill.manifest.capabilities.clone(),
+                    tags: registered.tags.clone(),
+                    downloads: registered.usage_count,
+                    rating: 0.0,
+                    source: Some("mcp".to_string()),
+                    price: Some("0".to_string()),
+                    royalty_percent: Some(0),
+                    nft_token_id: None,
+                });
+            }
+        }
+    }
+
     Ok(Json(skills))
 }
 
 /// Get skill details
 pub async fn get_skill(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<SkillInfoResponse>, GatewayError> {
-    let skill = get_skill_info(&id)
+    let skill = get_skill_info(&id, state.skill_registry.as_deref())
         .await
         .map_err(|_e| GatewayError::NotFound {
             resource: format!("Skill: {}", id),
             id: id.clone(),
         })?;
-    
+
     Ok(Json(skill))
 }
 
@@ -1073,6 +1114,10 @@ async fn list_installed_skills() -> Result<Vec<SkillInfoResponse>, Box<dyn std::
                             tags: yaml_string_array(&manifest["tags"]),
                             downloads: 0,
                             rating: 0.0,
+                            source: Some("local".to_string()),
+                            price: None,
+                            royalty_percent: None,
+                            nft_token_id: None,
                         });
                         continue;
                     }
@@ -1094,6 +1139,10 @@ async fn list_installed_skills() -> Result<Vec<SkillInfoResponse>, Box<dyn std::
                         tags: vec![],
                         downloads: 0,
                         rating: 0.0,
+                        source: Some("local".to_string()),
+                        price: None,
+                        royalty_percent: None,
+                        nft_token_id: None,
                     });
                 }
             }
@@ -1103,8 +1152,36 @@ async fn list_installed_skills() -> Result<Vec<SkillInfoResponse>, Box<dyn std::
     Ok(skills)
 }
 
-/// Get skill info from local storage
-async fn get_skill_info(skill_id: &str) -> Result<SkillInfoResponse, Box<dyn std::error::Error>> {
+/// Get skill info from local storage or SkillRegistry
+async fn get_skill_info(
+    skill_id: &str,
+    registry: Option<&beebotos_agents::skills::SkillRegistry>,
+) -> Result<SkillInfoResponse, Box<dyn std::error::Error>> {
+    // Check SkillRegistry first for MCP skills
+    if skill_id.starts_with("mcp:") {
+        if let Some(reg) = registry {
+            if let Some(registered) = reg.get(skill_id).await {
+                return Ok(SkillInfoResponse {
+                    id: registered.skill.id.clone(),
+                    name: registered.skill.name.clone(),
+                    version: registered.skill.version.to_string(),
+                    description: registered.skill.manifest.description.clone(),
+                    author: registered.skill.manifest.author.clone(),
+                    license: registered.skill.manifest.license.clone(),
+                    installed: true,
+                    capabilities: registered.skill.manifest.capabilities.clone(),
+                    tags: registered.tags.clone(),
+                    downloads: registered.usage_count,
+                    rating: 0.0,
+                    source: Some("mcp".to_string()),
+                    price: Some("0".to_string()),
+                    royalty_percent: Some(0),
+                    nft_token_id: None,
+                });
+            }
+        }
+    }
+
     let skill_dir = get_skill_install_path(skill_id);
     let manifest_path = skill_dir.join("skill.yaml");
 
@@ -1122,6 +1199,10 @@ async fn get_skill_info(skill_id: &str) -> Result<SkillInfoResponse, Box<dyn std
                 tags: yaml_string_array(&manifest["tags"]),
                 downloads: 0,
                 rating: 0.0,
+                source: Some("local".to_string()),
+                price: None,
+                royalty_percent: None,
+                nft_token_id: None,
             });
         }
     }
@@ -1142,5 +1223,9 @@ async fn get_skill_info(skill_id: &str) -> Result<SkillInfoResponse, Box<dyn std
         tags: vec![],
         downloads: 0,
         rating: 0.0,
+        source: Some("local".to_string()),
+        price: None,
+        royalty_percent: None,
+        nft_token_id: None,
     })
 }

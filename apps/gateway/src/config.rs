@@ -48,6 +48,9 @@ pub struct BeeBotOSConfig {
     /// Wizard configuration for interactive setup
     #[serde(default)]
     pub wizard: WizardConfig,
+    /// MCP (Model Context Protocol) server configurations
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -131,6 +134,7 @@ impl Default for BeeBotOSConfig {
             services: None,
             blockchain: BlockchainConfig::default(),
             wizard: WizardConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 }
@@ -892,8 +896,91 @@ mod tests {
                 skill_nft_contract_address: None,
             },
             wizard: WizardConfig::default(),
+            mcp: McpConfig::default(),
         };
 
         assert!(config.validate().is_ok());
     }
 }
+
+// ── MCP Configuration ──
+
+/// MCP (Model Context Protocol) configuration
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct McpConfig {
+    /// List of MCP servers to connect to on startup
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+    /// Global MCP client timeout in milliseconds
+    #[serde(default = "default_mcp_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Global MCP client retry count
+    #[serde(default = "default_mcp_retry_count")]
+    pub retry_count: u32,
+    /// Whether to auto-initialize MCP connections on startup
+    #[serde(default = "default_mcp_auto_init")]
+    pub auto_init: bool,
+    /// Allowed commands for stdio transport (empty = allow all).
+    /// Acts as a security whitelist. Examples: ["npx", "python", "/usr/local/bin/mcp-server"]
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+    /// Enforce TLS for HTTP transport URLs (reject http://).
+    #[serde(default = "default_mcp_enforce_tls")]
+    pub enforce_tls: bool,
+}
+
+/// Configuration for a single MCP server connection
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpServerConfig {
+    /// Unique name for this MCP server (e.g., "filesystem", "github")
+    pub name: String,
+    /// Transport type and its configuration
+    #[serde(flatten)]
+    pub transport: McpTransportConfig,
+    /// Optional: custom timeout override (defaults to global)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Optional: custom retry count override (defaults to global)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_count: Option<u32>,
+}
+
+/// MCP transport configuration (stdio or HTTP)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "transport", rename_all = "lowercase")]
+pub enum McpTransportConfig {
+    /// stdio transport: launch a local subprocess
+    Stdio {
+        /// Command to execute (e.g., "npx", "python", absolute path)
+        command: String,
+        /// Arguments passed to the command
+        #[serde(default)]
+        args: Vec<String>,
+        /// Environment variables to set for the child process
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// Optional working directory for the child process
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+    },
+    /// HTTP transport: communicate over HTTP/SSE
+    Http {
+        /// Base URL of the MCP server (e.g., "https://api.github.com/mcp")
+        url: String,
+        /// Optional Bearer token for authentication
+        #[serde(skip_serializing, default)]
+        auth_token: Option<SecretString>,
+        /// Additional HTTP headers
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        /// Whether to use SSE for receiving responses
+        #[serde(default = "default_mcp_http_sse")]
+        use_sse: bool,
+    },
+}
+
+fn default_mcp_timeout_ms() -> u64 { 30000 }
+fn default_mcp_retry_count() -> u32 { 3 }
+fn default_mcp_auto_init() -> bool { true }
+fn default_mcp_enforce_tls() -> bool { true }
+fn default_mcp_http_sse() -> bool { false }

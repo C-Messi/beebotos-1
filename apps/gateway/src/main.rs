@@ -192,6 +192,8 @@ pub struct AppState {
     pub config_manager: Option<Arc<crate::config_center_integration::GatewayConfigManager>>,
     /// Agent event bus for system-wide pub/sub (used by TriggerEngine event listener)
     pub agent_event_bus: Option<beebotos_agents::events::AgentEventBus>,
+    /// MCP manager for external tool/resource/prompt access
+    pub mcp_manager: Option<Arc<beebotos_agents::mcp::MCPManager>>,
 }
 
 impl AppState {
@@ -592,6 +594,111 @@ impl AppState {
             .with_channel_binding_store(channel_binding_store.clone()),
         );
 
+        // ── Initialize MCP Manager ──
+        let mcp_manager = if config.mcp.auto_init && !config.mcp.servers.is_empty() {
+            let manager = Arc::new(beebotos_agents::mcp::MCPManager::new());
+            for server_config in &config.mcp.servers {
+                let client_config = beebotos_agents::mcp::ClientConfig {
+                    server_url: match &server_config.transport {
+                        crate::config::McpTransportConfig::Http { url, .. } => url.clone(),
+                        _ => "stdio".to_string(),
+                    },
+                    timeout_ms: server_config.timeout_ms.unwrap_or(config.mcp.timeout_ms),
+                    retry_count: server_config.retry_count.unwrap_or(config.mcp.retry_count),
+                };
+
+                let client_result = match &server_config.transport {
+                    crate::config::McpTransportConfig::Stdio { command, args, env, working_dir } => {
+                        let stdio_config = beebotos_agents::mcp::StdioTransportConfig {
+                            command: command.clone(),
+                            args: args.clone(),
+                            env: env.clone(),
+                            working_dir: working_dir.as_ref().map(|p| std::path::PathBuf::from(p)),
+                        };
+                        beebotos_agents::mcp::MCPClient::connect_stdio_with_policy(
+                            client_config,
+                            stdio_config,
+                            &config.mcp.allowed_commands,
+                        ).await
+                    }
+                    crate::config::McpTransportConfig::Http { url, auth_token, headers, use_sse } => {
+                        // Security: enforce TLS for HTTP transport
+                        if config.mcp.enforce_tls && !url.to_ascii_lowercase().starts_with("https://") {
+                            warn!("⚠️ MCP server '{}' uses non-TLS URL '{}'. Skipping (enforce_tls=true).", server_config.name, url);
+                            continue;
+                        }
+                        let http_config = beebotos_agents::mcp::HttpTransportConfig {
+                            base_url: url.clone(),
+                            auth_token: auth_token.clone(),
+                            headers: headers.clone(),
+                            timeout_ms: server_config.timeout_ms.unwrap_or(config.mcp.timeout_ms),
+                            use_sse: *use_sse,
+                        };
+                        beebotos_agents::mcp::MCPClient::connect_http(client_config, http_config).await
+                    }
+                };
+
+                match client_result {
+                    Ok(client) => {
+                        manager.register_client(&server_config.name, client).await;
+                        info!("✅ MCP server '{}' registered", server_config.name);
+                    }
+                    Err(e) => {
+                        warn!("⚠️ Failed to connect to MCP server '{}': {}", server_config.name, e);
+                    }
+                }
+            }
+
+            // Initialize all registered MCP connections
+            if let Err(e) = manager.initialize_all().await {
+                warn!("⚠️ MCP initialization failed: {}", e);
+            } else {
+                let client_names = manager.list_clients().await;
+                info!("✅ MCP Manager initialized with {} server(s): {:?}", client_names.len(), client_names);
+            }
+
+            Some(manager)
+        } else {
+            info!("ℹ️ MCP auto-init disabled or no servers configured");
+            None
+        };
+
+        // ── Bridge MCP tools to SkillRegistry ──
+        if let Some(ref manager) = mcp_manager {
+            if let Err(e) = beebotos_agents::mcp::skill_bridge::McpSkillBridge::bridge_all(
+                manager,
+                &skill_registry,
+            ).await {
+                warn!("⚠️ MCP Skill Bridge failed: {}", e);
+            }
+        }
+
+        // ── On-chain skill registration extension point ──
+        // If blockchain is enabled and SkillNFT contract is configured,
+        // register MCP skills on-chain for marketplace compatibility.
+        if config.blockchain.enabled {
+            if let Some(ref _chain) = chain_service {
+                let mcp_skills: Vec<_> = {
+                    let all = skill_registry.list_all().await;
+                    all.into_iter()
+                        .filter(|s| s.skill.id.starts_with("mcp:"))
+                        .collect()
+                };
+                if !mcp_skills.is_empty() {
+                    info!("🔗 Blockchain enabled: registering {} MCP skill(s) on-chain (extension point)", mcp_skills.len());
+                    for skill in mcp_skills {
+                        // Phase 6 EXTENSION POINT:
+                        // When ChainService SkillNFT methods are implemented,
+                        // replace this log with actual on-chain registration:
+                        // chain.register_skill_nft(&skill.skill.id, &skill.skill.name, ...).await
+                        info!("  📌 MCP skill '{}' ready for on-chain registration (token mint placeholder)", skill.skill.id);
+                    }
+                }
+            } else {
+                warn!("⚠️ Blockchain enabled but ChainService not available; skipping MCP on-chain registration");
+            }
+        }
+
         Ok(Self {
             config,
             db,
@@ -636,6 +743,7 @@ impl AppState {
             auth_service,
             config_manager,
             agent_event_bus: Some(beebotos_agents::events::AgentEventBus::new()),
+            mcp_manager,
         })
     }
 }
@@ -1598,6 +1706,11 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         .route("/api/v1/compositions/:id", get(handlers::http::compositions::get_composition))
         .route("/api/v1/compositions/:id", delete(handlers::http::compositions::delete_composition))
         .route("/api/v1/compositions/:id/execute", post(handlers::http::compositions::execute_composition))
+        // MCP API
+        .route("/api/v1/mcp/servers", get(handlers::http::mcp::list_servers))
+        .route("/api/v1/mcp/servers/:name/tools", get(handlers::http::mcp::list_tools))
+        .route("/api/v1/mcp/servers/:name/tools/:tool/call", post(handlers::http::mcp::call_tool))
+        .route("/api/v1/mcp/bridge", post(handlers::http::mcp::bridge))
         // Workflow instance APIs
         .route("/api/v1/workflow-instances", get(handlers::http::workflows::list_workflow_instances))
         .route("/api/v1/workflow-instances/:id", get(handlers::http::workflows::get_workflow_instance))

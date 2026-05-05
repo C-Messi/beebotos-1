@@ -10,11 +10,22 @@ use tokio::sync::RwLock;
 
 pub mod client;
 pub mod server;
+pub mod skill_bridge;
+pub mod transport;
 pub mod types;
+
+// Internal helper modules
+mod tools;
+mod context;
 
 pub use client::{ClientConfig, MCPClient};
 pub use server::{MCPServer, ServerConfig};
+pub use transport::{HttpTransport, HttpTransportConfig, StdioTransport, StdioTransportConfig, Transport, TransportBridge};
 pub use types::*;
+
+// Re-export internal types for backward compatibility
+pub use context::McpContext;
+pub use tools::{McpTool, McpToolRegistry};
 
 /// MCP capability
 #[derive(Debug, Clone, Serialize, Deserialize)]

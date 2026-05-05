@@ -1,5 +1,23 @@
 //! Skills Security
 
+/// Sandbox execution mode for skills.
+///
+/// - `Wasmtime`: Default. Uses wasmtime WASM sandbox with capability-based security.
+/// - `Docker`: Optional. Runs skill in an isolated Docker container (higher overhead, stronger isolation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxMode {
+    /// WASMtime sandbox (default, lightweight, capability-based)
+    Wasmtime,
+    /// Docker container sandbox (optional, heavyweight, stronger isolation)
+    Docker,
+}
+
+impl Default for SandboxMode {
+    fn default() -> Self {
+        SandboxMode::Wasmtime
+    }
+}
+
 /// Security policy for skills
 #[derive(Debug, Clone)]
 pub struct SkillSecurityPolicy {
@@ -12,6 +30,8 @@ pub struct SkillSecurityPolicy {
     pub allowed_imports: Vec<String>,
     /// Maximum WASM module size in bytes
     pub max_module_size: usize,
+    /// Sandbox execution mode (default: Wasmtime, optional: Docker)
+    pub sandbox_mode: SandboxMode,
 }
 
 impl Default for SkillSecurityPolicy {
@@ -29,6 +49,7 @@ impl Default for SkillSecurityPolicy {
                 "env.__table_base".to_string(),
             ],
             max_module_size: 10 * 1024 * 1024, // 10MB
+            sandbox_mode: SandboxMode::default(),
         }
     }
 }

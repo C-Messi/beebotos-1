@@ -14,6 +14,7 @@ pub mod channels;
 pub mod compositions;
 pub mod llm_config;
 pub mod llm_metrics;
+pub mod mcp;
 pub mod skills;
 pub mod state_machine;
 pub mod task_monitor;

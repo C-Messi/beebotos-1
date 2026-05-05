@@ -35,5 +35,5 @@ pub use loader::{FunctionDef, FunctionParameter, LoadedSkill, SkillLoadError, Sk
 pub use rating::{RatingSummary, SkillRating, SkillRatingStore};
 pub use react_executor::ReActExecutor;
 pub use registry::{RegisteredSkill, SkillDefinition, SkillRegistry, Version, VersionError};
-pub use security::{SkillSecurityPolicy, SkillSecurityValidator, ValidationError};
+pub use security::{SandboxMode, SkillSecurityPolicy, SkillSecurityValidator, ValidationError};
 pub use tool_set::{default_tool_set, BashShellTool, FileListTool, FileReadTool, FileWriteTool, ProcessExecTool, SkillTool};

@@ -109,23 +109,42 @@ function Build-Service($name) {
     # Special handling for web service which has multi-step build
     if ($name -eq "web") {
         try {
-            $null = Get-Command wasm-pack -ErrorAction Stop
+            $null = Get-Command trunk -ErrorAction Stop
         } catch {
-            Print-Error "wasm-pack not found in PATH. Please install it: cargo install wasm-pack"
+            Print-Error "trunk not found in PATH. Please install it: cargo install trunk"
             return $false
         }
 
-        cargo build --release --lib -p beebotos-web --target wasm32-unknown-unknown
-        if ($LASTEXITCODE -ne 0) {
-            Print-Error "Build failed: web - cargo build lib failed (exit $LASTEXITCODE)"
-            return $false
+        # cargo build --release --lib -p beebotos-web --target wasm32-unknown-unknown
+        # if ($LASTEXITCODE -ne 0) {
+        #     Print-Error "Build failed: web - cargo build lib failed (exit $LASTEXITCODE)"
+        #     return $false
+        # }
+        Push-Location (Join-Path $ProjectRoot "apps\web")
+        $oldNoColor = $env:NO_COLOR
+        try {
+            if ($env:NO_COLOR -eq "1") {
+                $env:NO_COLOR = "true"
+            }
+            trunk build --release
+            if ($LASTEXITCODE -ne 0) {
+                Print-Error "Build failed: web - trunk build failed (exit $LASTEXITCODE)"
+                return $false
+            }
+        } finally {
+            if ($null -eq $oldNoColor) {
+                Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
+            } else {
+                $env:NO_COLOR = $oldNoColor
+            }
+            Pop-Location
         }
-        wasm-pack build --target web --out-dir pkg apps/web/
-        if ($LASTEXITCODE -ne 0) {
-            Print-Error "Build failed: web - wasm-pack build failed (exit $LASTEXITCODE)"
-            return $false
-        }
-        cargo build --release --bin web-server
+        # wasm-pack build --target web --out-dir pkg apps/web/
+        # if ($LASTEXITCODE -ne 0) {
+        #     Print-Error "Build failed: web - wasm-pack build failed (exit $LASTEXITCODE)"
+        #     return $false
+        # }
+        cargo build -p beebotos-web --bin web-server --features server --release
         if ($LASTEXITCODE -ne 0) {
             Print-Error "Build failed: web - cargo build web-server failed (exit $LASTEXITCODE)"
             return $false
@@ -182,19 +201,17 @@ function Start-Service($name) {
     # web-server needs correct static-path and gateway-url to work properly
     $startArgs = @{}
     if ($name -eq "web") {
-        # 准备临时静态目录，解决 CSS/favicon 占位符问题
+        # 准备临时静态目录，使用 trunk 生成的 apps/web/dist
         $tempStaticDir = Join-Path $ProjectRoot "data\temp-web-static"
+        $distSource = Join-Path $ProjectRoot "apps\web\dist"
+        if (-not (Test-Path $distSource)) {
+            Print-Error "Web dist directory not found: $distSource"
+            Print-Info "Please build web first: .\beebotos-dev.ps1 build web"
+            return $false
+        }
         if (Test-Path $tempStaticDir) { Remove-Item -Recurse -Force $tempStaticDir }
         New-Item -ItemType Directory -Force -Path $tempStaticDir | Out-Null
-        Copy-Item (Join-Path $ProjectRoot "apps\web\index.html") $tempStaticDir
-        Copy-Item -Recurse (Join-Path $ProjectRoot "apps\web\pkg") $tempStaticDir
-        Copy-Item -Recurse (Join-Path $ProjectRoot "apps\web\style") $tempStaticDir
-        Copy-Item (Join-Path $ProjectRoot "apps\web\style\main.css") (Join-Path $tempStaticDir "style.css")
-        Copy-Item (Join-Path $ProjectRoot "apps\web\style\components.css") (Join-Path $tempStaticDir "components.css")
-        $realFavicon = Join-Path $ProjectRoot "apps\web\public\favicon.svg"
-        if (Test-Path $realFavicon) {
-            Copy-Item $realFavicon (Join-Path $tempStaticDir "favicon.svg")
-        }
+        Copy-Item -Recurse (Join-Path $distSource "*") $tempStaticDir
         $startArgs["ArgumentList"] = "`"--static-path`" `"$tempStaticDir`" `"--gateway-url`" http://localhost:8000"
         Print-Info "Static path: $tempStaticDir"
         Print-Info "Gateway URL: http://localhost:8000"
@@ -259,7 +276,6 @@ function Pack-Release($target = "all") {
 
     if (Test-Path $outDir) { Remove-Item -Recurse -Force $outDir }
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $outDir "pkg") | Out-Null
 
     if ($target -eq "all" -or $target -eq "gateway") {
         Copy-Item (Join-Path $ProjectRoot "target\release\beebotos-gateway.exe") $outDir
@@ -267,33 +283,16 @@ function Pack-Release($target = "all") {
     }
     if ($target -eq "all" -or $target -eq "web") {
         Copy-Item (Join-Path $ProjectRoot "target\release\web-server.exe") $outDir
-        $pkgSource = Join-Path $ProjectRoot "apps\web\pkg"
-        $pkgDest = Join-Path $outDir "pkg"
+        $pkgSource = Join-Path $ProjectRoot "apps\web\dist"
+        $pkgDest = $outDir
         if (-not (Test-Path $pkgSource)) {
-            Print-Error "Web pkg directory not found: $pkgSource"
+            Print-Error "Web dist directory not found: $pkgSource"
             Print-Info "Please build the web service first: .\beebotos-dev.ps1 build web"
             Remove-Item -Recurse -Force $outDir -ErrorAction SilentlyContinue
             exit 1
         }
         Get-ChildItem -Path $pkgSource | ForEach-Object {
             Copy-Item -Path $_.FullName -Destination $pkgDest -Recurse -Force
-        }
-        # Copy static web assets (favicon.svg 在 apps/web/ 下是占位符，从 public/ 复制真实文件)
-        $src = Join-Path $ProjectRoot "apps\web\index.html"
-        if (Test-Path $src) {
-            Copy-Item $src $outDir
-        }
-        $realFavicon = Join-Path $ProjectRoot "apps\web\public\favicon.svg"
-        if (Test-Path $realFavicon) {
-            Copy-Item $realFavicon (Join-Path $outDir "favicon.svg")
-        }
-        # Copy real CSS from style/ directory (root CSS files are redirects)
-        $styleDir = Join-Path $ProjectRoot "apps\web\style"
-        if (Test-Path $styleDir) {
-            Copy-Item -Recurse $styleDir $outDir
-            # Copy actual CSS files to root for index.html references
-            Copy-Item (Join-Path $styleDir "main.css") (Join-Path $outDir "style.css")
-            Copy-Item (Join-Path $styleDir "components.css") (Join-Path $outDir "components.css")
         }
     }
     if ($target -eq "all" -or $target -eq "beehub") {
@@ -310,7 +309,10 @@ function Pack-Release($target = "all") {
         # 调整 web-server 生产配置：静态文件路径指向当前目录
         $prodConfig = Join-Path $outDir "config\web-server.toml"
         if (Test-Path $prodConfig) {
-            (Get-Content $prodConfig) -replace 'path = "apps/web"', 'path = "."' | Set-Content $prodConfig -Encoding UTF8
+            (Get-Content $prodConfig) `
+                -replace 'path = "apps/web/dist"', 'path = "."' `
+                -replace 'path = "apps/web"', 'path = "."' |
+                Set-Content $prodConfig -Encoding UTF8
         }
     }
 

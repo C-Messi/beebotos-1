@@ -9,6 +9,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
+use super::transport::{HttpTransport, HttpTransportConfig, StdioTransport, StdioTransportConfig, TransportBridge};
 use super::types::*;
 use super::MCPError;
 
@@ -45,6 +46,65 @@ pub struct MCPClient {
 }
 
 impl MCPClient {
+    /// Create new MCP client with stdio transport.
+    ///
+    /// Convenience method that creates a client, spawns a stdio subprocess,
+    /// and wires up the transport bridge automatically.
+    pub async fn connect_stdio(
+        config: ClientConfig,
+        stdio_config: StdioTransportConfig,
+    ) -> Result<Arc<Self>, MCPError> {
+        Self::connect_stdio_with_policy(config, stdio_config, &[]).await
+    }
+
+    /// Create new MCP client with stdio transport and a command whitelist.
+    pub async fn connect_stdio_with_policy(
+        config: ClientConfig,
+        stdio_config: StdioTransportConfig,
+        allowed_commands: &[String],
+    ) -> Result<Arc<Self>, MCPError> {
+        let (client, request_rx, response_tx) = Self::new(config);
+        let client_arc = Arc::new(client);
+
+        let transport = StdioTransport::new_with_policy(stdio_config, allowed_commands)?;
+        transport.connect().await?;
+
+        let _bridge = TransportBridge::spawn(
+            Arc::new(transport),
+            request_rx,
+            response_tx,
+        );
+
+        Ok(client_arc)
+    }
+
+    /// Create new MCP client with HTTP transport.
+    ///
+    /// Convenience method that creates a client and wires up the HTTP transport bridge.
+    pub async fn connect_http(
+        config: ClientConfig,
+        http_config: HttpTransportConfig,
+    ) -> Result<Arc<Self>, MCPError> {
+        let use_sse = http_config.use_sse;
+        let (client, request_rx, response_tx) = Self::new(config);
+        let client_arc = Arc::new(client);
+
+        let transport = HttpTransport::new(http_config)?;
+        transport.connect().await?;
+
+        if use_sse {
+            transport.start_sse_listener(response_tx.clone()).await?;
+        }
+
+        let _bridge = TransportBridge::spawn(
+            Arc::new(transport),
+            request_rx,
+            response_tx,
+        );
+
+        Ok(client_arc)
+    }
+
     /// Create new MCP client
     ///
     /// ARCHITECTURE FIX: Returns a client along with channels for request/response handling.

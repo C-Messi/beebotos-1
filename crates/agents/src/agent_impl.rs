@@ -1119,13 +1119,100 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
         input: &str,
         parameters: Option<HashMap<String, String>>,
     ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
+        let start_time = std::time::Instant::now();
+
+        // ── MCP Skill Bridge: Execute MCP tools registered as skills ──
+        if let Some((server_name, tool_name)) = crate::mcp::skill_bridge::parse_mcp_skill_id(&registered_skill.skill.id) {
+            let mcp = self
+                .mcp_manager
+                .as_ref()
+                .ok_or_else(|| AgentError::InvalidConfig("MCP manager not configured".into()))?;
+
+            let client = mcp
+                .get_client(server_name)
+                .await
+                .ok_or_else(|| AgentError::InvalidConfig(format!("MCP client '{}' not found", server_name)))?;
+
+            // Build arguments from input + parameters
+            let mut arguments = serde_json::Map::new();
+            if !input.is_empty() {
+                // Try to parse input as JSON object; if it fails, wrap it in a "query" field
+                match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(input) {
+                    Ok(map) => arguments = map,
+                    Err(_) => {
+                        arguments.insert("query".to_string(), serde_json::Value::String(input.to_string()));
+                    }
+                }
+            }
+            if let Some(params) = parameters {
+                for (k, v) in params {
+                    if k != "skill" {
+                        arguments.insert(k, serde_json::Value::String(v));
+                    }
+                }
+            }
+
+            // Security: validate arguments against tool's JSON Schema before calling
+            {
+                let tools_result = client.list_tools(None).await.map_err(|e| {
+                    AgentError::Execution(format!("Failed to list tools for validation: {}", e))
+                })?;
+                if let Some(tool) = tools_result.tools.into_iter().find(|t| t.name == tool_name) {
+                    if let Err(validation_err) = crate::mcp::skill_bridge::validate_tool_arguments(&tool.input_schema, &arguments) {
+                        return Err(AgentError::InvalidConfig(format!(
+                            "MCP tool argument validation failed: {}", validation_err
+                        )));
+                    }
+                }
+            }
+
+            let args = if arguments.is_empty() { None } else { Some(arguments) };
+
+            let result = client
+                .call_tool(tool_name, args)
+                .await
+                .map_err(|e| AgentError::Execution(format!("MCP tool call failed: {}", e)))?;
+
+            let output = if result.is_error {
+                let error_text = result
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        crate::mcp::types::ToolContent::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(AgentError::Execution(format!(
+                    "MCP tool returned an error: {}",
+                    if error_text.is_empty() { "unknown error".to_string() } else { error_text }
+                )));
+            } else {
+                result
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        crate::mcp::types::ToolContent::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+
+            return Ok(skills::executor::SkillExecutionResult {
+                task_id: registered_skill.skill.id.clone(),
+                success: true,
+                output,
+                structured_output: None,
+                execution_time_ms: start_time.elapsed().as_millis() as u64,
+            });
+        }
+
         let context = skills::executor::SkillContext {
             input: input.to_string(),
             parameters: parameters.unwrap_or_default(),
         };
 
-        let start_time = std::time::Instant::now();
-        
         // 🆕 FIX: Skip WASM attempt for markdown-based builtin skills that have no WASM binary.
         let wasm_path_empty = registered_skill.skill.wasm_path.as_os_str().is_empty();
         
@@ -1345,13 +1432,28 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
             .map_err(|e| AgentError::Execution(format!("MCP tool call failed: {}", e)))?;
 
         if result.is_error {
-            return Err(AgentError::Execution("MCP tool returned an error".into()));
+            let error_text = result
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    crate::mcp::types::ToolContent::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(AgentError::Execution(format!(
+                "MCP tool returned an error: {}",
+                if error_text.is_empty() { "unknown error".to_string() } else { error_text }
+            )));
         }
 
         let output = result
             .content
             .iter()
-            .map(|c| format!("{:?}", c))
+            .filter_map(|c| match c {
+                crate::mcp::types::ToolContent::Text { text } => Some(text.clone()),
+                _ => None,
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
