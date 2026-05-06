@@ -353,13 +353,96 @@ impl AppState {
         restore_skills_from_disk(&skill_registry).await;
         register_builtin_skills(&skill_registry).await;
 
-        let agent_runtime: Arc<dyn gateway::AgentRuntime> = Arc::new(
-            GatewayAgentRuntime::new(Some(kernel.clone()), Some(llm_interface), agent_runtime_config, Some(db.clone()))
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to initialize AgentRuntime: {}", e))?
-                .with_skill_registry(skill_registry.clone())
-        );
-        info!("✅ AgentRuntime (trait-based) initialized with SkillRegistry");
+        // ── Initialize MCP Manager ──
+        let mcp_manager = if config.mcp.auto_init && !config.mcp.servers.is_empty() {
+            let manager = Arc::new(beebotos_agents::mcp::MCPManager::new());
+            for server_config in &config.mcp.servers {
+                let client_config = beebotos_agents::mcp::ClientConfig {
+                    server_url: match &server_config.transport {
+                        crate::config::McpTransportConfig::Http { url, .. } => url.clone(),
+                        _ => "stdio".to_string(),
+                    },
+                    timeout_ms: server_config.timeout_ms.unwrap_or(config.mcp.timeout_ms),
+                    retry_count: server_config.retry_count.unwrap_or(config.mcp.retry_count),
+                };
+
+                let client_result = match &server_config.transport {
+                    crate::config::McpTransportConfig::Stdio { command, args, env, working_dir } => {
+                        let stdio_config = beebotos_agents::mcp::StdioTransportConfig {
+                            command: command.clone(),
+                            args: args.clone(),
+                            env: env.clone(),
+                            working_dir: working_dir.as_ref().map(|p| std::path::PathBuf::from(p)),
+                        };
+                        beebotos_agents::mcp::MCPClient::connect_stdio_with_policy(
+                            client_config,
+                            stdio_config,
+                            &config.mcp.allowed_commands,
+                        ).await
+                    }
+                    crate::config::McpTransportConfig::Http { url, auth_token, headers, use_sse } => {
+                        if config.mcp.enforce_tls && !url.to_ascii_lowercase().starts_with("https://") {
+                            warn!("⚠️ MCP server '{}' uses non-TLS URL '{}'. Skipping (enforce_tls=true).", server_config.name, url);
+                            continue;
+                        }
+                        let http_config = beebotos_agents::mcp::HttpTransportConfig {
+                            base_url: url.clone(),
+                            auth_token: auth_token.clone(),
+                            headers: headers.clone(),
+                            timeout_ms: server_config.timeout_ms.unwrap_or(config.mcp.timeout_ms),
+                            use_sse: *use_sse,
+                        };
+                        beebotos_agents::mcp::MCPClient::connect_http(client_config, http_config).await
+                    }
+                };
+
+                match client_result {
+                    Ok(client) => {
+                        manager.register_client(&server_config.name, client).await;
+                        info!("✅ MCP server '{}' registered", server_config.name);
+                    }
+                    Err(e) => {
+                        warn!("⚠️ Failed to connect to MCP server '{}': {}", server_config.name, e);
+                    }
+                }
+            }
+
+            if let Err(e) = manager.initialize_all().await {
+                warn!("⚠️ MCP initialization failed: {}", e);
+            } else {
+                let client_names = manager.list_clients().await;
+                info!("✅ MCP Manager initialized with {} server(s): {:?}", client_names.len(), client_names);
+            }
+
+            Some(manager)
+        } else {
+            info!("ℹ️ MCP auto-init disabled or no servers configured");
+            None
+        };
+
+        // ── Bridge MCP tools to SkillRegistry ──
+        if let Some(ref manager) = mcp_manager {
+            if let Err(e) = beebotos_agents::mcp::skill_bridge::McpSkillBridge::bridge_all(
+                manager,
+                &skill_registry,
+            ).await {
+                warn!("⚠️ MCP Skill Bridge failed: {}", e);
+            }
+        }
+
+        let mut gateway_runtime = GatewayAgentRuntime::new(Some(kernel.clone()), Some(llm_interface), agent_runtime_config, Some(db.clone()))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize AgentRuntime: {}", e))?
+            .with_skill_registry(skill_registry.clone())
+            .with_mcp(mcp_manager.clone().unwrap_or_else(|| Arc::new(beebotos_agents::mcp::MCPManager::new())));
+        
+        // Recover agents after MCP manager is configured so they have access to MCP tools
+        if let Err(e) = gateway_runtime.recover_agents_now().await {
+            warn!("Failed to recover agents from persistent state: {}", e);
+        }
+        
+        let agent_runtime: Arc<dyn gateway::AgentRuntime> = Arc::new(gateway_runtime);
+        info!("✅ AgentRuntime (trait-based) initialized with SkillRegistry and MCP");
 
         // Legacy: Agent runtime manager bridges gateway with beebotos_agents
         let agent_runtime_manager = Arc::new(
@@ -602,85 +685,6 @@ impl AppState {
             )
             .with_channel_binding_store(channel_binding_store.clone()),
         );
-
-        // ── Initialize MCP Manager ──
-        let mcp_manager = if config.mcp.auto_init && !config.mcp.servers.is_empty() {
-            let manager = Arc::new(beebotos_agents::mcp::MCPManager::new());
-            for server_config in &config.mcp.servers {
-                let client_config = beebotos_agents::mcp::ClientConfig {
-                    server_url: match &server_config.transport {
-                        crate::config::McpTransportConfig::Http { url, .. } => url.clone(),
-                        _ => "stdio".to_string(),
-                    },
-                    timeout_ms: server_config.timeout_ms.unwrap_or(config.mcp.timeout_ms),
-                    retry_count: server_config.retry_count.unwrap_or(config.mcp.retry_count),
-                };
-
-                let client_result = match &server_config.transport {
-                    crate::config::McpTransportConfig::Stdio { command, args, env, working_dir } => {
-                        let stdio_config = beebotos_agents::mcp::StdioTransportConfig {
-                            command: command.clone(),
-                            args: args.clone(),
-                            env: env.clone(),
-                            working_dir: working_dir.as_ref().map(|p| std::path::PathBuf::from(p)),
-                        };
-                        beebotos_agents::mcp::MCPClient::connect_stdio_with_policy(
-                            client_config,
-                            stdio_config,
-                            &config.mcp.allowed_commands,
-                        ).await
-                    }
-                    crate::config::McpTransportConfig::Http { url, auth_token, headers, use_sse } => {
-                        // Security: enforce TLS for HTTP transport
-                        if config.mcp.enforce_tls && !url.to_ascii_lowercase().starts_with("https://") {
-                            warn!("⚠️ MCP server '{}' uses non-TLS URL '{}'. Skipping (enforce_tls=true).", server_config.name, url);
-                            continue;
-                        }
-                        let http_config = beebotos_agents::mcp::HttpTransportConfig {
-                            base_url: url.clone(),
-                            auth_token: auth_token.clone(),
-                            headers: headers.clone(),
-                            timeout_ms: server_config.timeout_ms.unwrap_or(config.mcp.timeout_ms),
-                            use_sse: *use_sse,
-                        };
-                        beebotos_agents::mcp::MCPClient::connect_http(client_config, http_config).await
-                    }
-                };
-
-                match client_result {
-                    Ok(client) => {
-                        manager.register_client(&server_config.name, client).await;
-                        info!("✅ MCP server '{}' registered", server_config.name);
-                    }
-                    Err(e) => {
-                        warn!("⚠️ Failed to connect to MCP server '{}': {}", server_config.name, e);
-                    }
-                }
-            }
-
-            // Initialize all registered MCP connections
-            if let Err(e) = manager.initialize_all().await {
-                warn!("⚠️ MCP initialization failed: {}", e);
-            } else {
-                let client_names = manager.list_clients().await;
-                info!("✅ MCP Manager initialized with {} server(s): {:?}", client_names.len(), client_names);
-            }
-
-            Some(manager)
-        } else {
-            info!("ℹ️ MCP auto-init disabled or no servers configured");
-            None
-        };
-
-        // ── Bridge MCP tools to SkillRegistry ──
-        if let Some(ref manager) = mcp_manager {
-            if let Err(e) = beebotos_agents::mcp::skill_bridge::McpSkillBridge::bridge_all(
-                manager,
-                &skill_registry,
-            ).await {
-                warn!("⚠️ MCP Skill Bridge failed: {}", e);
-            }
-        }
 
         // ── On-chain skill registration extension point ──
         // If blockchain is enabled and SkillNFT contract is configured,

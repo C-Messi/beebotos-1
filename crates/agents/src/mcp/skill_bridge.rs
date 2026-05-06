@@ -210,7 +210,10 @@ impl McpSkillBridge {
             template.push_str("\n");
         }
 
-        template.push_str("Instructions: Call this tool with the appropriate parameters based on the user's request.");
+        template.push_str("Instructions: Call this tool with the appropriate parameters based on the user's request. ");
+        template.push_str("When calling, output the skill ID followed by a '|' and a JSON object with the parameters. ");
+        template.push_str("Example: SKILL:my_skill|{\"param1\":\"value1\",\"param2\":\"value2\"}. ");
+        template.push_str("If no parameters are needed, use SKILL:my_skill|{}.");
         template
     }
 }

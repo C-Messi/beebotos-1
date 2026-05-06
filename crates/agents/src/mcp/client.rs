@@ -39,7 +39,7 @@ pub struct MCPClient {
     config: ClientConfig,
     initialized: AtomicBool,
     request_counter: Mutex<u64>,
-    server_capabilities: RwLock<Option<ServerCapabilities>>,
+    initialize_result: RwLock<Option<InitializeResult>>,
     request_tx: mpsc::UnboundedSender<JsonRpcRequest>,
     /// ARCHITECTURE FIX: Map of pending requests (request_id -> response channel)
     pending_requests: Arc<Mutex<HashMap<RequestId, tokio::sync::oneshot::Sender<JsonRpcResponse>>>>,
@@ -123,7 +123,7 @@ impl MCPClient {
             config,
             initialized: AtomicBool::new(false),
             request_counter: Mutex::new(0),
-            server_capabilities: RwLock::new(None),
+            initialize_result: RwLock::new(None),
             request_tx,
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -163,11 +163,13 @@ impl MCPClient {
     }
 
     /// Initialize connection
+    ///
+    /// FIX: Idempotent — returns cached result if already initialized.
     pub async fn initialize(&self) -> Result<InitializeResult, MCPError> {
         if self.initialized.load(Ordering::SeqCst) {
-            return Err(MCPError::InitializationFailed(
-                "Already initialized".to_string(),
-            ));
+            if let Some(result) = self.initialize_result.read().await.as_ref() {
+                return Ok(result.clone());
+            }
         }
 
         let params = InitializeParams {
@@ -196,7 +198,7 @@ impl MCPClient {
         )
         .map_err(|e| MCPError::InitializationFailed(e.to_string()))?;
 
-        *self.server_capabilities.write().await = Some(result.capabilities.clone());
+        *self.initialize_result.write().await = Some(result.clone());
         self.initialized.store(true, Ordering::SeqCst);
 
         // Send initialized notification
@@ -364,6 +366,7 @@ impl MCPClient {
         if self.initialized.load(Ordering::SeqCst) {
             let _ = self.notify("notifications/cancelled", None).await;
             self.initialized.store(false, Ordering::SeqCst);
+            *self.initialize_result.write().await = None;
         }
         Ok(())
     }

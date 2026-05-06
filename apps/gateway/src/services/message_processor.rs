@@ -581,6 +581,7 @@ impl MessageProcessor {
         // 🆕 FIX: Session-level skill inheritance. If current message doesn't match any skill,
         // but the session has an active_skill from previous turns, inherit it to avoid
         // losing skill context in multi-turn conversations (e.g. travel_planner follow-ups).
+        // FIX: Only inherit when the current message is still relevant to the active skill's domain.
         if skill_match.is_none() {
             let active_skill = session.metadata.get("active_skill").cloned();
             if let Some(skill_id) = active_skill {
@@ -593,13 +594,45 @@ impl MessageProcessor {
                 } else if let Some(ref registry) = self.skill_registry {
                     if let Some(skill) = registry.get(&skill_id).await {
                         if skill.enabled {
-                            skill_match = Some((
-                                skill_id.clone(),
-                                skill.skill.name.clone(),
-                                skill.skill.manifest.description.clone(),
-                                skill.skill.manifest.prompt_template.clone(),
-                            ));
-                            info!("🎯 Inherited active skill '{}' for query '{}'", skill_id, content.chars().take(40).collect::<String>());
+                            // 🆕 FIX: Domain relevance check — don't inherit if current message
+                            // clearly belongs to a different domain (e.g. BTC/crypto vs code research).
+                            let query_lower = content.to_lowercase();
+                            let is_relevant = if skill_id == "code_researcher" {
+                                // code_researcher should NOT be inherited for crypto/finance/market queries
+                                !query_lower.contains("btc")
+                                    && !query_lower.contains("bitcoin")
+                                    && !query_lower.contains("比特币")
+                                    && !query_lower.contains("eth")
+                                    && !query_lower.contains("crypto")
+                                    && !query_lower.contains("加密货币")
+                                    && !query_lower.contains("币价")
+                                    && !query_lower.contains("market")
+                                    && !query_lower.contains("alpaca")
+                                    && !query_lower.contains("股票")
+                                    && !query_lower.contains("行情")
+                                    && !query_lower.contains("价格")
+                            } else if skill_id.starts_with("mcp:alpaca/") {
+                                // alpaca skills should NOT be inherited for code/development queries
+                                !query_lower.contains("code")
+                                    && !query_lower.contains("编程")
+                                    && !query_lower.contains("开发")
+                                    && !query_lower.contains("debug")
+                                    && !query_lower.contains("代码")
+                            } else {
+                                true
+                            };
+                            if is_relevant {
+                                skill_match = Some((
+                                    skill_id.clone(),
+                                    skill.skill.name.clone(),
+                                    skill.skill.manifest.description.clone(),
+                                    skill.skill.manifest.prompt_template.clone(),
+                                ));
+                                info!("🎯 Inherited active skill '{}' for query '{}'", skill_id, content.chars().take(40).collect::<String>());
+                            } else {
+                                info!("🎯 Skipped inheriting active skill '{}' — query '{}' is not in the same domain", skill_id, content.chars().take(40).collect::<String>());
+                                let _ = self.session_manager.update_metadata(&session.id, "active_skill", "").await;
+                            }
                         }
                     }
                 }
@@ -702,6 +735,7 @@ impl MessageProcessor {
         if let Some((skill_id, skill_name, skill_desc, skill_prompt)) = skill_match {
             if let Some(obj) = task_input.as_object_mut() {
                 obj.insert("skill_hint".to_string(), serde_json::json!({
+                    "id": skill_id,
                     "name": skill_name,
                     "description": skill_desc,
                     "prompt_template": skill_prompt,
@@ -965,6 +999,13 @@ impl MessageProcessor {
         })
     }
 
+    /// Extract a direct MCP skill reference like "mcp:alpaca/get_crypto_latest_trade" from text.
+    fn extract_mcp_skill_reference(content: &str) -> Option<String> {
+        // Look for pattern "mcp:word/word" (alphanumeric, underscore, hyphen allowed)
+        let re = Regex::new(r"mcp:[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+").ok()?;
+        re.find(content).map(|m| m.as_str().to_string())
+    }
+
     /// 🆕 FIX: 尝试匹配 Skill，返回最佳匹配的 skill hint (skill_id, name, description, prompt_template)
     /// 支持 domain keyword 映射 + registry 语义搜索 + name 子串匹配
     async fn try_match_skill(&self, content: &str) -> Option<(String, String, String, String)> {
@@ -975,14 +1016,20 @@ impl MessageProcessor {
         let registry = self.skill_registry.as_ref()?;
         let query_lower = content.to_lowercase();
 
+        // 🆕 NOTE: MCP skills are no longer directly matched by gateway.
+        // They are included in the skill catalog sent to the LLM, which chooses
+        // the appropriate skill based on user intent.
+
         // 1. Domain keyword → skill ID 快速映射（中文 + 英文）
+        // FIX: Removed overly broad keywords (e.g. "paper" matching URLs like paper-api.alpaca.markets).
+        // FIX: Added crypto/alpaca keywords so MCP tools get matched before generic skills.
         let domain_keywords: &[(&[&str], &str)] = &[
             (&["travel", "tour", "trip", "itinerary", "旅游", "旅行", "行程", "攻略", "景点", "酒店", "规划", "计划"], "travel_planner"),
             (&["code", "program", "develop", "debug", "coding", "编程", "代码", "开发", "python"], "python_developer"),
             (&["rust", "cargo"], "rust_developer"),
             (&["contract", "solidity", "smart contract", "合约", "区块链"], "solidity_developer"),
-            (&["write", "email", "draft", "邮件", "写信"], "email_writer"),
-            (&["story", "novel", "fiction", "write", "故事", "小说"], "story_writer"),
+            (&["email", "draft", "邮件", "写信"], "email_writer"),
+            (&["story", "novel", "fiction", "故事", "小说"], "story_writer"),
             (&["game", "gaming", "游戏", "玩家"], "game_master"),
             (&["data", "analyze", "analysis", "数据", "分析", "统计"], "data_analyst"),
             (&["image", "photo", "picture", "图", "照片"], "image_analyst"),
@@ -992,12 +1039,16 @@ impl MessageProcessor {
             (&["nft", "mint", "token", "数字藏品"], "nft_minter"),
             (&["health", "medical", "doctor", "健康", "医疗", "医生"], "health_advisor"),
             (&["learn", "study", "tutor", "lesson", "学习", "课程", "辅导"], "tutor"),
-            (&["research", "paper", "survey", "研究", "论文", "调查"], "code_researcher"),
+            (&["code research", "contract audit", "漏洞分析", "智能合约审计"], "code_researcher"),
             (&["dao", "governance", "proposal", "vote", "治理", "提案", "投票"], "governance_analyst"),
-            (&["finance", "portfolio", "invest", "理财", "投资", "组合", "黄金", "价格"], "portfolio_manager"),
+            (&["finance", "portfolio", "invest", "理财", "投资", "组合", "黄金"], "portfolio_manager"),
             (&["social", "community", "content", "社媒", "社群", "内容"], "content_creator"),
             (&["security", "audit", "vulnerability", "安全", "审计", "漏洞"], "auditor"),
             (&["weather", "forecast", "天气", "预报", "降雨", "温度"], "weather_assistant"),
+            // 🆕 FIX: High-priority crypto/alpaca keywords to avoid being hijacked by generic skills
+            // Note: order matters — more specific / report-oriented keywords first.
+            (&["btc", "bitcoin", "比特币", "eth", "ethereum", "以太坊", "crypto market", "加密货币市场", "crypto price", "币价", "crypto snapshot", "crypto quote", "情况报告", "市场报告", "市场分析", "行情分析"], "mcp:alpaca/get_crypto_snapshot"),
+            (&["alpaca", "crypto latest trade", "latest trade", "最新成交", "实时成交", "加密货币交易"], "mcp:alpaca/get_crypto_latest_trade"),
         ];
 
         for (keywords, skill_id) in domain_keywords {
@@ -1028,8 +1079,12 @@ impl MessageProcessor {
         let best = &results[0];
         let name_lower = best.skill.name.to_lowercase();
         // name 子串强匹配
-        let is_strong_match = name_lower.contains(&query_lower)
-            || query_lower.contains(&name_lower);
+        // 🆕 FIX: Normalize underscores to spaces for substring matching,
+        // so "get_crypto_latest_trade" matches "get crypto latest trade".
+        let name_normalized = name_lower.replace('_', " ");
+        let query_normalized = query_lower.replace('_', " ");
+        let is_strong_match = name_normalized.contains(&query_normalized)
+            || query_normalized.contains(&name_normalized);
         if is_strong_match {
             info!("🎯 Skill matched: '{}' for query '{}'", best.skill.id, content.chars().take(40).collect::<String>());
             let hint = (

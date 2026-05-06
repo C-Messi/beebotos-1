@@ -465,6 +465,7 @@ pub struct KernelAgentBuilder {
     with_plan_executor: Option<Arc<crate::planning::PlanExecutor>>,
     with_replanner: Option<Arc<dyn crate::planning::RePlanner>>,
     with_skill_catalog: Option<String>,
+    with_mcp: Option<Arc<crate::mcp::MCPManager>>,
 }
 
 impl KernelAgentBuilder {
@@ -484,6 +485,7 @@ impl KernelAgentBuilder {
             with_plan_executor: None,
             with_replanner: None,
             with_skill_catalog: None,
+            with_mcp: None,
         }
     }
 
@@ -574,6 +576,12 @@ impl KernelAgentBuilder {
         self
     }
 
+    /// 🆕 Set MCP manager for external tool access
+    pub fn with_mcp(mut self, manager: Arc<crate::mcp::MCPManager>) -> Self {
+        self.with_mcp = Some(manager);
+        self
+    }
+
     /// Build and spawn the agent in kernel sandbox
     pub async fn spawn(self) -> Result<(TaskId, mpsc::UnboundedSender<KernelTaskRequest>)> {
         let kernel = self.kernel.ok_or_else(|| {
@@ -619,6 +627,11 @@ impl KernelAgentBuilder {
 
         if let Some(catalog) = self.with_skill_catalog {
             agent = agent.with_skill_catalog(catalog);
+        }
+
+        // 🆕 Attach MCP manager for external tool access
+        if let Some(mcp) = self.with_mcp {
+            agent = agent.with_mcp(mcp);
         }
 
         // Attach kernel for WASM execution

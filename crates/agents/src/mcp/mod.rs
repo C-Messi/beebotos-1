@@ -64,6 +64,7 @@ impl MCPImplementation {
 }
 
 /// MCP Manager for handling multiple MCP connections
+#[derive(Clone)]
 pub struct MCPManager {
     clients: Arc<RwLock<HashMap<String, Arc<MCPClient>>>>,
     servers: Arc<RwLock<HashMap<String, Arc<MCPServer>>>>,
@@ -109,9 +110,15 @@ impl MCPManager {
     }
 
     /// Initialize all connections
+    ///
+    /// FIX: Skips already-initialized clients to support shared MCPManager
+    /// across multiple agents.
     pub async fn initialize_all(&self) -> Result<(), MCPError> {
         let clients = self.clients.read().await;
         for (name, client) in clients.iter() {
+            if client.is_initialized() {
+                continue;
+            }
             client
                 .initialize()
                 .await

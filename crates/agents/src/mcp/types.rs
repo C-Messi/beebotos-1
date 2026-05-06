@@ -9,6 +9,7 @@ use serde_json::Value;
 
 /// JSON-RPC request
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
     pub id: RequestId,
@@ -30,6 +31,7 @@ impl JsonRpcRequest {
 
 /// JSON-RPC response
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
     pub id: RequestId,
@@ -41,6 +43,7 @@ pub struct JsonRpcResponse {
 
 /// JSON-RPC error
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
@@ -93,6 +96,7 @@ impl From<u64> for RequestId {
 
 /// MCP protocol version
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MCPVersion {
     pub protocol_version: String,
 }
@@ -107,6 +111,7 @@ impl MCPVersion {
 
 /// Initialize request params
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
     pub protocol_version: String,
     pub capabilities: ClientCapabilities,
@@ -115,6 +120,7 @@ pub struct InitializeParams {
 
 /// Initialize result
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeResult {
     pub protocol_version: String,
     pub capabilities: ServerCapabilities,
@@ -123,6 +129,7 @@ pub struct InitializeResult {
 
 /// Client capabilities
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampling: Option<Value>,
@@ -130,6 +137,7 @@ pub struct ClientCapabilities {
 
 /// Server capabilities
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolsCapability>,
@@ -143,12 +151,14 @@ pub struct ServerCapabilities {
 
 /// Tools capability
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolsCapability {
     pub list_changed: bool,
 }
 
 /// Resources capability
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourcesCapability {
     pub subscribe: bool,
     pub list_changed: bool,
@@ -156,12 +166,14 @@ pub struct ResourcesCapability {
 
 /// Prompts capability
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromptsCapability {
     pub list_changed: bool,
 }
 
 /// Implementation info
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Implementation {
     pub name: String,
     pub version: String,
@@ -169,6 +181,7 @@ pub struct Implementation {
 
 /// Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Tool {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,6 +192,7 @@ pub struct Tool {
 /// Tool result content
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[serde(rename_all = "camelCase")]
 pub enum ToolContent {
     #[serde(rename = "text")]
     Text { text: String },
@@ -190,6 +204,7 @@ pub enum ToolContent {
 
 /// Resource definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub uri: String,
     pub name: String,
@@ -201,6 +216,7 @@ pub struct Resource {
 /// Resource contents
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[serde(rename_all = "camelCase")]
 pub enum ResourceContents {
     #[serde(rename = "text")]
     Text {
@@ -218,6 +234,7 @@ pub enum ResourceContents {
 
 /// Prompt definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Prompt {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -228,6 +245,7 @@ pub struct Prompt {
 
 /// Prompt argument
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromptArgument {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -237,6 +255,7 @@ pub struct PromptArgument {
 
 /// Prompt message
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromptMessage {
     pub role: Role,
     pub content: PromptContent,
@@ -251,6 +270,7 @@ pub enum Role {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[serde(rename_all = "camelCase")]
 pub enum PromptContent {
     #[serde(rename = "text")]
     Text { text: String },
@@ -262,6 +282,7 @@ pub enum PromptContent {
 
 /// List tools result
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListToolsResult {
     pub tools: Vec<Tool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -270,6 +291,7 @@ pub struct ListToolsResult {
 
 /// Call tool params
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CallToolParams {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -278,6 +300,7 @@ pub struct CallToolParams {
 
 /// Call tool result
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CallToolResult {
     pub content: Vec<ToolContent>,
     pub is_error: bool,
@@ -285,6 +308,7 @@ pub struct CallToolResult {
 
 /// List resources result
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListResourcesResult {
     pub resources: Vec<Resource>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -293,18 +317,21 @@ pub struct ListResourcesResult {
 
 /// Read resource params
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReadResourceParams {
     pub uri: String,
 }
 
 /// Read resource result
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReadResourceResult {
     pub contents: Vec<ResourceContents>,
 }
 
 /// List prompts result
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListPromptsResult {
     pub prompts: Vec<Prompt>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -313,6 +340,7 @@ pub struct ListPromptsResult {
 
 /// Get prompt params
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GetPromptParams {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,6 +349,7 @@ pub struct GetPromptParams {
 
 /// Get prompt result
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GetPromptResult {
     pub description: Option<String>,
     pub messages: Vec<PromptMessage>,
@@ -328,6 +357,7 @@ pub struct GetPromptResult {
 
 /// Progress notification
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProgressParams {
     pub progress_token: ProgressToken,
     pub progress: i64,
@@ -355,6 +385,7 @@ pub enum LoggingLevel {
 
 /// Log message params
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogMessageParams {
     pub level: LoggingLevel,
     pub logger: Option<String>,

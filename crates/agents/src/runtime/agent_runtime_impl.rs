@@ -54,6 +54,8 @@ pub struct GatewayAgentRuntime {
     skill_registry: Option<Arc<crate::skills::SkillRegistry>>,
     /// 🟢 P2 OPTIMIZE: Cached skill catalog to avoid repeated filesystem scans
     skill_catalog: RwLock<Option<String>>,
+    /// 🆕 MCP manager for external tool access
+    mcp_manager: Option<Arc<crate::mcp::MCPManager>>,
 }
 
 /// Handle to an agent's task
@@ -137,15 +139,17 @@ impl GatewayAgentRuntime {
             llm_interface: llm_interface.clone(),
             skill_registry: Some(skill_registry.clone()),
             skill_catalog: RwLock::new(None),
+            mcp_manager: None,
         };
 
-        // 🔒 P0 FIX: Recover agents from persistent state
-        if let Err(e) = runtime.recover_agents().await {
-            warn!("Failed to recover agents from persistent state: {}", e);
-            // Continue startup even if recovery fails - system should still be functional
-        }
-
         Ok(runtime)
+    }
+
+    /// 🆕 Recover agents after all runtime dependencies (including MCP manager) are configured.
+    /// Call this after with_mcp() and with_skill_registry() to ensure recovered agents
+    /// have access to MCP tools.
+    pub async fn recover_agents_now(&self) -> Result<()> {
+        self.recover_agents().await
     }
     
     /// 🟢 P2 FIX: Get metrics collector reference
@@ -162,6 +166,12 @@ impl GatewayAgentRuntime {
     /// already had built-in skills registered).
     pub fn with_skill_registry(mut self, registry: Arc<crate::skills::SkillRegistry>) -> Self {
         self.skill_registry = Some(registry);
+        self
+    }
+
+    /// 🆕 Inject MCP manager for external tool access
+    pub fn with_mcp(mut self, manager: Arc<crate::mcp::MCPManager>) -> Self {
+        self.mcp_manager = Some(manager);
         self
     }
 
@@ -320,13 +330,25 @@ impl GatewayAgentRuntime {
                 for m in &metas {
                     info!("  - skill: {} (id={}, kind={:?})", m.name, m.id, m.kind);
                 }
-                let catalog = if metas.is_empty() {
+                let mut lines: Vec<String> = metas
+                    .iter()
+                    .map(|m| format!("- {} ({}): {}", m.id, m.category, m.description))
+                    .collect();
+                // Also include skills from registry (includes MCP skills)
+                if let Some(ref registry) = self.skill_registry {
+                    let registered = registry.list_all().await;
+                    for r in &registered {
+                        let id = &r.skill.id;
+                        let desc = &r.skill.manifest.description;
+                        if !lines.iter().any(|l| l.starts_with(&format!("- {} ", id))) {
+                            lines.push(format!("- {} ({}): {}", id, r.category, desc));
+                        }
+                    }
+                    info!("Added {} skills from registry to catalog (total {})", registered.len(), lines.len());
+                }
+                let catalog = if lines.is_empty() {
                     None
                 } else {
-                    let lines: Vec<String> = metas
-                        .iter()
-                        .map(|m| format!("- {} ({}): {}", m.id, m.category, m.description))
-                        .collect();
                     Some(lines.join("\n"))
                 };
                 *self.skill_catalog.write().await = catalog.clone();
@@ -340,6 +362,11 @@ impl GatewayAgentRuntime {
         // 🟢 P2 FIX: Attach skill registry to recovered agent
         if let Some(ref registry) = self.skill_registry {
             builder = builder.with_skill_registry(registry.clone());
+        }
+
+        // 🆕 Attach MCP manager to recovered agent
+        if let Some(ref mcp) = self.mcp_manager {
+            builder = builder.with_mcp(mcp.clone());
         }
 
         let (task_id, task_sender) = builder
@@ -530,6 +557,7 @@ impl GatewayAgentRuntime {
             llm_interface,
             skill_registry: Some(skill_registry),
             skill_catalog: RwLock::new(None),
+            mcp_manager: None,
         }
     }
 
@@ -716,13 +744,25 @@ impl AgentRuntime for GatewayAgentRuntime {
                     for m in &metas {
                         info!("  - skill: {} (id={}, kind={:?})", m.name, m.id, m.kind);
                     }
-                    let catalog = if metas.is_empty() {
+                    let mut lines: Vec<String> = metas
+                        .iter()
+                        .map(|m| format!("- {} ({}): {}", m.id, m.category, m.description))
+                        .collect();
+                    // Also include skills from registry (includes MCP skills)
+                    if let Some(ref registry) = self.skill_registry {
+                        let registered = registry.list_all().await;
+                        for r in &registered {
+                            let id = &r.skill.id;
+                            let desc = &r.skill.manifest.description;
+                            if !lines.iter().any(|l| l.starts_with(&format!("- {} ", id))) {
+                                lines.push(format!("- {} ({}): {}", id, r.category, desc));
+                            }
+                        }
+                        info!("Added {} skills from registry to catalog (total {})", registered.len(), lines.len());
+                    }
+                    let catalog = if lines.is_empty() {
                         None
                     } else {
-                        let lines: Vec<String> = metas
-                            .iter()
-                            .map(|m| format!("- {} ({}): {}", m.id, m.category, m.description))
-                            .collect();
                         Some(lines.join("\n"))
                     };
                     *self.skill_catalog.write().await = catalog.clone();
@@ -761,6 +801,11 @@ impl AgentRuntime for GatewayAgentRuntime {
             // 🟢 P2 FIX: Attach skill registry to agent
             if let Some(ref registry) = self.skill_registry {
                 builder = builder.with_skill_registry(registry.clone());
+            }
+
+            // 🆕 Attach MCP manager to agent
+            if let Some(ref mcp) = self.mcp_manager {
+                builder = builder.with_mcp(mcp.clone());
             }
 
             let (task_id, task_sender) = builder

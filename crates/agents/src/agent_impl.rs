@@ -27,7 +27,7 @@ use crate::skills::composition::{InputMapping, PipelineStep, SkillPipeline};
 pub struct Agent {
     pub(crate) config: AgentConfig,
     pub(crate) a2a_client: Option<a2a::A2AClient>,
-    pub(crate) mcp_manager: Option<mcp::MCPManager>,
+    pub(crate) mcp_manager: Option<Arc<mcp::MCPManager>>,
     pub(crate) outbound_router: Option<Arc<communication::OutboundMessageRouter>>,
     pub(crate) message_rx: Option<tokio::sync::mpsc::Receiver<communication::UserMessageContext>>,
     pub(crate) queue_manager: Option<Arc<queue::QueueManager>>,
@@ -121,7 +121,7 @@ impl Agent {
         self
     }
 
-    pub fn with_mcp(mut self, manager: mcp::MCPManager) -> Self {
+    pub fn with_mcp(mut self, manager: Arc<mcp::MCPManager>) -> Self {
         self.mcp_manager = Some(manager);
         self
     }
@@ -411,7 +411,8 @@ impl Agent {
                 communication::PlatformType::Custom,
                 format!(
                     "[System Context] You have access to the following skills. \
-RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id> and nothing else. \
+RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>|{{\"param\":\"value\"}}. \
+The parameters MUST be a valid JSON object after the '|'. If no parameters are needed, use SKILL:<skill_id>|{{}}. \
 (2) If the user asks what skills are available, DIRECTLY list the available skill names and brief descriptions. \
 (3) If NO skill matches, answer directly from general knowledge. \
 (4) NEVER analyze, list, or mention available skills in your reply unless asked. \
@@ -432,11 +433,16 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
         if response.is_empty() {
             return response.to_string();
         }
+        // 🆕 FIX: If response contains SKILL: marker anywhere, extract it directly
+        if let Some(pos) = response.find("SKILL:") {
+            return response[pos..].trim().to_string();
+        }
         // If response starts with known thinking prefixes, try to extract actual answer
         let thinking_prefixes = [
             "用户问的是",
             "用户询问的是",
             "用户想知道",
+            "用户想要",
             "用户的问题是",
             "查看可用的skills",
             "让我看看可用的",
@@ -459,6 +465,7 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
             "根据系统提示",
             "根据要求",
             "根据可用技能",
+            "根据规则",
             "RULES:",
             "规则：",
         ];
@@ -799,6 +806,105 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
             metadata.insert("image_urls".to_string(), serde_json::to_string(&image_urls).unwrap_or_default());
         }
 
+        // 🆕 FIX: When gateway has already matched a skill, execute it directly.
+        // This bypasses the LLM call for MCP tools and other registered skills that
+        // the gateway has confidently matched.
+        if let Some(ref hint) = skill_hint {
+            if let Some(skill_id) = hint.get("id").and_then(|v| v.as_str()) {
+                // Try registry first
+                let registry_result = if let Some(ref registry) = self.skill_registry {
+                    registry.get(skill_id).await
+                } else {
+                    None
+                };
+
+                if let Some(registered) = registry_result {
+                    info!("Gateway matched skill '{}', executing directly without LLM call", skill_id);
+                    // 🆕 FIX: Enrich input with gateway-provided context (weather_data, etc.)
+                    let enriched_input = if let Some(ref weather) = weather_data {
+                        if !weather.is_empty() {
+                            format!("{}\n\n[参考数据] 实时天气：{}\n请基于以上数据回答。", input_text, weather)
+                        } else {
+                            input_text.clone()
+                        }
+                    } else {
+                        input_text.clone()
+                    };
+                    let skill_result = self.execute_registered_skill(&registered, &enriched_input, None).await;
+                    match skill_result {
+                        Ok(result) => {
+                            if let Some(ref registry) = self.skill_registry {
+                                let _ = registry.record_usage(skill_id).await;
+                            }
+                            let output = self.synthesize_skill_output(&input_text, &result.output, skill_id);
+                            return Ok((output, vec![]));
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            // 🆕 FIX: If direct execution failed due to missing arguments,
+                            // fall back to LLM so it can extract parameters from natural language.
+                            if err_str.contains("Missing required parameter")
+                                || err_str.contains("argument validation failed")
+                                || err_str.contains("Unknown parameter")
+                            {
+                                warn!("Direct skill execution for '{}' failed due to args issue, falling back to LLM: {}", skill_id, e);
+                                // Continue to LLM path below instead of returning error
+                            } else {
+                                warn!("Direct skill execution for '{}' failed: {}", skill_id, e);
+                                return Ok((format!("执行 skill '{}' 时出错: {}", skill_id, e), vec![]));
+                            }
+                        }
+                    }
+                } else if let Some((server_name, tool_name)) = crate::mcp::skill_bridge::parse_mcp_skill_id(skill_id) {
+                    // 🆕 FIX: Fallback for MCP skills not found in registry.
+                    // Execute directly via MCP manager without requiring registry entry.
+                    info!("Gateway matched MCP skill '{}' not in registry, executing directly via MCP client", skill_id);
+                    if let Some(ref mcp) = self.mcp_manager {
+                        if let Some(client) = mcp.get_client(server_name).await {
+                            let mut arguments = serde_json::Map::new();
+                            if !input_text.is_empty() {
+                                match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&input_text) {
+                                    Ok(map) => arguments = map,
+                                    Err(_) => {
+                                        arguments.insert("query".to_string(), serde_json::Value::String(input_text.to_string()));
+                                    }
+                                }
+                            }
+                            let args = if arguments.is_empty() { None } else { Some(arguments) };
+                            match client.call_tool(tool_name, args).await {
+                                Ok(result) => {
+                                    let output = if result.is_error {
+                                        let error_text = result.content.iter().filter_map(|c| match c {
+                                            crate::mcp::types::ToolContent::Text { text } => Some(text.clone()),
+                                            _ => None,
+                                        }).collect::<Vec<_>>().join("\n");
+                                        return Ok((format!("MCP tool returned error: {}", error_text), vec![]));
+                                    } else {
+                                        result.content.iter().filter_map(|c| match c {
+                                            crate::mcp::types::ToolContent::Text { text } => Some(text.clone()),
+                                            _ => None,
+                                        }).collect::<Vec<_>>().join("\n")
+                                    };
+                                    let output = self.synthesize_skill_output(&input_text, &output, skill_id);
+                                    return Ok((output, vec![]));
+                                }
+                                Err(e) => {
+                                    warn!("Direct MCP tool call for '{}' failed: {}", skill_id, e);
+                                    return Ok((format!("MCP tool 调用失败: {}", e), vec![]));
+                                }
+                            }
+                        } else {
+                            warn!("MCP client '{}' not found for skill '{}'", server_name, skill_id);
+                        }
+                    } else {
+                        warn!("MCP manager not configured for skill '{}'", skill_id);
+                    }
+                } else {
+                    warn!("Gateway matched skill '{}' but not found in registry", skill_id);
+                }
+            }
+        }
+
         // Build message list with memory context, history, and current message
         let mut messages: Vec<communication::Message> = Vec::new();
 
@@ -833,23 +939,29 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
 
         // 🆕 FIX: Append skill-catalog trigger instruction to persona so the LLM
         // knows to emit SKILL:<id> when the user request matches a registered skill.
-        // Only add this instruction when NO skill has been matched yet (skill_hint is None).
-        // If skill_hint already exists, the gateway has already matched a skill; the agent
-        // should execute it directly without asking the LLM to emit SKILL:<id>.
         let is_generative_skill = skill_hint.as_ref().map_or(false, |hint| {
             let name = hint.get("name").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
             name.contains("travel") && name.contains("planner")
         });
-        let persona = if self.skill_catalog.is_some() && skill_hint.is_none() && !is_generative_skill {
-            format!(
-                "{}\n\n[系统指令] 当用户请求与某个 skill 匹配时，请只回复 SKILL:<skill_id>，不要提供其他解释。",
-                persona
-            )
+        let persona = if self.skill_catalog.is_some() && !is_generative_skill {
+            if let Some(ref hint) = skill_hint {
+                // 🆕 FIX: Gateway already matched a skill; tell LLM to emit SKILL:id|params directly
+                let skill_id = hint.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                format!(
+                    "{}\n\n[系统指令] 用户请求已匹配 skill '{}'. 你必须只回复 SKILL:{}|{{\"param\":\"value\"}} 格式，不要添加任何解释、分析或前言。参数必须是合法的 JSON 对象。",
+                    persona, skill_id, skill_id
+                )
+            } else {
+                format!(
+                    "{}\n\n[系统指令] 当用户请求与某个 skill 匹配时，请只回复 SKILL:<skill_id>|{{\"param\":\"value\"}}，不要提供其他解释。",
+                    persona
+                )
+            }
         } else {
             persona
         };
         // 🆕 FIX: Force direct answer — Kimi k2.6 tends to explain system instructions
-        let persona = format!("{}\n\n[强制规则] 直接回答用户问题，不要解释你收到了什么数据、什么技能指引或系统指令。禁止以\"用户问的是...\"、\"系统提示我...\"、\"我需要...\"开头。", persona);
+        let persona = format!("{}\n\n[强制规则] 直接回答用户问题，不要解释你收到了什么数据、什么技能指引或系统指令。禁止以\"用户问的是...\"、\"系统提示我...\"、\"我需要...\"、\"根据规则...\"开头。", persona);
         messages.push(communication::Message::new(
             uuid::Uuid::new_v4(),
             communication::PlatformType::Custom,
@@ -902,7 +1014,9 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
                             if total_chars + entry.len() > max_memory_chars {
                                 if total_chars == 0 {
                                     // First entry already too long, truncate it
-                                    let truncated = format!("- {}...", &r.content[..r.content.len().min(max_memory_chars - 4)]);
+                                    // FIX: Use chars() to avoid slicing in the middle of a UTF-8 char
+                                    let trunc_len = max_memory_chars.saturating_sub(4);
+                                    let truncated = format!("- {}...", r.content.chars().take(trunc_len).collect::<String>());
                                     total_chars += truncated.len();
                                     return Some(truncated);
                                 }
@@ -1010,24 +1124,96 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
 
         // 🆕 FIX: If the LLM response is a skill trigger (e.g. "SKILL:hello_world"),
         // look up the skill in the registry and execute it instead of returning raw text.
-        if let Some(skill_id) = response.trim().strip_prefix("SKILL:") {
-            // 🛡️ FIX: Parse only the skill ID before any parameters (| or whitespace)
-            let skill_id = skill_id.trim().split(|c: char| c == '|' || c.is_whitespace()).next().unwrap_or("").trim();
-            if skill_id.is_empty() {
-                warn!("LLM returned empty skill ID after parsing: {}", response.trim());
-            } else {
-                info!("LLM requested skill execution: {}", skill_id);
-                if let Some(ref registry) = self.skill_registry {
-                    if let Some(registered) = registry.get(skill_id).await {
-                        let skill_result = self.execute_registered_skill(&registered, &input_text, None).await;
-                        match skill_result {
-                            Ok(result) => {
-                                let _ = registry.record_usage(skill_id).await;
-                                return Ok((result.output, vec![]));
+        let trimmed = response.trim();
+        let skill_part = if trimmed.starts_with("SKILL:") {
+            trimmed.strip_prefix("SKILL:")
+        } else if let Some(pos) = trimmed.find("SKILL:") {
+            trimmed[pos..].strip_prefix("SKILL:")
+        } else {
+            None
+        };
+        if let Some(skill_part) = skill_part {
+            let skill_part = skill_part.trim();
+            // 🆕 FIX: Parse skill ID and optional parameters separated by '|'
+            let (skill_id, skill_params, json_parse_failed) = match skill_part.find('|') {
+                Some(pos) => {
+                    let id = skill_part[..pos].trim();
+                    let params_json = skill_part[pos + 1..].trim();
+                    let mut parse_failed = false;
+                    let params = if params_json.is_empty() || params_json == "{}" {
+                        None
+                    } else {
+                        match serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(params_json) {
+                            Ok(map) => {
+                                let string_map: std::collections::HashMap<String, String> = map
+                                    .into_iter()
+                                    .map(|(k, v)| (k, v.to_string().trim_matches('"').to_string()))
+                                    .collect();
+                                Some(string_map)
                             }
                             Err(e) => {
-                                warn!("Skill execution for '{}' failed: {}", skill_id, e);
-                                return Ok((format!("执行 skill '{}' 时出错: {}", skill_id, e), vec![]));
+                                warn!("LLM returned invalid JSON parameters for skill '{}': {} (raw: {})", id, e, params_json);
+                                parse_failed = true;
+                                None
+                            }
+                        }
+                    };
+                    (id, params, parse_failed)
+                }
+                None => {
+                    // 🛡️ Fallback: Parse only the skill ID before any whitespace
+                    let id = skill_part.split_whitespace().next().unwrap_or("").trim();
+                    (id, None, false)
+                }
+            };
+
+            if skill_id.is_empty() {
+                warn!("LLM returned empty skill ID after parsing: {}", response.trim());
+            } else if json_parse_failed {
+                // 🆕 FIX: LLM output SKILL:id|{incomplete_json — JSON parse failed.
+                // Skip skill execution and fall back to normal LLM path so the LLM can retry or answer directly.
+                warn!("LLM returned SKILL:{} with invalid/incomplete JSON parameters. Falling back to normal LLM path.", skill_id);
+                // Continue to normal LLM path below instead of executing skill with missing params
+            } else {
+                info!("LLM requested skill execution: {} (params: {:?})", skill_id, skill_params);
+                if let Some(ref registry) = self.skill_registry {
+                    let mut resolved_skill = registry.get(skill_id).await;
+                    // 🆕 Fallback: if exact match fails, search for skill ID ending with /{skill_id}
+                    // This handles cases where LLM returns just the tool name without mcp:server/ prefix
+                    if resolved_skill.is_none() && !skill_id.contains(':') && !skill_id.contains('/') {
+                        let all_skills = registry.list_all().await;
+                        for skill in &all_skills {
+                            if skill.skill.id.ends_with(&format!("/{}", skill_id)) {
+                                info!("Resolved partial skill ID '{}' to full ID '{}'", skill_id, skill.skill.id);
+                                resolved_skill = Some(skill.clone());
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(registered) = resolved_skill {
+                        let resolved_id = registered.skill.id.clone();
+                        // 🆕 FIX: Pass parsed parameters to skill execution instead of always None
+                        // 🆕 FIX: Enrich input with gateway-provided context (weather_data, etc.)
+                        let enriched_input = if let Some(ref weather) = weather_data {
+                            if !weather.is_empty() {
+                                format!("{}\n\n[参考数据] 实时天气：{}\n请基于以上数据回答。", input_text, weather)
+                            } else {
+                                input_text.clone()
+                            }
+                        } else {
+                            input_text.clone()
+                        };
+                        let skill_input = if skill_params.is_some() { "" } else { enriched_input.as_str() };
+                        let skill_result = self.execute_registered_skill(&registered, skill_input, skill_params).await;
+                        match skill_result {
+                            Ok(result) => {
+                                let _ = registry.record_usage(&resolved_id).await;
+                                let output = self.synthesize_skill_output(&input_text, &result.output, &resolved_id);
+                                return Ok((output, vec![]));
+                            }
+                            Err(e) => {
+                                warn!("Skill execution for '{}' failed: {}", resolved_id, e);
+                                return Ok((format!("执行 skill '{}' 时出错: {}", resolved_id, e), vec![]));
                             }
                         }
                     } else {
@@ -1121,6 +1307,34 @@ RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>
         ));
         llm.call_llm(self.inject_skill_catalog(messages), None).await
             .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))
+    }
+
+    /// 🆕 FIX: Synthesize structured skill output (JSON, etc.) into natural language.
+    /// Uses dedicated templates for known skills to avoid extra LLM latency;
+    /// falls back to generic JSON flattening for unknown skills.
+    fn synthesize_skill_output(
+        &self,
+        _user_query: &str,
+        raw_output: &str,
+        skill_id: &str,
+    ) -> String {
+        let trimmed = raw_output.trim();
+        let is_structured = trimmed.starts_with('{') || trimmed.starts_with('[');
+
+        if !is_structured {
+            return raw_output.to_string();
+        }
+
+        // 🆕 FIX: Format known MCP skills with dedicated templates for zero-latency output
+        if let Some(formatted) = format_known_skill_output(skill_id, raw_output) {
+            return formatted;
+        }
+
+        // Generic JSON fallback: flatten to readable key-value list
+        match format_generic_json(raw_output) {
+            Some(text) => text,
+            None => raw_output.to_string(),
+        }
     }
 
     /// 🟢 P2 FIX: Judge a condition using LLM (used by LlmJudge in conditional/loop)
@@ -2699,6 +2913,137 @@ pub enum TaskComplexity {
     Simple,
     /// Complex task - requires planning
     Complex,
+}
+
+// ============================================================================
+// 🆕 FIX: Structured output formatters for known MCP skills
+// ============================================================================
+
+fn format_known_skill_output(skill_id: &str, raw_output: &str) -> Option<String> {
+    match skill_id {
+        "mcp:alpaca/get_crypto_latest_trade" => format_crypto_latest_trade(raw_output),
+        "mcp:alpaca/get_crypto_snapshot" => format_crypto_snapshot(raw_output),
+        _ => None,
+    }
+}
+
+fn format_crypto_latest_trade(raw_output: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw_output).ok()?;
+    let trades = v.get("trades")?.as_object()?;
+    let mut lines = vec!["📊 最新成交".to_string()];
+    for (symbol, data) in trades {
+        let p = data.get("p")?.as_f64()?;
+        let s = data.get("s").and_then(|s| s.as_f64()).unwrap_or(0.0);
+        let t = data.get("t").and_then(|t| t.as_str()).unwrap_or("");
+        lines.push(format!("• {} 最新成交价: {:.2} USD", symbol, p));
+        if s > 0.0 {
+            lines.push(format!("  成交量: {:.6}", s));
+        }
+        if !t.is_empty() {
+            lines.push(format!("  成交时间: {}", t));
+        }
+    }
+    Some(lines.join("\n"))
+}
+
+fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw_output).ok()?;
+    // Alpaca may wrap snapshots under a "snapshots" key or return them directly.
+    let snapshots = v.get("snapshots")
+        .and_then(|s| s.as_object())
+        .or_else(|| v.as_object())?;
+    let mut lines = vec!["📈 BTC 市场快照".to_string()];
+
+    for (symbol, data) in snapshots {
+        // Skip non-symbol wrapper keys at the top level when falling back to v.as_object()
+        if symbol == "snapshots" {
+            continue;
+        }
+        lines.push(format!("\n【{}】", symbol));
+
+        if let Some(lt) = data.get("latestTrade") {
+            if let Some(p) = lt.get("p").and_then(|p| p.as_f64()) {
+                lines.push(format!("  最新成交价: {:.2} USD", p));
+            }
+            if let Some(s) = lt.get("s").and_then(|s| s.as_f64()) {
+                lines.push(format!("  最新成交量: {:.6}", s));
+            }
+        }
+
+        if let Some(q) = data.get("latestQuote") {
+            if let Some(bid) = q.get("bp").and_then(|p| p.as_f64()) {
+                if let Some(ask) = q.get("ap").and_then(|p| p.as_f64()) {
+                    lines.push(format!("  买一 / 卖一: {:.2} / {:.2} USD", bid, ask));
+                }
+            }
+        }
+
+        if let Some(db) = data.get("dailyBar") {
+            let o = db.get("o").and_then(|p| p.as_f64());
+            let h = db.get("h").and_then(|p| p.as_f64());
+            let l = db.get("l").and_then(|p| p.as_f64());
+            let c = db.get("c").and_then(|p| p.as_f64());
+            let v = db.get("v").and_then(|p| p.as_f64());
+            if o.is_some() && h.is_some() && l.is_some() && c.is_some() {
+                lines.push(format!(
+                    "  日K线: 开 {:.2} / 高 {:.2} / 低 {:.2} / 收 {:.2}",
+                    o.unwrap(), h.unwrap(), l.unwrap(), c.unwrap()
+                ));
+            }
+            if let Some(v) = v {
+                lines.push(format!("  日成交量: {:.4}", v));
+            }
+        }
+
+        if let Some(pb) = data.get("prevDailyBar") {
+            if let Some(prev_c) = pb.get("c").and_then(|p| p.as_f64()) {
+                if let Some(curr_c) = data.get("dailyBar").and_then(|db| db.get("c")).and_then(|p| p.as_f64()) {
+                    let change = ((curr_c - prev_c) / prev_c) * 100.0;
+                    lines.push(format!("  较昨日收盘: {:+.2}%", change));
+                }
+            }
+        }
+
+        if let Some(mb) = data.get("minuteBar") {
+            if let Some(c) = mb.get("c").and_then(|p| p.as_f64()) {
+                lines.push(format!("  最新分钟线收盘价: {:.2} USD", c));
+            }
+        }
+    }
+
+    Some(lines.join("\n"))
+}
+
+fn format_generic_json(raw_output: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw_output).ok()?;
+    let lines = flatten_json_value("", &v, 0);
+    Some(lines.join("\n"))
+}
+
+fn flatten_json_value(key: &str, value: &serde_json::Value, depth: usize) -> Vec<String> {
+    let indent = "  ".repeat(depth);
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut lines = vec![];
+            for (k, v) in map {
+                let full_key = if key.is_empty() { k.clone() } else { format!("{} > {}", key, k) };
+                lines.extend(flatten_json_value(&full_key, v, depth + 1));
+            }
+            lines
+        }
+        serde_json::Value::Array(arr) => {
+            let mut lines = vec![];
+            for (i, v) in arr.iter().enumerate() {
+                let item_key = format!("{}[{}]", key, i);
+                lines.extend(flatten_json_value(&item_key, v, depth + 1));
+            }
+            lines
+        }
+        serde_json::Value::String(s) => vec![format!("{}- {}: {}", indent, key, s)],
+        serde_json::Value::Number(n) => vec![format!("{}- {}: {}", indent, key, n)],
+        serde_json::Value::Bool(b) => vec![format!("{}- {}: {}", indent, key, b)],
+        serde_json::Value::Null => vec![format!("{}- {}: null", indent, key)],
+    }
 }
 
 // ============================================================================
