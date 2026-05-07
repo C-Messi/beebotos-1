@@ -32,7 +32,6 @@ CLI 现有 **23 个命令**，但存在大量功能缺口。
 
 ### 2.1 Agent 命令
 
-Gateway V1 API (12 路由) + V2 API (14 路由) = 26 路由
 
 **已有子命令**: Create, List, Start, Stop, Pause, Resume, Logs, Delete, Clone, Export, Import, SetIdentity, Exec, Run, Bind, Unbind
 
@@ -45,7 +44,6 @@ Gateway V1 API (12 路由) + V2 API (14 路由) = 26 路由
 - `ValidTransitions` - GET /api/v1/agents/:id/state/transitions
 - `GetStateContext` - GET /api/v1/agents/:id/state/context
 
-**V2 API 完全未覆盖** (14 路由):
 - list_agents_v2, create_agent_v2, get_agent_v2, delete_agent_v2
 - start_agent_v2, stop_agent_v2, get_agent_status_v2, execute_task_v2
 - list_agent_channels, bind_agent_channel, unbind_agent_channel
@@ -72,7 +70,6 @@ Gateway API (14 路由)
 
 ### 2.3 Chain 命令
 
-Gateway V1 API (9 路由) + V2 API (9 路由) = 18 路由
 
 **已有子命令**: Status, Balance, Transfer, Deploy, Call, Watch
 
@@ -86,13 +83,10 @@ Gateway V1 API (9 路由) + V2 API (9 路由) = 18 路由
 - `CastVote` - POST /api/v1/chain/dao/proposals/:id/vote
 - `DaoSummary` - GET /api/v1/chain/dao/summary
 
-**V2 API 未覆盖**:
 - get_wallet_info, transfer (V2)
-- V2 版的 DAO 和身份管理
 
 ### 2.4 Channel 命令
 
-Gateway V1 API (7 路由) + V2 API (6 路由) = 13 路由
 
 **已有子命令**: List, Status, Capabilities, Resolve, Logs, Add, Remove, Login, Logout, Send, Test, Generate
 
@@ -244,13 +238,8 @@ Gateway API (6 路由)
 
 **合计: ~30 个路由**
 
-### 🟢 轻度缺失（V2 API 未覆盖）
 
-| 命令 | 缺失 V2 功能 |
 |------|-------------|
-| agent | 全部 V2 API (14 路由) |
-| chain | V2 wallet, V2 DAO (6 路由) |
-| channel | V2 user-channels (6 路由) |
 
 **合计: 26 个路由**
 
@@ -269,7 +258,6 @@ Gateway API (6 路由)
 6. **browser** 子命令补全（Profiles, Sandboxes, Connect）
 7. **mcp** - 4 路由
 8. **auth** - 5 路由
-9. **channel** V2 user-channels
 10. **task** - 5 路由
 
 ### 低优先级（P2）
@@ -279,7 +267,6 @@ Gateway API (6 路由)
 14. **user-settings** - 2 路由
 15. **capabilities** - 2 路由
 16. **gateway** Metrics/Health 子命令
-17. **chain** DAO/V2 功能
 
 ---
 
@@ -292,6 +279,5 @@ Gateway API (6 路由)
 | CLI 缺失路由（估算） | ~99 |
 | 完全缺失的命令模块 | 10 |
 | 现有命令中缺失子命令 | 6+ |
-| V2 API 未覆盖 | 26 |
 | CLI 命令总数 | 23 |
 | 建议新增命令数 | 10 |

@@ -212,10 +212,7 @@ pub async fn create_agent_v2(
 
     Ok((
         StatusCode::CREATED,
-        Json(json!({
-            "agent": response,
-            "message": "Agent created successfully via AgentRuntime",
-        })),
+        Json(response),
     ))
 }
 
@@ -224,7 +221,7 @@ pub async fn get_agent_v2(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, GatewayError> {
+) -> Result<Json<AgentResponse>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
     // 🟢 P1 FIX: Use StateStore to query agent info
@@ -243,10 +240,27 @@ pub async fn get_agent_v2(
         _ => return Err(GatewayError::not_found("Agent", &id)),
     };
 
-    Ok(Json(json!({
-        "agent": info,
-        "version": "v2 (AgentRuntime)",
-    })))
+    let info = match info {
+        QueryResult::AgentInfo { config, current_state, created_at, updated_at, .. } => {
+            AgentResponse {
+                id: id.clone(),
+                name: config.name,
+                description: Some(config.description),
+                status: current_state.to_string(),
+                capabilities: config.capabilities.into_iter().map(|c| c.name).collect(),
+                model: ModelInfo {
+                    provider: config.llm_config.provider,
+                    name: config.llm_config.model,
+                },
+                created_at,
+                updated_at,
+                last_heartbeat: None,
+            }
+        }
+        _ => return Err(GatewayError::not_found("Agent", &id)),
+    };
+
+    Ok(Json(info))
 }
 
 /// Delete agent (V2)
