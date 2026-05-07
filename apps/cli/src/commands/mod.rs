@@ -12,6 +12,7 @@ pub mod gateway;
 pub mod security;
 pub mod setup;
 pub mod info;
+pub mod update;
 pub mod infer;
 pub mod interactive;
 pub mod logs;

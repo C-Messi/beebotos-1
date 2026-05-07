@@ -174,6 +174,7 @@ impl AgentInstance {
                 neuroticism: 0.5,
                 base_mood: "neutral".to_string(),
             },
+            intent_confidence_threshold: Some(0.7),
         };
 
         let mut agent = beebotos_agents::Agent::new(agent_config);

@@ -12,11 +12,13 @@ members = [
     "crates/telemetry",
     "crates/gateway-lib",
     "crates/message-bus",
+    "crates/update-client",
     # Applications
     "apps/gateway",
     "apps/web",
     "apps/cli",
     "apps/beehub",
+    "beeweb",
 ]
 
 resolver = "2"

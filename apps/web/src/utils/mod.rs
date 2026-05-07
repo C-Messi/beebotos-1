@@ -3,6 +3,7 @@ use gloo_storage::{LocalStorage, Storage};
 pub mod dom;
 pub mod security;
 pub mod theme;
+pub mod updater;
 pub mod validation;
 
 pub use dom::{download_file, event_target_checked, event_target_value};

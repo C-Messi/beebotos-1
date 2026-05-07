@@ -1093,7 +1093,7 @@ async fn test_full_update_flow() {
 - 完整的端到端流程
 - 生产环境验证
 
-注意：需要开发beeweb server 代码，把beeweb server代码放在位置：/root/BeeWeb
+注意：需要开发beeweb server 代码，把beeweb server代码放在位置：/root/beebotos/beeweb
 
 ---
 

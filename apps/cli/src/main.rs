@@ -95,6 +95,9 @@ enum Commands {
     /// System information
     Info(commands::info::InfoArgs),
 
+    /// Self-update
+    Update(commands::update::UpdateArgs),
+
     /// AI inference capabilities (text, image, audio, video)
     Infer(commands::infer::InferArgs),
 
@@ -228,6 +231,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Gateway(args) => commands::gateway::execute(args).await,
         Commands::Info(args) => commands::info::execute(args).await,
+        Commands::Update(args) => commands::update::execute(args).await,
         Commands::Infer(args) => commands::infer::execute(args).await,
         Commands::Interactive(args) => commands::interactive::execute(args).await,
         Commands::Logs(args) => {

@@ -1787,6 +1787,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "beebotos-beeweb"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "chrono",
+ "dashmap 6.1.0",
+ "ed25519-dalek",
+ "hex",
+ "prometheus",
+ "reqwest 0.12.28",
+ "semver 1.0.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-test",
+ "tower 0.4.13",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "beebotos-brain"
 version = "1.0.0"
 dependencies = [
@@ -1877,6 +1907,7 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "base64 0.22.1",
+ "beebotos-update-client",
  "chrono",
  "clap",
  "clap_complete",
@@ -1983,6 +2014,7 @@ dependencies = [
  "beebotos-kernel",
  "beebotos-message-bus",
  "beebotos-telemetry",
+ "beebotos-update-client",
  "chrono",
  "colored 2.2.0",
  "config 0.14.1",
@@ -2201,11 +2233,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "beebotos-update-client"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "dirs",
+ "ed25519-dalek",
+ "futures",
+ "gloo-net 0.5.0",
+ "hex",
+ "js-sys",
+ "reqwest 0.12.28",
+ "semver 1.0.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-test",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "beebotos-web"
 version = "1.1.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
+ "beebotos-update-client",
  "chrono",
  "clap",
  "config 0.14.1",

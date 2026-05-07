@@ -13,7 +13,8 @@ name = "beebot"
 path = "src/main.rs"
 
 [dependencies]
-# Internal crates - uncomment as needed
+# Internal crates
+beebotos-update-client = { path = "../../crates/update-client" }
 # beebotos-core = { path = "../../crates/core" }
 # beebotos-kernel = { path = "../../crates/kernel" }
 # beebotos-agents = { path = "../../crates/agents" }

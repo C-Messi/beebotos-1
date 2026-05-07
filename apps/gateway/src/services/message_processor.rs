@@ -20,7 +20,7 @@ use crate::services::llm_service::LlmService;
 use crate::services::agent_resolver::AgentResolver;
 use crate::services::webchat_service::WebchatService;
 use crate::error::GatewayError;
-use crate::clients::{ClawHubClient, HubError};
+use crate::clients::ClawHubClient;
 
 /// 消息处理器
 pub struct MessageProcessor {
@@ -1151,7 +1151,7 @@ impl MessageProcessor {
     }
 
     /// Extract SKILL.md from a ZIP archive
-    async fn extract_skill_md_from_zip(data: &[u8], dest_dir: &std::path::Path) -> Result<String, String> {
+    async fn extract_skill_md_from_zip(data: &[u8], _dest_dir: &std::path::Path) -> Result<String, String> {
         use std::io::{Cursor, Read};
         let cursor = Cursor::new(data);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("ZIP error: {}", e))?;

@@ -49,6 +49,7 @@ mod models;
 mod services;
 mod state_machine;
 mod telemetry;
+mod updater;
 
 use beebotos_agents::{
     ChannelRegistry, DingTalkChannelFactory, DiscordChannelFactory, GatewayAgentRuntime,
@@ -430,7 +431,7 @@ impl AppState {
             }
         }
 
-        let mut gateway_runtime = GatewayAgentRuntime::new(Some(kernel.clone()), Some(llm_interface), agent_runtime_config, Some(db.clone()))
+        let gateway_runtime = GatewayAgentRuntime::new(Some(kernel.clone()), Some(llm_interface), agent_runtime_config, Some(db.clone()))
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize AgentRuntime: {}", e))?
             .with_skill_registry(skill_registry.clone())
@@ -1296,7 +1297,43 @@ async fn main() -> anyhow::Result<()> {
     // Create router
     let app = create_router(app_state.clone(), gateway_state);
 
-    // Start server
+    // Initialize updater service
+    let update_config = beebotos_update_client::config::UpdateConfig::from_env()
+        .with_app_name("gateway")
+        .with_server_url(&std::env::var("BEEWEB_UPDATE_SERVER").unwrap_or_else(|_| "http://localhost:8080".to_string()));
+    
+    if let Ok(updater_service) = updater::service::GatewayUpdateService::new(update_config) {
+        // Start scheduled update checks
+        updater_service.start_scheduler().await;
+        info!("Gateway update scheduler started");
+
+        let updater_state = updater::handlers::UpdaterState::new(Arc::new(updater_service));
+        let updater_routes = axum::Router::new()
+            .route("/api/v1/system/updates/status", axum::routing::get(updater::handlers::get_update_status))
+            .route("/api/v1/system/updates/check", axum::routing::post(updater::handlers::check_update))
+            .route("/api/v1/system/updates/apply", axum::routing::post(updater::handlers::apply_update))
+            .route("/api/v1/system/updates/rollback", axum::routing::post(updater::handlers::rollback_update))
+            .with_state(updater_state);
+        let app = app.merge(updater_routes);
+        info!("Gateway updater module initialized");
+        
+        // Start server
+        let addr = app_config
+            .server_addr()
+            .map_err(|e| anyhow::anyhow!("Invalid server address: {}", e))?;
+        info!("Server configured to listen on {}", addr);
+
+        // Choose between HTTP and HTTPS
+        if app_config.tls.as_ref().map(|t| t.enabled).unwrap_or(false) {
+            start_https_server(app, addr, &app_config).await?;
+        } else {
+            start_http_server(app, addr).await?;
+        }
+        return Ok(());
+    }
+
+    // Start server (if updater not initialized)
+
     let addr = app_config
         .server_addr()
         .map_err(|e| anyhow::anyhow!("Invalid server address: {}", e))?;

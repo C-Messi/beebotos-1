@@ -17,6 +17,7 @@ beebotos-agents = { workspace = true }
 beebotos-chain = { workspace = true }
 beebotos-message-bus = { workspace = true, features = ["memory"] }
 beebotos-telemetry = { workspace = true, features = ["metrics"] }
+beebotos-update-client = { path = "../../crates/update-client" }
 
 # Use gateway-lib for infrastructure
 gateway = { package = "beebotos-gateway-lib", path = "../../crates/gateway-lib" }

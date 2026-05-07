@@ -503,7 +503,7 @@ pub async fn get_workflow(
 
 /// Get raw YAML/JSON source of a workflow
 pub async fn get_workflow_source(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkflowSourceResponse>, GatewayError> {
     validate_workflow_id(&id)?;
