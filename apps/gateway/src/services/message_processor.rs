@@ -1006,98 +1006,11 @@ impl MessageProcessor {
         re.find(content).map(|m| m.as_str().to_string())
     }
 
-    /// 🆕 FIX: 尝试匹配 Skill，返回最佳匹配的 skill hint (skill_id, name, description, prompt_template)
-    /// 支持 domain keyword 映射 + registry 语义搜索 + name 子串匹配
-    async fn try_match_skill(&self, content: &str) -> Option<(String, String, String, String)> {
-        // 查询太短不应触发 skill 匹配
-        if content.chars().count() < 4 {
-            return None;
-        }
-        let registry = self.skill_registry.as_ref()?;
-        let query_lower = content.to_lowercase();
-
-        // 🆕 NOTE: MCP skills are no longer directly matched by gateway.
-        // They are included in the skill catalog sent to the LLM, which chooses
-        // the appropriate skill based on user intent.
-
-        // 1. Domain keyword → skill ID 快速映射（中文 + 英文）
-        // FIX: Removed overly broad keywords (e.g. "paper" matching URLs like paper-api.alpaca.markets).
-        // FIX: Added crypto/alpaca keywords so MCP tools get matched before generic skills.
-        let domain_keywords: &[(&[&str], &str)] = &[
-            (&["travel", "tour", "trip", "itinerary", "旅游", "旅行", "行程", "攻略", "景点", "酒店", "规划", "计划"], "travel_planner"),
-            (&["code", "program", "develop", "debug", "coding", "编程", "代码", "开发", "python"], "python_developer"),
-            (&["rust", "cargo"], "rust_developer"),
-            (&["contract", "solidity", "smart contract", "合约", "区块链"], "solidity_developer"),
-            (&["email", "draft", "邮件", "写信"], "email_writer"),
-            (&["story", "novel", "fiction", "故事", "小说"], "story_writer"),
-            (&["game", "gaming", "游戏", "玩家"], "game_master"),
-            (&["data", "analyze", "analysis", "数据", "分析", "统计"], "data_analyst"),
-            (&["image", "photo", "picture", "图", "照片"], "image_analyst"),
-            (&["calendar", "schedule", "meeting", "日历", "会议", "安排"], "calendar_assistant"),
-            (&["task", "todo", "plan", "任务", "待办"], "task_manager"),
-            (&["defi", "yield", "liquidity", "farm", "挖矿", "流动性"], "yield_farmer"),
-            (&["nft", "mint", "token", "数字藏品"], "nft_minter"),
-            (&["health", "medical", "doctor", "健康", "医疗", "医生"], "health_advisor"),
-            (&["learn", "study", "tutor", "lesson", "学习", "课程", "辅导"], "tutor"),
-            (&["code research", "contract audit", "漏洞分析", "智能合约审计"], "code_researcher"),
-            (&["dao", "governance", "proposal", "vote", "治理", "提案", "投票"], "governance_analyst"),
-            (&["finance", "portfolio", "invest", "理财", "投资", "组合", "黄金"], "portfolio_manager"),
-            (&["social", "community", "content", "社媒", "社群", "内容"], "content_creator"),
-            (&["security", "audit", "vulnerability", "安全", "审计", "漏洞"], "auditor"),
-            (&["weather", "forecast", "天气", "预报", "降雨", "温度"], "weather_assistant"),
-            // 🆕 FIX: High-priority crypto/alpaca keywords to avoid being hijacked by generic skills
-            // Note: order matters — more specific / report-oriented keywords first.
-            (&["btc", "bitcoin", "比特币", "eth", "ethereum", "以太坊", "crypto market", "加密货币市场", "crypto price", "币价", "crypto snapshot", "crypto quote", "情况报告", "市场报告", "市场分析", "行情分析"], "mcp:alpaca/get_crypto_snapshot"),
-            (&["alpaca", "crypto latest trade", "latest trade", "最新成交", "实时成交", "加密货币交易"], "mcp:alpaca/get_crypto_latest_trade"),
-        ];
-
-        for (keywords, skill_id) in domain_keywords {
-            if keywords.iter().any(|kw| query_lower.contains(kw)) {
-                if let Some(skill) = registry.get(skill_id).await {
-                    if skill.enabled {
-                        info!("🎯 Skill domain matched: '{}' for query '{}'", skill_id, content.chars().take(40).collect::<String>());
-                        return Some((
-                            skill_id.to_string(),
-                            skill.skill.name.clone(),
-                            skill.skill.manifest.description.clone(),
-                            skill.skill.manifest.prompt_template.clone(),
-                        ));
-                    }
-                }
-            }
-        }
-
-        // 2. Registry semantic search fallback
-        let results = registry.search(content).await;
-        if results.is_empty() {
-            // 🆕 FIX: When no local skill matches, try discovering from ClawHub marketplace
-            if let Some(hint) = self.try_install_from_clawhub(content).await {
-                return Some(hint);
-            }
-            return None;
-        }
-        let best = &results[0];
-        let name_lower = best.skill.name.to_lowercase();
-        // name 子串强匹配
-        // 🆕 FIX: Normalize underscores to spaces for substring matching,
-        // so "get_crypto_latest_trade" matches "get crypto latest trade".
-        let name_normalized = name_lower.replace('_', " ");
-        let query_normalized = query_lower.replace('_', " ");
-        let is_strong_match = name_normalized.contains(&query_normalized)
-            || query_normalized.contains(&name_normalized);
-        if is_strong_match {
-            info!("🎯 Skill matched: '{}' for query '{}'", best.skill.id, content.chars().take(40).collect::<String>());
-            let hint = (
-                best.skill.id.clone(),
-                best.skill.name.clone(),
-                best.skill.manifest.description.clone(),
-                best.skill.manifest.prompt_template.clone(),
-            );
-            Some(hint)
-        } else {
-            debug!("Skill match too weak: '{}' for query '{}'", best.skill.id, content.chars().take(40).collect::<String>());
-            None
-        }
+    /// 🆕 FIX: Gateway-side skill matching is disabled. 
+    /// LLM now has full autonomy to choose the appropriate skill from the catalog based on user intent.
+    /// This avoids keyword-misunderstanding issues where gateway matches a skill that does not fit the user request.
+    async fn try_match_skill(&self, _content: &str) -> Option<(String, String, String, String)> {
+        None
     }
 
     /// 🆕 FIX: Try to discover and install a skill from ClawHub when no local match is found.
@@ -1631,7 +1544,7 @@ impl MessageProcessor {
                         }
                     }
                     if system_context.is_empty() {
-                        system_context = "你是 BeeBotOS 的个人 AI 助手，用中文友好地回答用户。\n".to_string();
+                        system_context = "You are a helpful assistant for BeeBotOS. Answer the user in a friendly and concise manner.\n".to_string();
                     }
                     info!("📄 Simple query mode: loaded minimal persona ({} chars)", system_context.chars().count());
                 } else {

@@ -762,8 +762,116 @@ impl AppState {
     }
 }
 
+/// 🆕 FIX: Detect and terminate stale beebotos-gateway processes that may
+/// hold SQLite file locks, preventing new instances from blocking 1-2 minutes.
+fn kill_stale_instances() {
+    let current_pid = std::process::id() as i32;
+    let exe_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "beebotos-gateway".to_string());
+
+    // Collect stale PIDs via pgrep
+    let mut stale_pids: Vec<i32> = Vec::new();
+    if let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-f", &exe_name])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Ok(pid) = line.trim().parse::<i32>() {
+                    if pid != current_pid {
+                        stale_pids.push(pid);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: ps aux
+    if stale_pids.is_empty() {
+        if let Ok(output) = std::process::Command::new("ps").args(["aux"]).output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.contains(&exe_name) && !line.contains("grep") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() > 1 {
+                        if let Ok(pid) = parts[1].parse::<i32>() {
+                            if pid != current_pid {
+                                stale_pids.push(pid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if stale_pids.is_empty() {
+        return;
+    }
+
+    eprintln!(
+        "[Startup] Detected {} stale '{}' process(es): {:?}. Terminating...",
+        stale_pids.len(),
+        exe_name,
+        stale_pids
+    );
+
+    // SIGTERM first
+    for pid in &stale_pids {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output();
+    }
+
+    // Wait up to 3s
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        let mut all_dead = true;
+        for pid in &stale_pids {
+            // kill -0 checks if process exists (returns 0 if alive)
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if alive {
+                all_dead = false;
+                break;
+            }
+        }
+        if all_dead {
+            eprintln!("[Startup] All stale processes terminated cleanly.");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    // SIGKILL survivors
+    for pid in &stale_pids {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if alive {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .output();
+            eprintln!("[Startup] Sent SIGKILL to stale process {}", pid);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // 🆕 FIX: Kill stale gateway instances to prevent SQLite lock contention.
+    // Stale processes (e.g. from previous `timeout` runs or crashes) hold
+    // SQLite file handles, causing new instances to block on WAL/migration.
+    kill_stale_instances();
+
     // Load environment variables from .env file if present
     dotenvy::dotenv().ok();
 

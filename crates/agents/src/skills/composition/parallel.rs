@@ -123,11 +123,11 @@ impl MergeStrategy {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let prompt = format!(
-                    "{}\n\n请对以下多个分支的结果进行汇总和总结：\n\n{}",
+                    "{}\n\nPlease summarize and consolidate the results from the following parallel branches:\n\n{}",
                     prompt_template, combined
                 );
                 match agent.call_llm_prompt(&prompt, Some::<String>(
-                    "你是一个结果汇总助手。你的任务是将多个并行执行分支的输出合并为一个连贯、简洁的总结。".into()
+                    "You are a result-summarization assistant. Your task is to merge outputs from multiple parallel execution branches into a coherent, concise summary.".into()
                 )).await {
                     Ok(summary) => Ok(summary),
                     Err(e) => {

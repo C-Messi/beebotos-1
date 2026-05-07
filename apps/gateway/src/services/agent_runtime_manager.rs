@@ -74,7 +74,34 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
             .as_ref()
             .and_then(|c| c.get("max_tokens"))
             .and_then(|t| t.parse::<u32>().ok());
-        self.llm_service.chat(final_messages, max_tokens_override).await.map_err(|e| {
+
+        // 🆕 FIX: Support native function calling via tools_json in extra_params
+        // Agent sends Vec<communication::ToolDefinition>, convert to llm::Tool here.
+        let tools: Option<Vec<beebotos_agents::llm::Tool>> = _context
+            .as_ref()
+            .and_then(|c| c.get("tools_json"))
+            .and_then(|json_str| {
+                serde_json::from_str::<Vec<beebotos_agents::communication::ToolDefinition>>(json_str).ok()
+            })
+            .map(|defs| {
+                defs.into_iter()
+                    .map(|d| beebotos_agents::llm::Tool {
+                        r#type: "function".to_string(),
+                        function: beebotos_agents::llm::FunctionDefinition {
+                            name: d.name,
+                            description: Some(d.description),
+                            parameters: d.parameters,
+                        },
+                    })
+                    .collect()
+            });
+
+        let tool_choice = _context
+            .as_ref()
+            .and_then(|c| c.get("tool_choice"))
+            .cloned();
+
+        self.llm_service.chat(final_messages, max_tokens_override, tools, tool_choice).await.map_err(|e| {
             beebotos_agents::error::AgentError::Execution(format!("LLM call failed: {}", e))
         })
     }

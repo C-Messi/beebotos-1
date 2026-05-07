@@ -55,7 +55,7 @@ default_provider = "kimi"
 fallback_chain = []
 max_tokens = 4096
 request_timeout = 180
-system_prompt = "你是 BeeBotOS 的个人 AI 助手，由 BeeBotOS 团队开发。请始终以这个身份回答用户问题。"
+system_prompt = "You are a helpful assistant."
 
 [models.kimi]
 base_url = "https://api.moonshot.cn/v1"

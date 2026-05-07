@@ -212,7 +212,7 @@ pub trait WebhookHandlerRegistry: Send + Sync {
 }
 
 /// Tool definition for LLM native function calling
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
@@ -451,38 +451,13 @@ impl CommunicationManager {
     /// Connect all platforms
     pub async fn connect_all(&mut self) -> Vec<Result<()>> {
         let mut results = Vec::new();
-        for (platform_type, adapter) in &mut self.platforms {
-            info!("Connecting to platform: {:?}", platform_type);
-            match adapter.connect().await {
-                Ok(()) => {
-                    info!("Successfully connected to {:?}", platform_type);
-                    results.push(Ok(()));
-                }
-                Err(e) => {
-                    error!("Failed to connect to {:?}: {}", platform_type, e);
-                    results.push(Err(e));
-                }
-            }
-        }
+        
         results
     }
 
     /// Disconnect all platforms
     pub async fn disconnect_all(&mut self) -> Vec<Result<()>> {
         let mut results = Vec::new();
-        for (platform_type, adapter) in &mut self.platforms {
-            info!("Disconnecting from platform: {:?}", platform_type);
-            match adapter.disconnect().await {
-                Ok(()) => {
-                    info!("Successfully disconnected from {:?}", platform_type);
-                    results.push(Ok(()));
-                }
-                Err(e) => {
-                    error!("Failed to disconnect from {:?}: {}", platform_type, e);
-                    results.push(Err(e));
-                }
-            }
-        }
         results
     }
 

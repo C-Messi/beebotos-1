@@ -313,17 +313,6 @@ impl Agent {
 
         // Find all skill references in the message, in order of appearance
         let mut matched_skills: Vec<(usize, String)> = Vec::new();
-        for skill in &skills {
-            let skill_name_lower = skill.skill.name.to_lowercase();
-            let skill_id_lower = skill.skill.id.to_lowercase();
-
-            // Search for skill name or ID in message
-            if let Some(pos) = lower_msg.find(&skill_name_lower) {
-                matched_skills.push((pos, skill.skill.id.clone()));
-            } else if let Some(pos) = lower_msg.find(&skill_id_lower) {
-                matched_skills.push((pos, skill.skill.id.clone()));
-            }
-        }
 
         // Deduplicate and sort by position in message
         matched_skills.sort_by_key(|(pos, _id)| *pos);
@@ -410,13 +399,7 @@ impl Agent {
                 uuid::Uuid::new_v4(),
                 communication::PlatformType::Custom,
                 format!(
-                    "[System Context] You have access to the following skills. \
-RULES: (1) If a skill matches the user request, reply ONLY with SKILL:<skill_id>|{{\"param\":\"value\"}}. \
-The parameters MUST be a valid JSON object after the '|'. If no parameters are needed, use SKILL:<skill_id>|{{}}. \
-(2) If the user asks what skills are available, DIRECTLY list the available skill names and brief descriptions. \
-(3) If NO skill matches, answer directly from general knowledge. \
-(4) NEVER analyze, list, or mention available skills in your reply unless asked. \
-(5) NEVER start with '用户问的是', '查看可用的skills', '根据系统指令', 'RULES:', '规则：', '让我整理' or similar meta-commentary.\n\n{}",
+                    "[System Context] You have access to the following skills.\n\n{}\n\nINSTRUCTION:\n1. When a skill matches the user request, reply ONLY with SKILL:<id>|{{\"key\":\"value\"}} using REAL values.\n2. If no skill matches, answer directly.\n3. NEVER analyze, explain, or think out loud. NEVER list parameters. NEVER use placeholders like <id> or {{\"param\":\"value\"}}.\n4. If info is missing, ask in ONE short sentence.\n\nEXAMPLES:\nUser: What's the weather in Beijing?\nOutput: SKILL:weather_assistant|{{\"city\":\"Beijing\"}}\n\nUser: Buy 0.01 BTC\nOutput: SKILL:mcp:alpaca/place_crypto_order|{{\"symbol\":\"BTC/USD\",\"side\":\"buy\",\"qty\":\"0.01\"}}",
                     catalog
                 ),
             )];
@@ -434,8 +417,38 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
             return response.to_string();
         }
         // 🆕 FIX: If response contains SKILL: marker anywhere, extract it directly
+        // But truncate after the JSON parameters to avoid trailing thinking text
         if let Some(pos) = response.find("SKILL:") {
-            return response[pos..].trim().to_string();
+            let after_skill = &response[pos..];
+            let potential_id = after_skill.strip_prefix("SKILL:").unwrap_or("").trim();
+            let id_part = potential_id.split(|c: char| c == '|' || c == ' ' || c == '\n' || c == '\r').next().unwrap_or("");
+            let invalid_ids = ["<skill_id>", "<id>", "工具id", "工具ID", "immediately", "format", "directly", "direct", "output", "skill", "id", "real", "actual"];
+            if !id_part.is_empty() && !invalid_ids.contains(&id_part) {
+                if let Some(pipe_pos) = after_skill.find('|') {
+                    let after_pipe = &after_skill[pipe_pos + 1..];
+                    let mut depth = 0i32;
+                    let mut json_end = 0;
+                    let mut in_json = false;
+                    for (i, c) in after_pipe.char_indices() {
+                        if c == '{' {
+                            depth += 1;
+                            in_json = true;
+                        } else if c == '}' {
+                            depth -= 1;
+                            if in_json && depth == 0 {
+                                json_end = i + 1;
+                                break;
+                            }
+                        }
+                    }
+                    if json_end > 0 {
+                        return format!("{}", &after_skill[..pipe_pos + 1 + json_end]);
+                    }
+                }
+                // Fallback: if no JSON found, just take the first line
+                return after_skill.lines().next().unwrap_or(after_skill).trim().to_string();
+            }
+            // Invalid skill ID (placeholder), fall through to thinking-prefix cleanup
         }
         // If response starts with known thinking prefixes, try to extract actual answer
         let thinking_prefixes = [
@@ -443,6 +456,8 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
             "用户询问的是",
             "用户想知道",
             "用户想要",
+            "用户要求",
+            "用户请求",
             "用户的问题是",
             "查看可用的skills",
             "让我看看可用的",
@@ -456,16 +471,26 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
             "系统提示我",
             "系统指令",
             "根据系统指令",
+            "系统指令明确说",
+            "首先，我需要",
+            "首先我需要",
             "我需要",
             "我来分析",
             "让我分析一下",
             "让我整理",
+            "等等，让我",
+            "等等，",
+            "不过 ",
             "首先，",
             "第一步",
             "根据系统提示",
             "根据要求",
             "根据可用技能",
             "根据规则",
+            "参数要求",
+            "参数分析",
+            "查看可用的 skills",
+            "INSTRUCTION:",
             "RULES:",
             "规则：",
         ];
@@ -504,7 +529,6 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
             for line in response.lines() {
                 let trimmed = line.trim();
                 if trimmed.len() > 20
-                    && !thinking_prefixes.iter().any(|p| trimmed.starts_with(p))
                     && !trimmed.starts_with("-")
                     && !trimmed.starts_with("•")
                     && !trimmed.starts_with("【")
@@ -588,9 +612,10 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
         info!("Starting batch execution of {} tasks", tasks.len());
         let start_time = std::time::Instant::now();
 
-        let this = &*self;
-        let futures = tasks.into_iter().map(|task| this.process_task(task));
-        let results = futures::future::join_all(futures).await;
+        let mut results = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            results.push(self.execute_task(task).await);
+        }
 
         let elapsed = start_time.elapsed();
         info!(
@@ -920,18 +945,18 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
                     .map_or(false, |m| m.contains(prompt_template.trim().split('\n').next().unwrap_or("")));
                 if gateway_has_skill_prompt {
                     // Gateway 已注入完整 skill prompt，persona 只做轻量标识
-                    format!("你是 {}。请保持友好、专业、有帮助的态度回答问题。", name)
+                    format!("You are {}. Please remain friendly, professional, and helpful when answering questions.", name)
                 } else {
                     // Gateway 未注入，使用 skill prompt_template 作为 persona
                     format!("[角色] {}\n\n{}", name, prompt_template)
                 }
             } else {
                 let desc = hint.get("description").and_then(|v| v.as_str()).unwrap_or(&self.config.description);
-                format!("你是 {}（{}）。请保持友好、专业、有帮助的态度回答问题。", name, desc)
+                format!("You are {} ({}). Please remain friendly, professional, and helpful when answering questions.", name, desc)
             }
         } else {
             format!(
-                "你是 {}（{}）。请保持友好、专业、有帮助的态度回答问题。",
+                "You are {} ({}). Please remain friendly, professional, and helpful when answering questions.",
                 self.config.name,
                 self.config.description
             )
@@ -948,7 +973,7 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
                 // 🆕 FIX: Gateway already matched a skill; tell LLM to emit SKILL:id|params directly
                 let skill_id = hint.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 format!(
-                    "{}\n\n[系统指令] 用户请求已匹配 skill '{}'. 你必须只回复 SKILL:{}|{{\"param\":\"value\"}} 格式，不要添加任何解释、分析或前言。参数必须是合法的 JSON 对象。",
+                    "{}\n\n[系统指令] Gateway 建议使用的 skill 是 '{}'. 如果该 skill 能直接满足用户请求，请只回复 SKILL:{}|{{\"param\":\"value\"}} 格式，不要添加任何解释。如果该 skill 无法满足用户请求（例如用户要求的功能不在该 skill 范围内），请直接以自然语言回答用户的问题，不要强行调用不匹配的 skill。",
                     persona, skill_id, skill_id
                 )
             } else {
@@ -1087,6 +1112,161 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
         };
         extra_params.insert("max_tokens".to_string(), dynamic_max_tokens);
 
+        // 🆕 FIX: Build OpenAI-compatible function calling tools from skill registry.
+        // To keep prompt size manageable (Kimi context window), we filter the 100+
+        // tools down to the ~10-20 most relevant ones based on keyword overlap
+        // with the user query.
+        let mut tool_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Some(ref registry) = self.skill_registry {
+            let all_skills = registry.list_all().await;
+            if !all_skills.is_empty() {
+                // Extract keywords from user query
+                let query_lower = input_text.to_lowercase();
+                let stopwords: std::collections::HashSet<&str> = [
+                    "的","了","是","我","你","他","她","它","们","在","有","和","就","不","人","都","一","一个","上","也","很","到","说","要","去","可以","会","这","那","有","个","之","与","及","等","从","让","向","往","为","被","把","给","请","帮","来","做","看","想","知道","一下","根据","当前","现在","市场","形势","这个","那个",
+                    "the","a","an","is","are","was","were","be","been","being","have","has","had","do","does","did","will","would","could","should","may","might","must","shall","can","need","dare","ought","used","to","of","in","for","on","with","at","by","from","as","into","through","during","before","after","above","below","between","under","and","but","or","yet","so","if","because","although","though","while","where","when","that","which","who","whom","whose","what","how","why","it","its","this","these","those","i","me","my","myself","we","our","you","your","he","him","his","she","her","they","them","their","just","only","even","also","too","very","so","such","no","not","than","then","now","here","there","up","out","off","down","over","again","further","once","more","most","other","some","any","each","few","much","many","all","both","either","neither","one","two","first","last","good","new","old","great","high","small","different","large","next","early","young","important","public","same","able",
+                ].iter().cloned().collect();
+
+                let mut keywords: Vec<String> = query_lower
+                    .split(|c: char| !c.is_alphanumeric() && c != '/')
+                    .filter(|s| s.len() >= 2 && !stopwords.contains(s))
+                    .map(|s| s.to_string())
+                    .collect();
+                keywords.sort();
+                keywords.dedup();
+
+                // Expand crypto/trading related terms
+                let query_lower_str = query_lower.as_str();
+                if query_lower_str.contains("btc") || query_lower_str.contains("bitcoin") {
+                    keywords.push("btc".to_string());
+                    keywords.push("bitcoin".to_string());
+                    keywords.push("crypto".to_string());
+                    keywords.push("cryptocurrency".to_string());
+                }
+                if query_lower_str.contains("eth") || query_lower_str.contains("ethereum") {
+                    keywords.push("eth".to_string());
+                    keywords.push("ethereum".to_string());
+                    keywords.push("crypto".to_string());
+                }
+                if query_lower_str.contains("下单") || query_lower_str.contains("order") || query_lower_str.contains("buy") || query_lower_str.contains("sell") {
+                    keywords.push("order".to_string());
+                    keywords.push("trade".to_string());
+                    keywords.push("trading".to_string());
+                    keywords.push("place".to_string());
+                    keywords.push("下单".to_string());
+                }
+                if query_lower_str.contains("行情") || query_lower_str.contains("price") || query_lower_str.contains("snapshot") {
+                    keywords.push("snapshot".to_string());
+                    keywords.push("price".to_string());
+                    keywords.push("quote".to_string());
+                    keywords.push("market".to_string());
+                    keywords.push("行情".to_string());
+                }
+
+                // Detect explicit trading intent to boost order-placement tools
+                let has_trading_intent = query_lower_str.contains("下单")
+                    || query_lower_str.contains("购买")
+                    || query_lower_str.contains("买入")
+                    || query_lower_str.contains("卖出")
+                    || query_lower_str.contains("buy")
+                    || query_lower_str.contains("sell")
+                    || query_lower_str.contains("order")
+                    || query_lower_str.contains("place");
+
+                // Score each skill by keyword overlap
+                let mut scored_skills: Vec<(usize, &skills::registry::RegisteredSkill)> = Vec::new();
+                for registered in &all_skills {
+                    if !registered.enabled {
+                        continue;
+                    }
+                    let manifest = &registered.skill.manifest;
+                    let searchable = format!("{} {} {}", manifest.id, manifest.name, manifest.description).to_lowercase();
+                    let mut score = keywords.iter().filter(|k| searchable.contains(k.as_str())).count();
+                    // 🆕 FIX: Boost order placement tools when user explicitly wants to trade
+                    if has_trading_intent {
+                        let skill_id_lower = manifest.id.to_lowercase();
+                        if skill_id_lower.contains("place_") && skill_id_lower.contains("_order") {
+                            score += 20;
+                        }
+                    }
+                    if score > 0 {
+                        scored_skills.push((score, registered));
+                    }
+                }
+
+                // Sort by relevance (highest first) and take top 20
+                scored_skills.sort_by(|a, b| b.0.cmp(&a.0));
+                let selected = if scored_skills.len() >= 5 {
+                    scored_skills.into_iter().take(20).map(|(_, s)| s).collect::<Vec<_>>()
+                } else {
+                    // Fallback: if too few matches, use all enabled skills (but cap at 30)
+                    all_skills.iter().filter(|s| s.enabled).take(30).collect::<Vec<_>>()
+                };
+
+                let mut tools = Vec::new();
+                for registered in &selected {
+                    let manifest = &registered.skill.manifest;
+                    let func = manifest.functions.first();
+                    let (params_schema, desc) = if let Some(f) = func {
+                        let mut props = serde_json::Map::new();
+                        let mut required = Vec::new();
+                        for param in &f.inputs {
+                            let mut prop = serde_json::Map::new();
+                            prop.insert("type".to_string(), serde_json::Value::String(param.param_type.clone()));
+                            if !param.description.is_empty() {
+                                prop.insert("description".to_string(), serde_json::Value::String(param.description.clone()));
+                            }
+                            props.insert(param.name.clone(), serde_json::Value::Object(prop));
+                            if param.required {
+                                required.push(param.name.clone());
+                            }
+                        }
+                        let schema = serde_json::json!({
+                            "type": "object",
+                            "properties": props,
+                            "required": required,
+                        });
+                        // 🆕 FIX: Avoid duplicating manifest prefix + function docstring.
+                        // Use function description if available (it's usually the focused tool
+                        // description), otherwise fall back to manifest description.
+                        let description = if f.description.is_empty() {
+                            manifest.description.clone()
+                        } else {
+                            f.description.clone()
+                        };
+                        (schema, description)
+                    } else {
+                        (
+                            serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                            manifest.description.clone(),
+                        )
+                    };
+
+                    let original_name = registered.skill.id.clone();
+                    let normalized_name = original_name
+                        .replace(':', "-")
+                        .replace('/', "-");
+                    tool_name_map.insert(normalized_name.clone(), original_name);
+
+                    tools.push(communication::ToolDefinition {
+                        name: normalized_name,
+                        description: desc,
+                        parameters: params_schema,
+                    });
+                }
+
+                if !tools.is_empty() {
+                    match serde_json::to_string(&tools) {
+                        Ok(json) => {
+                            extra_params.insert("tools_json".to_string(), json);
+                            info!("handle_llm_task: injected {} / {} tools for native function calling (keywords: {:?})", tools.len(), all_skills.len(), keywords);
+                        }
+                        Err(e) => warn!("Failed to serialize tools: {}", e),
+                    }
+                }
+            }
+        }
+
         // 🟢 P2 FIX: Check LLM response cache for simple text queries (no images, < 500 chars)
         let cache_key = if image_urls.is_empty() && input_text.len() < 500 {
             let memory_hash = gateway_memory_context.as_ref().map(|m| m.len().to_string()).unwrap_or_else(|| "0".to_string());
@@ -1106,11 +1286,24 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
             drop(cache);
         }
 
-        let messages = self.inject_skill_catalog(messages);
-        info!("handle_llm_task: messages count after inject = {}, skill_catalog set = {}", messages.len(), self.skill_catalog.is_some());
+        // 🆕 FIX: When native function calling is active (tools_json present), skip the
+        // bulky text-based skill catalog and inject a strong command-style system hint.
+        let messages = if extra_params.contains_key("tools_json") {
+            let mut result = vec![communication::Message::new(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                "You are a BeeBotOS AI assistant. Your duty is to use the provided tools to fulfill user requests.\n\nRules:\n1. If a tool can handle the request, you MUST call it.\n2. NEVER output analysis, reasoning, or explanations.\n3. If a required parameter is missing, pass the values you know; the system will handle errors.".to_string(),
+            )];
+            result.extend(messages);
+            result
+        } else {
+            self.inject_skill_catalog(messages)
+        };
+        info!("handle_llm_task: messages count after inject = {}, skill_catalog set = {}, native_tools = {}",
+              messages.len(), self.skill_catalog.is_some(), extra_params.contains_key("tools_json"));
 
-        let response = llm
-            .call_llm(messages, Some(extra_params))
+        let mut response = llm
+            .call_llm(messages.clone(), Some(extra_params.clone()))
             .await
             .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?;
 
@@ -1121,6 +1314,42 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
             warn!("LLM returned empty response; skipping cache/history storage");
             return Ok(("抱歉，AI 暂时无法生成回复，请稍后再试。".to_string(), vec![]));
         }
+
+        // 🆕 FIX: When native function calling is active but LLM returns analysis text
+        // instead of a tool call, retry once with a stripped-down prompt to force
+        // tool invocation.
+        let is_native_tools = extra_params.contains_key("tools_json");
+        if is_native_tools && !response.trim().starts_with("SKILL:") && response.trim().len() > 200 {
+            warn!("LLM returned analysis text instead of tool_call. Retrying with forced tool prompt.");
+            let retry_messages = vec![
+                communication::Message::new(
+                    uuid::Uuid::new_v4(),
+                    communication::PlatformType::Custom,
+                    "You are a BeeBotOS AI assistant. Your sole duty is to call tools to fulfill the user request.\n\nFORBIDDEN:\n- Analysis, reasoning, explanations\n- Listing parameter descriptions\n- Describing what you are doing\n\nMUST:\n- Directly call the most appropriate tool\n- If a parameter is missing, fill it with known values; do NOT ask.".to_string(),
+                ),
+                communication::Message::new(
+                    uuid::Uuid::new_v4(),
+                    communication::PlatformType::Custom,
+                    format!("User: {}", input_text),
+                ),
+            ];
+            match llm.call_llm(retry_messages, Some(extra_params)).await {
+                Ok(retry_resp) if retry_resp.trim().starts_with("SKILL:") => {
+                    info!("Retry succeeded: LLM returned tool_call");
+                    response = retry_resp;
+                }
+                Ok(retry_resp) => {
+                    warn!("Retry also failed to produce tool_call. Keeping original response.");
+                }
+                Err(e) => {
+                    warn!("Retry LLM call failed: {}. Keeping original response.", e);
+                }
+            }
+        }
+
+        // 🆕 FIX: Clean up thinking process BEFORE parsing skill triggers so that
+        // trailing analysis text after SKILL: does not pollute skill ID extraction.
+        let mut response = Self::cleanup_thinking_process(&response);
 
         // 🆕 FIX: If the LLM response is a skill trigger (e.g. "SKILL:hello_world"),
         // look up the skill in the registry and execute it instead of returning raw text.
@@ -1167,17 +1396,36 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
                 }
             };
 
+            // 🆕 FIX: Common words that LLM mistakenly uses as skill IDs when it misinterprets system prompt
+            let invalid_skill_ids = ["immediately", "format", "directly", "direct", "output", "skill", "id", "real", "actual", "<skill_id>"];
+            let is_invalid_id = invalid_skill_ids.contains(&skill_id.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()));
+            // 🆕 FIX: Detect placeholder/example parameters that LLM copied from system prompt
+            let is_example_params = skill_params.as_ref().map_or(false, |p| {
+                p.len() == 1 && p.get("param") == Some(&"value".to_string())
+            });
             if skill_id.is_empty() {
                 warn!("LLM returned empty skill ID after parsing: {}", response.trim());
+            } else if is_invalid_id || is_example_params {
+                warn!("LLM output invalid skill ID '{}' or example params {:?}. Falling back to normal LLM path.", skill_id, skill_params);
+                response = "抱歉，我没有理解您的具体需求。请告诉我您想做什么，我会尽力帮助您。".to_string();
             } else if json_parse_failed {
                 // 🆕 FIX: LLM output SKILL:id|{incomplete_json — JSON parse failed.
                 // Skip skill execution and fall back to normal LLM path so the LLM can retry or answer directly.
                 warn!("LLM returned SKILL:{} with invalid/incomplete JSON parameters. Falling back to normal LLM path.", skill_id);
+                response = format!("我注意到您可能需要使用 '{}'，但缺少必要的参数。请补充相关信息，我会立即帮您处理。", skill_id);
                 // Continue to normal LLM path below instead of executing skill with missing params
             } else {
                 info!("LLM requested skill execution: {} (params: {:?})", skill_id, skill_params);
                 if let Some(ref registry) = self.skill_registry {
                     let mut resolved_skill = registry.get(skill_id).await;
+                    // 🆕 FIX: When using native function calling, the LLM sees normalized names
+                    // (colons/slashes replaced by dashes). Map back to the original skill ID.
+                    if resolved_skill.is_none() {
+                        if let Some(original_id) = tool_name_map.get(skill_id) {
+                            info!("Resolved normalized skill ID '{}' to original '{}'", skill_id, original_id);
+                            resolved_skill = registry.get(original_id).await;
+                        }
+                    }
                     // 🆕 Fallback: if exact match fails, search for skill ID ending with /{skill_id}
                     // This handles cases where LLM returns just the tool name without mcp:server/ prefix
                     if resolved_skill.is_none() && !skill_id.contains(':') && !skill_id.contains('/') {
@@ -1223,9 +1471,6 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
                 }
             }
         }
-
-        // 🆕 FIX: Clean up thinking process from LLM response
-        let response = Self::cleanup_thinking_process(&response);
 
         // 🟢 P2 FIX: Store response in cache
         if let Some(ref key) = cache_key {
@@ -1345,7 +1590,7 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
         );
         let result = self.call_llm_prompt(
             full_prompt,
-            Some::<String>("你是一个严谨的条件判断助手。只输出 true 或 false。".into())
+            Some::<String>("You are a strict conditional judge. Output only true or false.".into())
         ).await?;
         let trimmed = result.trim().to_lowercase();
         Ok(trimmed.contains("true") || trimmed.starts_with("是") || trimmed.starts_with("yes"))
@@ -2873,7 +3118,7 @@ The parameters MUST be a valid JSON object after the '|'. If no parameters are n
                 instance.duration_secs()
             );
             match self.call_llm_prompt(notify_prompt, Some::<String>(
-                "你是一个工作流通知助手，只生成简洁的完成通知消息，不超过两句话。".into()
+                "You are a workflow notification assistant. Generate only a concise completion message, no more than two sentences.".into()
             )).await {
                 Ok(notify_text) => {
                     info!("Workflow {} notification generated: {}", workflow_id, notify_text);

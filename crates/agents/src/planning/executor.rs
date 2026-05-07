@@ -212,7 +212,7 @@ impl DelegateResolver for AgentDelegateResolver {
             // Fallback: use LLM to process the task directly
             let llm_result = child.call_llm_prompt(
                 branch.task.clone(),
-                Some::<String>("你是一个专家助手，请完成给定的任务。".to_string())
+                Some::<String>("You are an expert assistant. Please complete the given task.".to_string())
             ).await.map_err(|e| format!("Sub-agent LLM call failed: {}", e))?;
             crate::skills::executor::SkillExecutionResult {
                 task_id: branch.branch_id.clone(),

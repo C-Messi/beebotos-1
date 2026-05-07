@@ -87,6 +87,19 @@ impl McpSkillBridge {
     fn tool_to_skill(skill_id: &str, server_name: &str, tool: &Tool) -> LoadedSkill {
         let description = tool.description.clone().unwrap_or_default();
 
+        // 🆕 FIX: Enrich description with parameter hints so keyword matching
+        // can surface tools even when the main docstring is short.
+        let mut rich_description = description.clone();
+        if let Some(props) = tool.input_schema.get("properties").and_then(|p| p.as_object()) {
+            for (name, prop) in props {
+                if let Some(desc) = prop.get("description").and_then(|d| d.as_str()) {
+                    if !desc.is_empty() {
+                        rich_description.push_str(&format!(" {}: {}.", name, desc));
+                    }
+                }
+            }
+        }
+
         // Convert JSON Schema input_schema into FunctionDef parameters
         let functions = vec![Self::schema_to_function(&tool.name, &description, &tool.input_schema)];
 
@@ -96,7 +109,7 @@ impl McpSkillBridge {
             version: Version::new(1, 0, 0),
             description: format!(
                 "MCP tool '{}' from server '{}'. {}",
-                tool.name, server_name, description
+                tool.name, server_name, rich_description
             ),
             author: format!("mcp:{}", server_name),
             capabilities: vec!["mcp".to_string(), "tool".to_string()],

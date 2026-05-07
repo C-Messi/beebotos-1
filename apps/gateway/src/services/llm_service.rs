@@ -532,16 +532,34 @@ impl LlmService {
     /// 🆕 FIX: Supports proper system/user/assistant role separation
     /// to avoid double-flattening in Agent→Gateway path.
     /// 🆕 FIX: Accept optional max_tokens override from caller (e.g. Agent extra_params).
-    pub async fn chat(&self, messages: Vec<LLMMessage>, max_tokens_override: Option<u32>) -> Result<String, GatewayError> {
+    /// 🆕 FIX: Supports native function calling via OpenAI-compatible tools parameter.
+    pub async fn chat(
+        &self,
+        messages: Vec<LLMMessage>,
+        max_tokens_override: Option<u32>,
+        tools: Option<Vec<beebotos_agents::llm::Tool>>,
+        tool_choice: Option<String>,
+    ) -> Result<String, GatewayError> {
         let start_time = std::time::Instant::now();
 
-        let request_config = RequestConfig {
+        let mut request_config = RequestConfig {
             model: self.get_default_model(),
             temperature: self.get_default_temperature(),
             max_tokens: max_tokens_override.or(Some(self.config.models.max_tokens)),
             stream: Some(false),
             ..Default::default()
         };
+
+        // 🆕 FIX: Attach tools for native function calling
+        if let Some(ref t) = tools {
+            request_config.tools = Some(t.clone());
+            let choice = tool_choice.as_deref().unwrap_or("auto");
+            request_config.tool_choice = match choice {
+                "required" => Some(beebotos_agents::llm::ToolChoice::Required("required".to_string())),
+                "none" => Some(beebotos_agents::llm::ToolChoice::None("none".to_string())),
+                _ => Some(beebotos_agents::llm::ToolChoice::Auto("auto".to_string())),
+            };
+        }
 
         let request = beebotos_agents::llm::types::LLMRequest {
             messages,
@@ -553,12 +571,6 @@ impl LlmService {
 
         match result {
             Ok(response) => {
-                let content = response
-                    .choices
-                    .first()
-                    .map(|choice| choice.message.text_content())
-                    .unwrap_or_default();
-
                 let (input_tokens, output_tokens) = response.usage.as_ref().map_or((0, 0), |u| {
                     (u.prompt_tokens, u.completion_tokens)
                 });
@@ -567,14 +579,45 @@ impl LlmService {
                     .record_success(latency_ms, input_tokens, output_tokens)
                     .await;
 
-                info!(
-                    "✅ Received LLM response: length={}, latency={}ms, tokens={}/{}",
-                    content.len(),
-                    latency_ms,
-                    input_tokens,
-                    output_tokens
-                );
-                Ok(content)
+                // 🆕 FIX: If the model returned tool_calls, format them as SKILL: lines
+                // so the agent can reuse its existing skill execution logic.
+                if let Some(choice) = response.choices.first() {
+                    if let Some(ref tool_calls) = choice.message.tool_calls {
+                        if !tool_calls.is_empty() {
+                            let skill_lines: Vec<String> = tool_calls
+                                .iter()
+                                .map(|tc| {
+                                    format!(
+                                        "SKILL:{}|{}",
+                                        tc.function.name,
+                                        tc.function.arguments
+                                    )
+                                })
+                                .collect();
+                            let result_text = skill_lines.join("\n");
+                            info!(
+                                "✅ Received LLM tool_calls ({} calls), formatted as SKILL: lines, latency={}ms, tokens={}/{}",
+                                tool_calls.len(),
+                                latency_ms,
+                                input_tokens,
+                                output_tokens
+                            );
+                            return Ok(result_text);
+                        }
+                    }
+
+                    let content = choice.message.text_content();
+                    info!(
+                        "✅ Received LLM response: length={}, latency={}ms, tokens={}/{}",
+                        content.len(),
+                        latency_ms,
+                        input_tokens,
+                        output_tokens
+                    );
+                    return Ok(content);
+                }
+
+                Ok(String::new())
             }
             Err(e) => {
                 self.metrics.record_failure();
