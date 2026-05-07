@@ -385,6 +385,7 @@ mod tests {
                     condition: None,
                     timeout_sec: Some(10),
                     retries: Some(1),
+                    on_error: None,
                 },
                 WorkflowStep {
                     id: "step2".to_string(),
@@ -395,8 +396,10 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                    on_error: None,
                 },
             ],
+            error_handler: None,
         }
     }
 

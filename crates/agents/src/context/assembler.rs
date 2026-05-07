@@ -5,12 +5,42 @@
 //! interactions.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::media::attachment::ParsedAttachment;
 use crate::media::formatter::{FormattedMessage, MessageFormatter, MessageRole};
+
+/// Summarizer trait for LLM-based context compression
+#[async_trait::async_trait]
+pub trait Summarizer: Send + Sync {
+    /// Summarize a list of messages into a concise summary
+    async fn summarize(&self, messages: &[ContextMessage]) -> Result<String>;
+}
+
+/// Simple rule-based summarizer (no LLM required)
+pub struct RuleBasedSummarizer;
+
+#[async_trait::async_trait]
+impl Summarizer for RuleBasedSummarizer {
+    async fn summarize(&self, messages: &[ContextMessage]) -> Result<String> {
+        let topics: Vec<String> = messages
+            .iter()
+            .map(|m| {
+                let content = m.content.chars().take(60).collect::<String>();
+                format!("{:?}: {}", m.role, content)
+            })
+            .collect();
+        Ok(format!(
+            "对话涉及 {} 轮交流，主题包括: {}",
+            messages.len(),
+            topics.join("; ")
+        ))
+    }
+}
 
 /// Assembled context ready for LLM consumption
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +107,27 @@ impl Default for ContextMetadata {
     }
 }
 
+/// History compression strategy for long conversations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryStrategy {
+    /// Keep recent N messages (current default)
+    RecentN(usize),
+    /// Keep head + recent tail + summarize middle
+    SummarizeMiddle {
+        keep_head: usize,
+        keep_tail: usize,
+        summary_tokens: usize,
+    },
+    /// Progressive summary (each round compressed to one sentence)
+    ProgressiveSummary,
+}
+
+impl Default for HistoryStrategy {
+    fn default() -> Self {
+        HistoryStrategy::RecentN(20)
+    }
+}
+
 /// Assembly strategy for handling context window limits
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +142,8 @@ pub enum AssemblyStrategy {
     PriorityBased,
     /// Summarize older messages instead of truncating
     SummarizeOld,
+    /// 🆕 OPTIMIZATION: Middle summarization with head+tail preservation
+    SummarizeMiddle,
 }
 
 impl std::fmt::Display for AssemblyStrategy {
@@ -101,6 +154,7 @@ impl std::fmt::Display for AssemblyStrategy {
             AssemblyStrategy::SystemAndRecent => write!(f, "system_and_recent"),
             AssemblyStrategy::PriorityBased => write!(f, "priority_based"),
             AssemblyStrategy::SummarizeOld => write!(f, "summarize_old"),
+            AssemblyStrategy::SummarizeMiddle => write!(f, "summarize_middle"),
         }
     }
 }
@@ -167,11 +221,23 @@ impl AssemblerConfig {
 }
 
 /// Context assembler for building LLM context
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct ContextAssembler {
     config: AssemblerConfig,
     message_formatter: MessageFormatter,
+    /// Optional LLM-based summarizer for context compression
+    summarizer: Option<Arc<dyn Summarizer>>,
+}
+
+impl std::fmt::Debug for ContextAssembler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextAssembler")
+            .field("config", &self.config)
+            .field("message_formatter", &self.message_formatter)
+            .field("has_summarizer", &self.summarizer.is_some())
+            .finish()
+    }
 }
 
 impl ContextAssembler {
@@ -180,6 +246,7 @@ impl ContextAssembler {
         Self {
             config: AssemblerConfig::default(),
             message_formatter: MessageFormatter::new(),
+            summarizer: None,
         }
     }
 
@@ -188,7 +255,14 @@ impl ContextAssembler {
         Self {
             config,
             message_formatter: MessageFormatter::new(),
+            summarizer: None,
         }
+    }
+
+    /// Set a custom summarizer for LLM-based context compression
+    pub fn with_summarizer(mut self, summarizer: Arc<dyn Summarizer>) -> Self {
+        self.summarizer = Some(summarizer);
+        self
     }
 
     /// Get the assembler configuration
@@ -396,6 +470,9 @@ impl ContextAssembler {
                 self.select_with_summarization(messages, available_tokens, &mut metadata)
                     .await?
             }
+            AssemblyStrategy::SummarizeMiddle => {
+                self.select_summarize_middle(messages, available_tokens, &mut metadata)
+            }
         };
 
         metadata.was_truncated = metadata.truncated_count > 0;
@@ -529,12 +606,212 @@ impl ContextAssembler {
         available_tokens: usize,
         metadata: &mut ContextMetadata,
     ) -> Result<Vec<ContextMessage>> {
-        // For now, fall back to system and recent
-        // TODO: Implement actual summarization using LLM
-        tracing::info!(
-            "Summarization strategy not yet implemented, falling back to system_and_recent"
-        );
-        Ok(self.select_system_and_recent(messages, available_tokens, metadata))
+        let keep_head = 2usize;
+        let keep_tail = 4usize;
+        let summary_budget_tokens = 200usize;
+
+        if messages.len() <= keep_head + keep_tail {
+            return Ok(self.select_system_and_recent(messages, available_tokens, metadata));
+        }
+
+        let head_end = keep_head.min(messages.len());
+        let tail_start = messages.len().saturating_sub(keep_tail);
+        let middle = &messages[head_end..tail_start];
+
+        // Generate summary using LLM if available, otherwise rule-based fallback
+        let summary = if let Some(ref summarizer) = self.summarizer {
+            match summarizer.summarize(middle).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("LLM summarization failed, using fallback: {}", e);
+                    Self::generate_simple_summary(middle)
+                }
+            }
+        } else {
+            tracing::info!("No summarizer configured, using rule-based summary");
+            Self::generate_simple_summary(middle)
+        };
+
+        let mut selected = Vec::new();
+        let mut token_count = 0;
+
+        // Keep head messages
+        for msg in &messages[..head_end] {
+            if token_count + msg.token_count <= available_tokens {
+                token_count += msg.token_count;
+                selected.push(msg.clone());
+            } else {
+                metadata.truncated_count += 1;
+            }
+        }
+
+        // Insert summary message
+        let summary_tokens = (summary.len() as f32 / self.config.chars_per_token).ceil() as usize;
+        if token_count + summary_tokens <= available_tokens {
+            let summary_msg = ContextMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                role: MessageRole::System,
+                content: format!("[历史对话摘要] {}", summary),
+                attachments: Vec::new(),
+                token_count: summary_tokens.min(summary_budget_tokens),
+                timestamp: chrono::Utc::now(),
+                metadata: {
+                    let mut m = HashMap::new();
+                    m.insert("is_summary".to_string(), "true".to_string());
+                    m
+                },
+            };
+            token_count += summary_msg.token_count;
+            selected.push(summary_msg);
+            metadata.truncated_count += middle.len();
+        }
+
+        // Keep tail messages
+        for msg in &messages[tail_start..] {
+            if token_count + msg.token_count <= available_tokens {
+                token_count += msg.token_count;
+                selected.push(msg.clone());
+            } else {
+                metadata.truncated_count += 1;
+            }
+        }
+
+        Ok(selected)
+    }
+
+    /// 🆕 OPTIMIZATION: SummarizeMiddle strategy — keep head + tail, summarize middle
+    fn select_summarize_middle(
+        &self,
+        messages: Vec<ContextMessage>,
+        available_tokens: usize,
+        metadata: &mut ContextMetadata,
+    ) -> Vec<ContextMessage> {
+        let keep_head = 2usize;
+        let keep_tail = 4usize;
+        let summary_budget_tokens = 200usize;
+
+        if messages.len() <= keep_head + keep_tail {
+            return self.select_system_and_recent(messages, available_tokens, metadata);
+        }
+
+        let mut selected = Vec::new();
+        let mut token_count = 0;
+
+        // Keep head messages
+        let head_end = keep_head.min(messages.len());
+        for msg in &messages[..head_end] {
+            if token_count + msg.token_count <= available_tokens {
+                token_count += msg.token_count;
+                selected.push(msg.clone());
+            } else {
+                metadata.truncated_count += 1;
+            }
+        }
+
+        // Summarize middle section
+        let tail_start = messages.len().saturating_sub(keep_tail);
+        let middle = &messages[head_end..tail_start];
+        if !middle.is_empty() {
+            let summary = Self::generate_simple_summary(middle);
+            let summary_tokens = (summary.len() as f32 / self.config.chars_per_token).ceil() as usize;
+            if token_count + summary_tokens <= available_tokens {
+                let summary_msg = ContextMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    role: MessageRole::System,
+                    content: format!("[历史对话摘要] {}", summary),
+                    attachments: Vec::new(),
+                    token_count: summary_tokens.min(summary_budget_tokens),
+                    timestamp: chrono::Utc::now(),
+                    metadata: {
+                        let mut m = HashMap::new();
+                        m.insert("is_summary".to_string(), "true".to_string());
+                        m
+                    },
+                };
+                token_count += summary_msg.token_count;
+                selected.push(summary_msg);
+                metadata.truncated_count += middle.len();
+            }
+        }
+
+        // Keep tail messages
+        for msg in &messages[tail_start..] {
+            if token_count + msg.token_count <= available_tokens {
+                token_count += msg.token_count;
+                selected.push(msg.clone());
+            } else {
+                metadata.truncated_count += 1;
+            }
+        }
+
+        selected
+    }
+
+    /// Generate a simple summary of messages (placeholder for LLM-based summarization)
+    fn generate_simple_summary(messages: &[ContextMessage]) -> String {
+        let topics: Vec<String> = messages
+            .iter()
+            .map(|m| {
+                let content = m.content.chars().take(40).collect::<String>();
+                format!("{:?}: {}", m.role, content)
+            })
+            .collect();
+        format!("对话涉及 {} 轮交流，主题包括: {}", messages.len(), topics.join("; "))
+    }
+
+    /// 🆕 OPTIMIZATION: Assemble with compression using HistoryStrategy
+    pub async fn assemble_with_compression(
+        &self,
+        session_id: impl Into<String>,
+        messages: Vec<ContextMessage>,
+        new_message: impl Into<String>,
+        budget: usize,
+    ) -> Result<AssembledContext> {
+        let session_id = session_id.into();
+        let new_content: String = new_message.into();
+
+        let token_count = self.estimate_tokens(&new_content, &[]);
+        let new_context_msg = ContextMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: MessageRole::User,
+            content: new_content,
+            attachments: Vec::new(),
+            token_count,
+            timestamp: chrono::Utc::now(),
+            metadata: HashMap::new(),
+        };
+
+        let mut all_messages = messages;
+        all_messages.push(new_context_msg);
+
+        let estimated_tokens: usize = all_messages.iter().map(|m| m.token_count).sum();
+
+        let selected = if estimated_tokens <= budget {
+            all_messages
+        } else {
+            // Apply SummarizeMiddle compression
+            let mut metadata = ContextMetadata::default();
+            self.select_summarize_middle(all_messages, budget, &mut metadata)
+        };
+
+        let total_tokens: usize = selected.iter().map(|m| m.token_count).sum();
+        let msg_count = selected.len();
+
+        Ok(AssembledContext {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id,
+            messages: selected,
+            total_tokens,
+            context_window: self.config.context_window,
+            metadata: ContextMetadata {
+                message_count: msg_count,
+                truncated_count: 0,
+                attachment_count: 0,
+                strategy: AssemblyStrategy::SummarizeMiddle,
+                was_truncated: estimated_tokens > budget,
+            },
+            assembled_at: chrono::Utc::now(),
+        })
     }
 }
 

@@ -136,6 +136,7 @@ async fn test_engine_executes_dag_with_dependencies() {
         tags: vec![],
         triggers: vec![],
         config: Default::default(),
+        error_handler: None,
         steps: vec![
             WorkflowStep {
                 id: "fetch_data".to_string(),
@@ -146,6 +147,7 @@ async fn test_engine_executes_dag_with_dependencies() {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "process_data".to_string(),
@@ -156,6 +158,7 @@ async fn test_engine_executes_dag_with_dependencies() {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "notify".to_string(),
@@ -166,6 +169,7 @@ async fn test_engine_executes_dag_with_dependencies() {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
         ],
     };
@@ -210,6 +214,7 @@ async fn test_engine_cancellation_stops_new_steps() {
         tags: vec![],
         triggers: vec![],
         config: Default::default(),
+        error_handler: None,
         steps: vec![
             WorkflowStep {
                 id: "step_a".to_string(),
@@ -220,6 +225,7 @@ async fn test_engine_cancellation_stops_new_steps() {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "step_b".to_string(),
@@ -230,6 +236,7 @@ async fn test_engine_cancellation_stops_new_steps() {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "step_c".to_string(),
@@ -240,6 +247,7 @@ async fn test_engine_cancellation_stops_new_steps() {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
         ],
     };
@@ -284,6 +292,7 @@ fn test_trigger_engine_event_filtering() {
             },
         }],
         config: Default::default(),
+        error_handler: None,
         steps: vec![WorkflowStep {
             id: "s1".to_string(),
             name: "S1".to_string(),
@@ -293,6 +302,7 @@ fn test_trigger_engine_event_filtering() {
             condition: None,
             timeout_sec: None,
             retries: None,
+                on_error: None,
         }],
     };
 
@@ -330,6 +340,7 @@ fn test_trigger_engine_jsonpath_truthiness() {
             },
         }],
         config: Default::default(),
+        error_handler: None,
         steps: vec![WorkflowStep {
             id: "s1".to_string(),
             name: "S1".to_string(),
@@ -339,6 +350,7 @@ fn test_trigger_engine_jsonpath_truthiness() {
             condition: None,
             timeout_sec: None,
             retries: None,
+                on_error: None,
         }],
     };
 
@@ -364,6 +376,7 @@ async fn test_workflow_registry_and_execution() {
         tags: vec!["test".to_string()],
         triggers: vec![],
         config: Default::default(),
+        error_handler: None,
         steps: vec![WorkflowStep {
             id: "s1".to_string(),
             name: "S1".to_string(),
@@ -373,6 +386,7 @@ async fn test_workflow_registry_and_execution() {
             condition: None,
             timeout_sec: None,
             retries: None,
+                on_error: None,
         }],
     };
 
@@ -562,7 +576,7 @@ fn test_content_factory_yaml_valid() {
     assert_eq!(def.triggers.len(), 2);
 
     // Trigger checks
-    let has_manual = def.triggers.iter().any(|t| matches!(t.trigger_type, crate::workflow::definition::TriggerType::Manual));
+    let has_manual = def.triggers.iter().any(|t| matches!(t.trigger_type, crate::workflow::definition::TriggerType::Manual { .. }));
     let has_webhook = def.triggers.iter().any(|t| matches!(t.trigger_type, crate::workflow::definition::TriggerType::Webhook { path: ref p, .. } if p == "/webhook/content-factory"));
     assert!(has_manual, "Should have manual trigger");
     assert!(has_webhook, "Should have webhook trigger at /webhook/content-factory");
@@ -607,7 +621,7 @@ fn test_manga_pipeline_yaml_valid() {
 
     // Trigger checks
     let has_cron = def.triggers.iter().any(|t| matches!(t.trigger_type, crate::workflow::definition::TriggerType::Cron { schedule: ref s, .. } if s == "0 2 * * *"));
-    let has_manual = def.triggers.iter().any(|t| matches!(t.trigger_type, crate::workflow::definition::TriggerType::Manual));
+    let has_manual = def.triggers.iter().any(|t| matches!(t.trigger_type, crate::workflow::definition::TriggerType::Manual { .. }));
     assert!(has_cron, "Should have cron trigger at 0 2 * * *");
     assert!(has_manual, "Should have manual trigger");
 

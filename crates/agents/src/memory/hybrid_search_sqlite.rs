@@ -835,6 +835,84 @@ impl MemorySearch for HybridSearchSqlite {
             })?;
         Ok(())
     }
+
+    /// 🆕 OPTIMIZATION PHASE 2: Cross-session FTS5 search filtered by user_id
+    ///
+    /// Uses FTS5 BM25 ranking across all entries, then filters by user_id
+    /// stored in the metadata JSON column.
+    async fn search_cross_session(
+        &self,
+        query: &str,
+        user_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let conn = self.conn.lock().unwrap();
+
+        let fts_query: String = query
+            .split_whitespace()
+            .filter_map(|word| {
+                let sanitized: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
+                if sanitized.is_empty() {
+                    None
+                } else {
+                    Some(format!("{}*", sanitized))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.content, e.content_hash, e.timestamp, e.metadata, e.file_path,
+                    bm25(ft_items) as rank
+             FROM ft_items
+             JOIN memory_entries e ON json_extract(ft_items.metadata, '$.entry_id') = e.id
+             WHERE ft_items MATCH ?1
+               AND json_extract(e.metadata, '$.user_id') = ?2
+             ORDER BY rank ASC
+             LIMIT ?3"
+        ).map_err(|e| {
+            crate::error::AgentError::storage(format!(
+                "Failed to prepare cross-session search: {}",
+                e
+            ))
+        })?;
+
+        let rows = stmt.query_map(
+            params![fts_query, user_id, limit as i64],
+            |row| {
+                let rank: f64 = row.get(6)?;
+                let score = 1.0 / (rank.abs() as f32 + 1.0);
+                let entry = Self::row_to_entry(row)?;
+                Ok(SearchResult {
+                    id: entry.id,
+                    content: entry.content,
+                    score,
+                    vector_score: None,
+                    bm25_score: Some(score),
+                    metadata: entry.metadata,
+                    timestamp: entry.timestamp,
+                    source_path: entry.file_path,
+                })
+            },
+        ).map_err(|e| {
+            crate::error::AgentError::storage(format!(
+                "Cross-session search failed: {}",
+                e
+            ))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row.map_err(|e| {
+                crate::error::AgentError::storage(format!(
+                    "Failed to read cross-session search row: {}",
+                    e
+                ))
+            })?);
+        }
+
+        Ok(results)
+    }
 }
 
 fn into_search_result(result: SqliteSearchResult) -> SearchResult {

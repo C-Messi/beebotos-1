@@ -20,6 +20,10 @@ pub struct SkillMetadata {
     /// Absolute path to the skill directory or .md file
     pub path: PathBuf,
     pub kind: SkillKind,
+    /// 🆕 OPTIMIZATION: L1/L2/L3 progressive disclosure levels
+    pub l1_index: Option<String>,
+    pub l2_summary: Option<String>,
+    pub l3_full_doc: Option<String>,
 }
 
 /// Classification of skill implementation
@@ -162,6 +166,11 @@ impl SkillDiscovery {
                 SkillKind::Knowledge
             };
 
+            // 🆕 OPTIMIZATION: Load L1/L2/L3 progressive disclosure levels
+            let l1_index = Self::read_index_md(path).await;
+            let l2_summary = Self::read_summary_md(path).await;
+            let l3_full_doc = Some(body.clone());
+
             return Some(SkillMetadata {
                 id: sanitize_id(&id),
                 name,
@@ -171,6 +180,9 @@ impl SkillDiscovery {
                 tags,
                 path: path.to_path_buf(),
                 kind,
+                l1_index,
+                l2_summary,
+                l3_full_doc,
             });
         }
 
@@ -190,6 +202,9 @@ impl SkillDiscovery {
                 tags: vec![],
                 path: path.to_path_buf(),
                 kind: SkillKind::Wasm,
+                l1_index: None,
+                l2_summary: None,
+                l3_full_doc: None,
             });
         }
 
@@ -224,7 +239,30 @@ impl SkillDiscovery {
             tags: build_tags_from_content(&content),
             path: path.to_path_buf(),
             kind: SkillKind::Knowledge,
+            l1_index: None,
+            l2_summary: None,
+            l3_full_doc: Some(content),
         })
+    }
+
+    /// 🆕 OPTIMIZATION: Read SKILL.index.md (L1: one-liner)
+    async fn read_index_md(path: &Path) -> Option<String> {
+        let index_path = path.join("SKILL.index.md");
+        if tokio::fs::metadata(&index_path).await.map(|m| m.is_file()).unwrap_or(false) {
+            tokio::fs::read_to_string(&index_path).await.ok()
+        } else {
+            None
+        }
+    }
+
+    /// 🆕 OPTIMIZATION: Read SKILL.summary.md (L2: ~200 token summary)
+    async fn read_summary_md(path: &Path) -> Option<String> {
+        let summary_path = path.join("SKILL.summary.md");
+        if tokio::fs::metadata(&summary_path).await.map(|m| m.is_file()).unwrap_or(false) {
+            tokio::fs::read_to_string(&summary_path).await.ok()
+        } else {
+            None
+        }
     }
 }
 

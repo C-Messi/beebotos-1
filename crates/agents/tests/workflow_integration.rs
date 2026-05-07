@@ -112,7 +112,7 @@ async fn test_trigger_engine_match() {
         tags: vec![],
         triggers: vec![
             beebotos_agents::workflow::TriggerDefinition {
-                trigger_type: TriggerType::Manual,
+                trigger_type: TriggerType::Manual { allowed_users: vec![] },
             },
             beebotos_agents::workflow::TriggerDefinition {
                 trigger_type: TriggerType::Webhook {
@@ -123,6 +123,7 @@ async fn test_trigger_engine_match() {
             },
         ],
         config: Default::default(),
+        error_handler: None,
         steps: vec![],
     };
 
@@ -153,6 +154,7 @@ async fn test_workflow_engine_end_to_end() {
         tags: vec![],
         triggers: vec![],
         config: Default::default(),
+        error_handler: None,
         steps: vec![
             WorkflowStep {
                 id: "step1".to_string(),
@@ -163,6 +165,7 @@ async fn test_workflow_engine_end_to_end() {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "step2".to_string(),
@@ -173,6 +176,7 @@ async fn test_workflow_engine_end_to_end() {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
         ],
     };
@@ -203,6 +207,7 @@ async fn test_workflow_with_condition_and_retry() {
         tags: vec![],
         triggers: vec![],
         config: Default::default(),
+        error_handler: None,
         steps: vec![
             WorkflowStep {
                 id: "check".to_string(),
@@ -213,6 +218,7 @@ async fn test_workflow_with_condition_and_retry() {
                 condition: None,
                 timeout_sec: None,
                 retries: Some(2),
+                on_error: None,
             },
             WorkflowStep {
                 id: "notify".to_string(),
@@ -223,6 +229,7 @@ async fn test_workflow_with_condition_and_retry() {
                 condition: Some("true".to_string()),
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
         ],
     };
@@ -250,6 +257,7 @@ async fn test_workflow_template_resolution() {
         tags: vec![],
         triggers: vec![],
         config: Default::default(),
+        error_handler: None,
         steps: vec![
             WorkflowStep {
                 id: "fetch_news".to_string(),
@@ -260,6 +268,7 @@ async fn test_workflow_template_resolution() {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "summarize".to_string(),
@@ -270,6 +279,7 @@ async fn test_workflow_template_resolution() {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
         ],
     };

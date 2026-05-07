@@ -307,7 +307,7 @@ mod tests {
             tags: vec![],
             triggers: vec![
                 crate::workflow::definition::TriggerDefinition {
-                    trigger_type: crate::workflow::definition::TriggerType::Manual,
+                    trigger_type: crate::workflow::definition::TriggerType::Manual { allowed_users: vec![] },
                 },
                 crate::workflow::definition::TriggerDefinition {
                     trigger_type: crate::workflow::definition::TriggerType::Webhook {
@@ -318,7 +318,8 @@ mod tests {
                 },
             ],
             config: crate::workflow::definition::WorkflowGlobalConfig::default(),
-            steps: vec![],
+            error_handler: None,
+                        steps: vec![],
         }
     }
 

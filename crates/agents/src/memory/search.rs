@@ -107,6 +107,24 @@ pub trait MemorySearch: Send + Sync {
 
     /// Clear all entries from the search index
     async fn clear(&self) -> Result<()>;
+
+    /// 🆕 OPTIMIZATION PHASE 2: Cross-session FTS5 search for historical solutions
+    ///
+    /// Searches across all user sessions using full-text search.
+    /// Returns results ranked by relevance.
+    async fn search_cross_session(
+        &self,
+        query: &str,
+        user_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        // Default implementation delegates to regular search
+        let _ = user_id;
+        self.search_with_config(query, SearchConfig {
+            max_results: limit,
+            ..SearchConfig::default()
+        }).await
+    }
 }
 
 /// Search statistics

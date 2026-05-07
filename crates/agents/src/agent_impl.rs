@@ -60,6 +60,16 @@ pub struct Agent {
     pub(crate) skill_catalog: Option<String>,
     // 🟢 P1 FIX: Workflow registry for workflow execution tasks
     pub(crate) workflow_registry: Option<Arc<crate::workflow::WorkflowRegistry>>,
+    // 🆕 OPTIMIZATION PHASE 1: Intent engine for pre-LLM classification
+    pub(crate) intent_engine: Option<crate::intent::IntentEngine>,
+    // 🆕 OPTIMIZATION PHASE 1: Approval gate for destructive operations
+    pub(crate) approval_gate: Option<crate::security::ApprovalGate>,
+    // 🆕 OPTIMIZATION PHASE 2: Prompt cache for repeated prompt assembly
+    pub(crate) prompt_cache: Option<Arc<crate::prompt::PromptCache>>,
+    // 🆕 OPTIMIZATION PHASE 4: Max rounds limit to prevent infinite loops
+    pub(crate) max_rounds: u32,
+    // 🆕 OPTIMIZATION PHASE 3: Skill feedback collector for self-improvement
+    pub(crate) skill_feedback_collector: Option<crate::skills::feedback::SkillImprovementEngine>,
 }
 
 impl Agent {
@@ -94,6 +104,12 @@ impl Agent {
             skill_catalog: None,
             // 🟢 P1 FIX: Initialize workflow registry as None
             workflow_registry: None,
+            // 🆕 OPTIMIZATION: Initialize new components
+            intent_engine: Some(crate::intent::IntentEngine::new()),
+            approval_gate: Some(crate::security::ApprovalGate::with_paper_trading_rules()),
+            prompt_cache: Some(Arc::new(crate::prompt::PromptCache::new())),
+            max_rounds: 10,
+            skill_feedback_collector: Some(crate::skills::feedback::SkillImprovementEngine::new()),
         }
     }
 
@@ -387,6 +403,76 @@ impl Agent {
         self
     }
 
+    /// 🆕 OPTIMIZATION PHASE 1: Set intent engine
+    pub fn with_intent_engine(mut self, engine: crate::intent::IntentEngine) -> Self {
+        self.intent_engine = Some(engine);
+        info!("Intent engine configured for agent {}", self.config.id);
+        self
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 1: Set approval gate
+    pub fn with_approval_gate(mut self, gate: crate::security::ApprovalGate) -> Self {
+        self.approval_gate = Some(gate);
+        info!("Approval gate configured for agent {}", self.config.id);
+        self
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 2: Set prompt cache
+    pub fn with_prompt_cache(mut self, cache: Arc<crate::prompt::PromptCache>) -> Self {
+        self.prompt_cache = Some(cache);
+        info!("Prompt cache configured for agent {}", self.config.id);
+        self
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 4: Set max rounds limit
+    pub fn with_max_rounds(mut self, max_rounds: u32) -> Self {
+        self.max_rounds = max_rounds;
+        info!("Max rounds set to {} for agent {}", max_rounds, self.config.id);
+        self
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 3: Set skill feedback collector
+    pub fn with_skill_feedback_collector(mut self, collector: crate::skills::feedback::SkillImprovementEngine) -> Self {
+        self.skill_feedback_collector = Some(collector);
+        info!("Skill feedback collector configured for agent {}", self.config.id);
+        self
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 2: Build system prompt with cache support
+    #[allow(dead_code)]
+    async fn build_system_prompt_cached(&self, base_persona: &str, intent: &crate::intent::UserIntent) -> String {
+        if let Some(ref cache) = self.prompt_cache {
+            let components = crate::prompt::PromptComponents {
+                soul: Some(base_persona.to_string()),
+                user_profile: None,
+                memories: Vec::new(),
+                skills: Vec::new(),
+                tools: Vec::new(),
+                model_instructions: None,
+                context_files: Vec::new(),
+                model: self.config.models.model.clone(),
+            };
+            
+            cache.get_or_build(&components, |comps| {
+                let builder = crate::prompt::PromptBuilder::new()
+                    .with_soul(comps.soul.clone().unwrap_or_default())
+                    .with_model(&comps.model);
+                builder.build(intent)
+            }).await
+        } else {
+            base_persona.to_string()
+        }
+    }
+
+    /// 🆕 OPTIMIZATION: Classify intent for a task input
+    pub async fn classify_intent(&self, input: &str) -> crate::intent::IntentAnalysis {
+        if self.intent_engine.is_some() {
+            crate::intent::IntentEngine::classify_heuristic(input)
+        } else {
+            crate::intent::IntentAnalysis::new(crate::intent::UserIntent::DirectAnswer, 0.5)
+        }
+    }
+
     /// 🆕 FIX: Inject skill catalog into message list if configured.
     /// Avoids duplicate injection if the first message already looks like a catalog.
     fn inject_skill_catalog(&self, messages: Vec<communication::Message>) -> Vec<communication::Message> {
@@ -410,15 +496,73 @@ impl Agent {
         }
     }
 
+    /// 🆕 OPTIMIZATION PHASE 4: Smart tool output truncation to prevent context overflow
+    fn truncate_tool_output(output: &str, max_chars: usize) -> String {
+        if output.len() <= max_chars {
+            return output.to_string();
+        }
+
+        // Try intelligent truncation for JSON
+        let trimmed = output.trim();
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                return Self::truncate_json_value(&json, max_chars);
+            }
+        }
+
+        // Simple truncation for non-JSON
+        format!("{}...[truncated, {} chars total]", &output[..max_chars], output.len())
+    }
+
+    /// Recursively truncate JSON values, preserving critical fields
+    fn truncate_json_value(value: &serde_json::Value, max_chars: usize) -> String {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut truncated = serde_json::Map::new();
+                let mut current_len = 2; // {}
+                let critical_fields: std::collections::HashSet<&str> = ["error", "status", "symbol", "price", "code"].iter().cloned().collect();
+
+                for (key, val) in map {
+                    if critical_fields.contains(key.as_str()) {
+                        truncated.insert(key.clone(), val.clone());
+                        current_len += key.len() + val.to_string().len();
+                    } else if current_len < max_chars * 3 / 4 {
+                        let val_str = val.to_string();
+                        if current_len + key.len() + val_str.len() < max_chars {
+                            truncated.insert(key.clone(), val.clone());
+                            current_len += key.len() + val_str.len();
+                        }
+                    }
+                }
+                serde_json::Value::Object(truncated).to_string()
+            }
+            serde_json::Value::Array(arr) => {
+                if arr.len() > 5 {
+                    let mut truncated: Vec<serde_json::Value> = arr.iter().take(3).cloned().collect();
+                    truncated.push(serde_json::json!(format!("... and {} more items", arr.len() - 3)));
+                    serde_json::Value::Array(truncated).to_string()
+                } else {
+                    value.to_string()
+                }
+            }
+            _ => value.to_string(),
+        }
+    }
+
     /// Clean up LLM responses that contain thinking/process analysis instead of direct answers.
+    /// 🆕 OPTIMIZATION PHASE 2: Supports <REASONING_SCRATCHPAD> extraction
     fn cleanup_thinking_process(response: &str) -> String {
         let response = response.trim();
         if response.is_empty() {
             return response.to_string();
         }
+
+        // 🆕 OPTIMIZATION: Extract and strip REASONING_SCRATCHPAD if present
+        let (cleaned, _reasoning) = Self::extract_reasoning_scratchpad(response);
+
         // 🆕 FIX: If response contains SKILL: marker anywhere, extract it directly
         // But truncate after the JSON parameters to avoid trailing thinking text
-        if let Some(pos) = response.find("SKILL:") {
+        if let Some(pos) = cleaned.find("SKILL:") {
             let after_skill = &response[pos..];
             let potential_id = after_skill.strip_prefix("SKILL:").unwrap_or("").trim();
             let id_part = potential_id.split(|c: char| c == '|' || c == ' ' || c == '\n' || c == '\r').next().unwrap_or("");
@@ -450,6 +594,10 @@ impl Agent {
             }
             // Invalid skill ID (placeholder), fall through to thinking-prefix cleanup
         }
+
+        // Continue with cleaned response (REASONING_SCRATCHPAD already stripped)
+        let response = cleaned.as_str();
+
         // If response starts with known thinking prefixes, try to extract actual answer
         let thinking_prefixes = [
             "用户问的是",
@@ -547,6 +695,28 @@ impl Agent {
         response.to_string()
     }
 
+    /// 🆕 OPTIMIZATION PHASE 2: Extract <REASONING_SCRATCHPAD> content and return cleaned response
+    fn extract_reasoning_scratchpad(response: &str) -> (String, Option<String>) {
+        let start_tag = "<REASONING_SCRATCHPAD>";
+        let end_tag = "</REASONING_SCRATCHPAD>";
+
+        if let Some(start_pos) = response.find(start_tag) {
+            if let Some(end_pos) = response.find(end_tag) {
+                let reasoning_start = start_pos + start_tag.len();
+                let reasoning = response[reasoning_start..end_pos].trim().to_string();
+
+                // Remove the scratchpad from response
+                let before = &response[..start_pos];
+                let after = &response[end_pos + end_tag.len()..];
+                let cleaned = format!("{}{}", before.trim(), after.trim());
+
+                return (cleaned.trim().to_string(), Some(reasoning));
+            }
+        }
+
+        (response.to_string(), None)
+    }
+
     /// Connect to device (if configured)
     pub async fn connect_device(&self) -> crate::error::Result<()> {
         if let Some(ref device) = self.device {
@@ -597,10 +767,51 @@ impl Agent {
             task_id: task.id.clone(),
         };
 
-        let result = self.process_task(task).await;
+        // 🆕 OPTIMIZATION PHASE 4: Apply max rounds limit for LLM chat tasks
+        let result = if matches!(task.task_type, TaskType::LlmChat | TaskType::Custom(_)) {
+            self.process_task_with_round_limit(task).await
+        } else {
+            self.process_task(task).await
+        };
 
         self.state = state_manager::AgentState::Idle;
         result
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 4: Process task with max rounds limit to prevent infinite loops
+    async fn process_task_with_round_limit(&self, task: Task) -> Result<TaskResult, AgentError> {
+        let mut rounds = 0u32;
+        let mut current_task = task;
+
+        loop {
+            rounds += 1;
+            if rounds > self.max_rounds {
+                return Ok(TaskResult {
+                    task_id: current_task.id.clone(),
+                    success: false,
+                    output: format!(
+                        "达到最大交互轮次限制 ({} 轮)，任务未完成。请简化需求或分步执行。",
+                        self.max_rounds
+                    ),
+                    artifacts: vec![],
+                    execution_time_ms: 0,
+                });
+            }
+
+            let result = self.process_task(current_task.clone()).await;
+
+            match &result {
+                Ok(task_result) => {
+                    // Simple heuristic: if output doesn't indicate need for more rounds, we're done
+                    if !task_result.output.contains("SKILL:") && !task_result.output.contains("需要更多信息") {
+                        return result;
+                    }
+                    // Otherwise continue with the output as new input (for multi-round reasoning)
+                    current_task.input = task_result.output.clone();
+                }
+                Err(_) => return result,
+            }
+        }
     }
 
     /// 🟢 P1 FIX: 批量执行任务
@@ -630,33 +841,71 @@ impl Agent {
     /// Process a task with full implementation
     /// 
     /// 🆕 PLANNING FIX: Enhanced with automatic complexity detection and planning integration
+    /// 🆕 OPTIMIZATION: Intent-based routing for efficient task handling
     async fn process_task(&self, task: Task) -> Result<TaskResult, AgentError> {
         info!("Processing task {} of type {}", task.id, task.task_type);
 
         let start_time = std::time::Instant::now();
-
-        // 🆕 PLANNING FIX: Check if this is a planning-related task or needs planning
-        // Clone task ID before moving task
         let task_id = task.id.clone();
-        
+
+        // 🆕 OPTIMIZATION PHASE 1: Intent Engine前置 — 基于实际消息内容分类意图
+        let intent_analysis = if matches!(task.task_type, TaskType::LlmChat | TaskType::Custom(_)) {
+            let message_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+                json.get("message").and_then(|m| m.as_str()).unwrap_or(&task.input).to_string()
+            } else {
+                task.input.clone()
+            };
+            self.classify_intent(&message_text).await
+        } else {
+            crate::intent::IntentAnalysis::new(crate::intent::UserIntent::SingleToolCall, 0.8)
+        };
+
+        info!("Intent classified as {:?} (confidence: {:.2}) for task {}", 
+              intent_analysis.intent, intent_analysis.confidence, task_id);
+
         let result = match &task.task_type {
-            TaskType::LlmChat => self.handle_llm_task(&task).await,
+            TaskType::LlmChat => {
+                // 🆕 OPTIMIZATION: Route based on intent classification
+                match intent_analysis.intent {
+                    crate::intent::UserIntent::DirectAnswer => {
+                        // Skip tool injection, direct LLM answer — saves 5k-10k tokens
+                        self.handle_direct_answer(&task).await
+                    }
+                    crate::intent::UserIntent::MetaQuestion => {
+                        // Skip LLM, directly return skill registry info
+                        self.handle_meta_question(&task).await
+                    }
+                    crate::intent::UserIntent::Correction => {
+                        // Handle correction/modification of previous behavior
+                        self.handle_correction(&task, &intent_analysis).await
+                    }
+                    crate::intent::UserIntent::WorkflowTrigger => {
+                        self.handle_workflow_task(&task).await
+                    }
+                    crate::intent::UserIntent::MultiStepPlanning => {
+                        if self.is_planning_ready() {
+                            self.execute_with_planning(task).await
+                        } else {
+                            self.handle_llm_task_with_intent(&task, &intent_analysis).await
+                        }
+                    }
+                    crate::intent::UserIntent::SingleToolCall => {
+                        self.handle_llm_task_with_intent(&task, &intent_analysis).await
+                    }
+                }
+            }
             TaskType::SkillExecution => self.handle_skill_task(&task).await,
             TaskType::McpTool => self.handle_mcp_task(&task).await,
             TaskType::FileProcessing => self.handle_file_task(&task).await,
             TaskType::A2aSend => self.handle_a2a_task(&task).await,
             TaskType::ChainTransaction => self.handle_chain_transaction_task(&task).await,
-            // 🆕 PLANNING FIX: Handle planning-specific task types
             TaskType::PlanCreation => self.handle_plan_creation_task(&task).await,
             TaskType::PlanExecution => self.handle_plan_execution_task(&task).await,
             TaskType::PlanAdaptation => self.handle_plan_adaptation_task(&task).await,
-            // 🆕 DEVICE FIX: Handle device automation task types
             TaskType::DeviceAutomation => self.handle_device_automation_task(&task).await,
             TaskType::AppLifecycle => self.handle_app_lifecycle_task(&task).await,
-            // 🟢 P1 FIX: Handle workflow execution tasks
             TaskType::WorkflowExecution => self.handle_workflow_task(&task).await,
             TaskType::Custom(type_name) => {
-                // 🆕 PLANNING FIX: Check if complex task needs planning
                 if self.is_planning_ready() && self.should_use_planning(&task).await {
                     self.execute_with_planning(task).await
                 } else {
@@ -695,7 +944,118 @@ impl Agent {
         }
     }
 
+    /// 🆕 OPTIMIZATION PHASE 1: Handle direct answer intents — no tool injection, saves tokens
+    async fn handle_direct_answer(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {
+        info!("Direct answer path (no tools) for task {}", task.id);
+        let llm = self.llm_interface.as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
+
+        let input_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+            json.get("message").and_then(|m| m.as_str()).unwrap_or(&task.input).to_string()
+        } else {
+            task.input.clone()
+        };
+
+        let messages = vec![
+            communication::Message::new(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                format!("You are {} ({}). Please remain friendly, professional, and helpful when answering questions.",
+                    self.config.name, self.config.description),
+            ),
+            communication::Message::new(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                format!("用户: {}", input_text),
+            ),
+        ];
+
+        let response = llm.call_llm(messages, None).await
+            .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?;
+
+        Ok((response, vec![]))
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 1: Handle meta questions — return skill info directly
+    async fn handle_meta_question(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {
+        info!("Meta question path for task {}", task.id);
+        let registry = self.skill_registry.as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("Skill registry not configured".into()))?;
+
+        let skills = registry.list_enabled().await;
+        let skill_list: Vec<String> = skills.iter()
+            .map(|s| format!("- {}: {}", s.skill.name, s.skill.manifest.description.chars().take(60).collect::<String>()))
+            .collect();
+
+        let response = format!(
+            "我是 {}，目前可用的技能包括：\n\n{}\n\n您可以直接描述需求，我会自动调用合适的技能来帮您完成。",
+            self.config.name,
+            skill_list.join("\n")
+        );
+
+        Ok((response, vec![]))
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 1: Handle correction intents
+    async fn handle_correction(&self, task: &Task, intent: &crate::intent::IntentAnalysis) -> Result<(String, Vec<Artifact>), AgentError> {
+        info!("Correction path for task {}: constraints={:?}", task.id, intent.constraints);
+        // For now, treat correction as a direct LLM task with context about constraints
+        // In a full implementation, this would modify/undo previous actions
+        let input_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+            json.get("message").and_then(|m| m.as_str()).unwrap_or(&task.input).to_string()
+        } else {
+            task.input.clone()
+        };
+
+        let llm = self.llm_interface.as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
+
+        let constraint_text = if intent.constraints.is_empty() {
+            "用户要求修改或撤销之前的操作。".to_string()
+        } else {
+            format!("用户约束: {}", intent.constraints.join(", "))
+        };
+
+        let messages = vec![
+            communication::Message::new(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                format!("{}", constraint_text),
+            ),
+            communication::Message::new(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                format!("用户: {}", input_text),
+            ),
+        ];
+
+        let response = llm.call_llm(messages, None).await
+            .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?;
+
+        Ok((response, vec![]))
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 1: Handle LLM task with intent-aware tool filtering
+    async fn handle_llm_task_with_intent(
+        &self,
+        task: &Task,
+        intent: &crate::intent::IntentAnalysis,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        self.handle_llm_task_internal(task, Some(intent)).await
+    }
+
+    /// Original handle_llm_task — delegates to internal implementation
+    #[allow(dead_code)]
     async fn handle_llm_task(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {
+        self.handle_llm_task_internal(task, None).await
+    }
+
+    /// Internal LLM task handler with optional intent for tool filtering
+    async fn handle_llm_task_internal(
+        &self,
+        task: &Task,
+        intent_opt: Option<&crate::intent::IntentAnalysis>,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
         // 🆕 PLANNING FIX: 基于实际消息内容判断复杂度，复杂任务使用 planning 执行
         let (message_text, skill_hint) = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
             let msg = json.get("message")
@@ -986,7 +1346,18 @@ impl Agent {
             persona
         };
         // 🆕 FIX: Force direct answer — Kimi k2.6 tends to explain system instructions
-        let persona = format!("{}\n\n[强制规则] 直接回答用户问题，不要解释你收到了什么数据、什么技能指引或系统指令。禁止以\"用户问的是...\"、\"系统提示我...\"、\"我需要...\"、\"根据规则...\"开头。", persona);
+        let mut persona = format!("{}\n\n[强制规则] 直接回答用户问题，不要解释你收到了什么数据、什么技能指引或系统指令。禁止以\"用户问的是...\"、\"系统提示我...\"、\"我需要...\"、\"根据规则...\"开头。", persona);
+
+        // 🆕 OPTIMIZATION PHASE 2: Add REASONING_SCRATCHPAD hint for complex tasks
+        if matches!(intent_opt.map(|i| &i.intent), Some(crate::intent::UserIntent::MultiStepPlanning)) {
+            persona.push_str("\n\n[推理指南] 这是一个复杂任务，请按以下步骤思考并在回复中包含 <REASONING_SCRATCHPAD> 标签：\n\
+                1. 分析用户目标\n\
+                2. 确定需要调用的工具及顺序\n\
+                3. 验证每一步的依赖关系\n\
+                输出格式：<REASONING_SCRATCHPAD>你的思考过程</REASONING_SCRATCHPAD>\n\
+                然后输出实际回答或工具调用。");
+        }
+
         messages.push(communication::Message::new(
             uuid::Uuid::new_v4(),
             communication::PlatformType::Custom,
@@ -1112,15 +1483,19 @@ impl Agent {
         };
         extra_params.insert("max_tokens".to_string(), dynamic_max_tokens);
 
-        // 🆕 FIX: Build OpenAI-compatible function calling tools from skill registry.
-        // To keep prompt size manageable (Kimi context window), we filter the 100+
-        // tools down to the ~10-20 most relevant ones based on keyword overlap
-        // with the user query.
+        // 🆕 OPTIMIZATION PHASE 1: Intent-aware tool filtering with Toolsets
+        // Adjust tool count based on intent: DirectAnswer=0, SingleToolCall=10, MultiStepPlanning=20
+        let top_n = match intent_opt.map(|i| &i.intent) {
+            Some(crate::intent::UserIntent::DirectAnswer) => 0usize,
+            Some(crate::intent::UserIntent::SingleToolCall) => 10usize,
+            Some(crate::intent::UserIntent::MetaQuestion) => 0usize,
+            _ => 20usize,
+        };
+
         let mut tool_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         if let Some(ref registry) = self.skill_registry {
             let all_skills = registry.list_all().await;
-            if !all_skills.is_empty() {
-                // Extract keywords from user query
+            if !all_skills.is_empty() && top_n > 0 {
                 let query_lower = input_text.to_lowercase();
                 let stopwords: std::collections::HashSet<&str> = [
                     "的","了","是","我","你","他","她","它","们","在","有","和","就","不","人","都","一","一个","上","也","很","到","说","要","去","可以","会","这","那","有","个","之","与","及","等","从","让","向","往","为","被","把","给","请","帮","来","做","看","想","知道","一下","根据","当前","现在","市场","形势","这个","那个",
@@ -1141,7 +1516,6 @@ impl Agent {
                     keywords.push("btc".to_string());
                     keywords.push("bitcoin".to_string());
                     keywords.push("crypto".to_string());
-                    keywords.push("cryptocurrency".to_string());
                 }
                 if query_lower_str.contains("eth") || query_lower_str.contains("ethereum") {
                     keywords.push("eth".to_string());
@@ -1173,7 +1547,12 @@ impl Agent {
                     || query_lower_str.contains("order")
                     || query_lower_str.contains("place");
 
-                // Score each skill by keyword overlap
+                // 🆕 OPTIMIZATION PHASE 1: Toolsets-based pre-filtering
+                let active_toolsets: std::collections::HashSet<String> = intent_opt
+                    .map(|i| i.active_toolsets.iter().cloned().collect())
+                    .unwrap_or_default();
+
+                // Score each skill by keyword overlap + toolset membership
                 let mut scored_skills: Vec<(usize, &skills::registry::RegisteredSkill)> = Vec::new();
                 for registered in &all_skills {
                     if !registered.enabled {
@@ -1182,6 +1561,18 @@ impl Agent {
                     let manifest = &registered.skill.manifest;
                     let searchable = format!("{} {} {}", manifest.id, manifest.name, manifest.description).to_lowercase();
                     let mut score = keywords.iter().filter(|k| searchable.contains(k.as_str())).count();
+
+                    // 🆕 OPTIMIZATION: Boost skills belonging to active toolsets
+                    if !active_toolsets.is_empty() {
+                        let skill_id_lower = manifest.id.to_lowercase();
+                        let in_active_toolset = active_toolsets.iter().any(|ts| {
+                            skill_id_lower.contains(ts) || registered.tags.contains(ts)
+                        });
+                        if in_active_toolset {
+                            score += 10;
+                        }
+                    }
+
                     // 🆕 FIX: Boost order placement tools when user explicitly wants to trade
                     if has_trading_intent {
                         let skill_id_lower = manifest.id.to_lowercase();
@@ -1194,10 +1585,10 @@ impl Agent {
                     }
                 }
 
-                // Sort by relevance (highest first) and take top 20
+                // Sort by relevance (highest first) and take top N based on intent
                 scored_skills.sort_by(|a, b| b.0.cmp(&a.0));
-                let selected = if scored_skills.len() >= 5 {
-                    scored_skills.into_iter().take(20).map(|(_, s)| s).collect::<Vec<_>>()
+                let selected = if scored_skills.len() >= 3 {
+                    scored_skills.into_iter().take(top_n).map(|(_, s)| s).collect::<Vec<_>>()
                 } else {
                     // Fallback: if too few matches, use all enabled skills (but cap at 30)
                     all_skills.iter().filter(|s| s.enabled).take(30).collect::<Vec<_>>()
@@ -1338,7 +1729,7 @@ impl Agent {
                     info!("Retry succeeded: LLM returned tool_call");
                     response = retry_resp;
                 }
-                Ok(retry_resp) => {
+                Ok(_retry_resp) => {
                     warn!("Retry also failed to produce tool_call. Keeping original response.");
                 }
                 Err(e) => {
@@ -1509,6 +1900,7 @@ impl Agent {
     }
 
     /// 🟢 P1 FIX: Public API to execute a skill by ID (used by composition, SkillCallTool, and external callers)
+    /// 🆕 OPTIMIZATION PHASE 3: Integrated with skill feedback collection
     pub async fn execute_skill_by_id(
         &self,
         skill_id: &str,
@@ -1524,9 +1916,36 @@ impl Agent {
             .get(skill_id).await
             .ok_or_else(|| AgentError::SkillNotFound(skill_id.to_string()))?;
 
-        let result = self.execute_registered_skill(&registered_skill, input, parameters).await?;
+        let result = self.execute_registered_skill(&registered_skill, input, parameters.clone()).await?;
         let _ = registry.record_usage(skill_id).await;
+        
+        // 🆕 OPTIMIZATION PHASE 3: Collect skill feedback for self-improvement
+        self.collect_skill_feedback(skill_id, input, &result.output, result.success, result.execution_time_ms).await;
+        
         Ok(result)
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 3: Collect skill execution feedback
+    async fn collect_skill_feedback(
+        &self,
+        skill_id: &str,
+        input: &str,
+        output: &str,
+        success: bool,
+        execution_time_ms: u64,
+    ) {
+        if let Some(ref collector) = self.skill_feedback_collector {
+            let _feedback = collector.collect_feedback(skill_id, success, execution_time_ms);
+            info!("Skill feedback collected for '{}': success={}, time={}ms", 
+                  skill_id, success, execution_time_ms);
+            
+            // If execution failed or took too long, log for improvement
+            if !success || execution_time_ms > 10000 {
+                let evaluation = collector.build_evaluation_prompt(skill_id, input, output, success);
+                info!("Skill '{}' needs attention: {} chars evaluation prompt ready", 
+                      skill_id, evaluation.len());
+            }
+        }
     }
 
     /// 🟢 P1 FIX: Internal helper for composition modules to call LLM with a simple prompt
@@ -1597,6 +2016,115 @@ impl Agent {
     }
 
     /// 🟢 P2 FIX: Helper to execute a registered skill (shared by handle_skill_task and planning)
+    /// 🆕 OPTIMIZATION PHASE 1: Integrated with approval gate for destructive operations
+    /// 🆕 OPTIMIZATION PHASE 4: Tool output truncation to prevent context overflow
+    /// 🆕 OPTIMIZATION PHASE 4: Execute WASM skill in true sandbox with resource limits
+    ///
+    /// Creates a fresh WasmEngine with ResourceLimits-derived EngineConfig,
+    /// ensuring memory/fuel/time constraints are enforced by wasmtime.
+    async fn execute_wasm_in_sandbox(
+        &self,
+        wasm_path: &std::path::Path,
+        entry_point: &str,
+        input: &str,
+        limits: &crate::security::ResourceLimits,
+    ) -> Result<Option<skills::executor::SkillExecutionResult>, AgentError> {
+        let start_time = std::time::Instant::now();
+
+        let wasm_bytes = tokio::fs::read(wasm_path).await.map_err(|e| {
+            AgentError::Execution(format!("Failed to read WASM file: {}", e))
+        })?;
+
+        // Build engine config from resource limits
+        let engine_config = beebotos_kernel::wasm::EngineConfig {
+            max_memory_size: limits.max_memory_mb * 1024 * 1024,
+            max_fuel: limits.max_cpu_time_ms * 1000, // approximate fuel units from CPU time
+            fuel_metering: true,
+            memory_limits: true,
+            wasi_enabled: false, // sandbox: disable WASI for untrusted skills
+            debug_info: false,
+            parallel_compilation: false,
+            optimize: true,
+        };
+
+        // Create sandboxed engine
+        let engine = match beebotos_kernel::wasm::WasmEngine::new(engine_config) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Failed to create sandboxed WASM engine: {}", e);
+                return Ok(None);
+            }
+        };
+
+        // Compile WASM module
+        let module = match engine.compile(&wasm_bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("WASM compilation failed: {}", e);
+                return Ok(None);
+            }
+        };
+
+        // Instantiate with host functions
+        let mut instance = match engine.instantiate_with_host(&module, &self.config.id) {
+            Ok(i) => i,
+            Err(e) => {
+                warn!("WASM instantiation failed: {}", e);
+                return Ok(None);
+            }
+        };
+
+        // Write input to WASM memory
+        let input_bytes = input.as_bytes();
+        if let Err(e) = instance.write_memory(0, input_bytes) {
+            warn!("Failed to write input to WASM memory: {}", e);
+            return Ok(None);
+        }
+
+        // Execute with fuel metering (CPU limit enforced by wasmtime engine config)
+        const MAX_OUTPUT_SIZE: usize = 65536;
+        let call_result = instance.call_typed::<(i32, i32), i32>(
+            entry_point,
+            (0i32, input_bytes.len() as i32),
+        );
+
+        match call_result {
+            Ok(output_ptr) => {
+                let output_addr = output_ptr as usize;
+                // Read output length (first 4 bytes)
+                match instance.read_memory(output_addr, 4) {
+                    Ok(len_bytes) => {
+                        let output_len = u32::from_le_bytes([
+                            len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3],
+                        ]) as usize;
+                        if output_len <= MAX_OUTPUT_SIZE {
+                            match instance.read_memory(output_addr + 4, output_len) {
+                                Ok(output_bytes) => {
+                                    if let Ok(output) = String::from_utf8(output_bytes) {
+                                        return Ok(Some(skills::executor::SkillExecutionResult {
+                                            task_id: entry_point.to_string(),
+                                            success: true,
+                                            output,
+                                            structured_output: None,
+                                            execution_time_ms: start_time.elapsed().as_millis() as u64,
+                                        }));
+                                    }
+                                }
+                                Err(e) => warn!("Failed to read WASM output: {}", e),
+                            }
+                        } else {
+                            warn!("WASM output too large: {} bytes", output_len);
+                        }
+                    }
+                    Err(e) => warn!("Failed to read WASM output length: {}", e),
+                }
+            }
+            Err(e) => warn!("WASM function call failed: {}", e),
+        }
+
+        Ok(None)
+    }
+
     async fn execute_registered_skill(
         &self,
         registered_skill: &skills::RegisteredSkill,
@@ -1604,6 +2132,36 @@ impl Agent {
         parameters: Option<HashMap<String, String>>,
     ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
         let start_time = std::time::Instant::now();
+        let skill_id = registered_skill.skill.id.clone();
+
+        // 🆕 OPTIMIZATION PHASE 1: Approval gate for destructive operations
+        if let Some(ref gate) = self.approval_gate {
+            let env = std::collections::HashMap::new(); // Could be enriched with env vars
+            let params_json = parameters.as_ref().map(|p| {
+                let mut map = serde_json::Map::new();
+                for (k, v) in p {
+                    map.insert(k.clone(), serde_json::Value::String(v.clone()));
+                }
+                serde_json::Value::Object(map)
+            }).unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+            match gate.evaluate(&skill_id, &params_json, &env) {
+                crate::security::ApprovalResult::Rejected { reason } => {
+                    warn!("Approval required but not granted for skill '{}': {}", skill_id, reason);
+                    return Ok(skills::executor::SkillExecutionResult {
+                        task_id: skill_id,
+                        success: false,
+                        output: format!("⚠️ 操作需要确认: {}。请明确批准后再执行。", reason),
+                        structured_output: None,
+                        execution_time_ms: start_time.elapsed().as_millis() as u64,
+                    });
+                }
+                crate::security::ApprovalResult::AutoApproved { rule } => {
+                    info!("Skill '{}' auto-approved by rule: {}", skill_id, rule);
+                }
+                _ => {} // Approved or other states — proceed
+            }
+        }
 
         // ── MCP Skill Bridge: Execute MCP tools registered as skills ──
         if let Some((server_name, tool_name)) = crate::mcp::skill_bridge::parse_mcp_skill_id(&registered_skill.skill.id) {
@@ -1683,10 +2241,16 @@ impl Agent {
                     .join("\n")
             };
 
+            // 🆕 OPTIMIZATION PHASE 4: Truncate large tool outputs to prevent context overflow
+            let truncated_output = Self::truncate_tool_output(&output, 4000);
+            if truncated_output.len() < output.len() {
+                info!("Tool output truncated from {} to {} chars for skill '{}'", output.len(), truncated_output.len(), skill_id);
+            }
+
             return Ok(skills::executor::SkillExecutionResult {
-                task_id: registered_skill.skill.id.clone(),
+                task_id: skill_id,
                 success: true,
-                output,
+                output: truncated_output,
                 structured_output: None,
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
             });
@@ -1700,51 +2264,29 @@ impl Agent {
         // 🆕 FIX: Skip WASM attempt for markdown-based builtin skills that have no WASM binary.
         let wasm_path_empty = registered_skill.skill.wasm_path.as_os_str().is_empty();
         
-        // 1. Try WASM execution if kernel and wasm_engine are available
+        // 1. Try WASM execution in true sandbox with resource limits
         if !wasm_path_empty {
-            if let Some(kernel) = self.kernel.as_ref() {
-                if let Some(engine) = kernel.wasm_engine() {
-                    let wasm_bytes = tokio::fs::read(&registered_skill.skill.wasm_path).await;
-                    if let Ok(bytes) = wasm_bytes {
-                        let module = engine.compile_cached(&registered_skill.skill.id, &bytes);
-                        if let Ok(m) = module {
-                            let instance = engine.instantiate_with_host(&m, &self.config.id);
-                            if let Ok(mut inst) = instance {
-                                let input_bytes = context.input.as_bytes();
-                                if inst.write_memory(0, input_bytes).is_ok() {
-                                    const MAX_OUTPUT_SIZE: usize = 65536;
-                                    let call_result = inst.call_typed::<(i32, i32), i32>(
-                                        &registered_skill.skill.manifest.entry_point,
-                                        (0i32, input_bytes.len() as i32),
-                                    );
-                                    if let Ok(output_ptr) = call_result {
-                                        let output_addr = output_ptr as usize;
-                                        if let Ok(len_bytes) = inst.read_memory(output_addr, 4) {
-                                            let output_len = u32::from_le_bytes([
-                                                len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3],
-                                            ]) as usize;
-                                            if output_len <= MAX_OUTPUT_SIZE {
-                                                if let Ok(output_bytes) = inst.read_memory(output_addr + 4, output_len) {
-                                                    if let Ok(output) = String::from_utf8(output_bytes) {
-                                                        return Ok(skills::executor::SkillExecutionResult {
-                                                            task_id: registered_skill.skill.id.clone(),
-                                                            success: true,
-                                                            output,
-                                                            structured_output: None,
-                                                            execution_time_ms: start_time.elapsed().as_millis() as u64,
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+            let limits = crate::security::ResourceLimits {
+                max_memory_mb: 128,
+                max_cpu_time_ms: 30000,
+                max_execution_time_secs: 30,
+                max_fs_usage_mb: 10,
+                max_network_requests_per_min: 0,
+            };
+            match self.execute_wasm_in_sandbox(
+                &registered_skill.skill.wasm_path,
+                &registered_skill.skill.manifest.entry_point,
+                &context.input,
+                &limits,
+            ).await {
+                Ok(Some(result)) => return Ok(result),
+                Ok(None) => {
+                    info!("Skill '{}' WASM sandbox execution failed, falling back to LLM execution", registered_skill.skill.name);
+                }
+                Err(e) => {
+                    warn!("Skill '{}' WASM sandbox error: {}", registered_skill.skill.name, e);
                 }
             }
-            info!("Skill '{}' WASM unavailable or failed, falling back to LLM execution", registered_skill.skill.name);
         }
         
         // 2. Knowledge / Code skill execution via ReAct executor
@@ -1865,6 +2407,9 @@ impl Agent {
         let execution_time_ms = result.execution_time_ms;
 
         let _ = registry.record_usage(skill_name).await;
+        
+        // 🆕 OPTIMIZATION PHASE 3: Collect feedback for self-improvement
+        self.collect_skill_feedback(skill_name, &task.input, &result.output, result.success, execution_time_ms).await;
 
         let artifacts = if !result.output.is_empty() {
             vec![Artifact {
@@ -2151,7 +2696,7 @@ impl Agent {
 
         info!("Using planning for task: {}", task.id);
 
-        // 1. Create plan context
+        // 1. Create plan context with memory injection
         let context = self.create_plan_context(&task).await?;
 
         // 2. Determine planning strategy
@@ -2182,6 +2727,12 @@ impl Agent {
             active.insert(plan.id.clone(), plan.clone());
         }
 
+        // 🆕 OPTIMIZATION PHASE 3: Initialize ToolTrail for execution visualization
+        let mut tool_trail = crate::planning::ToolTrail::new(plan.id.to_string());
+        for (i, step) in plan.steps.iter().enumerate() {
+            tool_trail.add_step(i, &step.description);
+        }
+
         // 5. Execute plan with timeout protection
         // 🆕 FIX: 动态计算超时：每步 30s + 15s 缓冲，上限 180s
         let step_count = plan.steps.len().max(1);
@@ -2190,10 +2741,11 @@ impl Agent {
             .unwrap_or_else(|| (step_count as u64 * 30 + 15).min(180));
         let plan_timeout = Duration::from_secs(plan_timeout_secs);
         
-        let result = match timeout(plan_timeout, self.execute_plan_internal(&plan)).await {
+        let result = match timeout(plan_timeout, self.execute_plan_internal_with_trail(&plan, Some(&mut tool_trail))).await {
             Ok(r) => r,
             Err(_) => {
                 error!("⏱️ Plan execution timed out after {}s for task {}", plan_timeout.as_secs(), task.id);
+                tool_trail.finish(crate::planning::TrailStatus::Failed);
                 return Err(AgentError::Execution(
                     format!("Plan execution timed out after {}s", plan_timeout.as_secs())
                 ));
@@ -2209,23 +2761,44 @@ impl Agent {
         match result {
             Ok(exec_result) => {
                 if exec_result.success {
+                    tool_trail.finish(crate::planning::TrailStatus::Success);
+                } else {
+                    tool_trail.finish(crate::planning::TrailStatus::Failed);
+                }
+
+                if exec_result.success {
                     let output = exec_result.data
                         .and_then(|d| d.get("output").cloned())
                         .and_then(|o| o.as_str().map(|s| s.to_string()))
                         .unwrap_or_else(|| "Plan executed successfully".to_string());
                     
-                    Ok((output, vec![]))
+                    // 🆕 OPTIMIZATION PHASE 3: Include ToolTrail as artifact
+                    let trail_artifact = Artifact {
+                        id: format!("tool_trail_{}", plan.id),
+                        artifact_type: "tool_trail".to_string(),
+                        content: tool_trail.to_json().into_bytes(),
+                        mime_type: "application/json".to_string(),
+                    };
+
+                    // 🆕 OPTIMIZATION PHASE 3: Solidify experience to memory
+                    self.solidify_experience(&goal, &plan, &tool_trail, &output).await;
+                    
+                    Ok((output, vec![trail_artifact]))
                 } else {
                     Err(AgentError::Execution(
                         exec_result.error.unwrap_or_else(|| "Plan execution failed".to_string())
                     ))
                 }
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                tool_trail.finish(crate::planning::TrailStatus::Failed);
+                Err(e)
+            }
         }
     }
 
     /// Create plan context from task
+    /// 🆕 OPTIMIZATION PHASE 3: Injects historical solutions from memory
     async fn create_plan_context(&self, task: &Task) -> Result<PlanContext, AgentError> {
         let mut context = PlanContext::new(&self.config.id);
         
@@ -2243,7 +2816,89 @@ impl Agent {
             context.constraints = constraints.split(',').map(|s| s.trim().to_string()).collect();
         }
 
+        // 🆕 OPTIMIZATION PHASE 3: Inject historical solutions from memory
+        if let Some(ref memory) = self.memory_system {
+            let query = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+                json.get("message").and_then(|m| m.as_str()).unwrap_or(&task.input).to_string()
+            } else {
+                task.input.clone()
+            };
+            
+            match memory.search(&query).await {
+                Ok(results) => {
+                    let historical: Vec<String> = results.into_iter()
+                        .take(3)
+                        .map(|r| r.content)
+                        .collect();
+                    if !historical.is_empty() {
+                        info!("Injected {} historical solutions into plan context", historical.len());
+                        context.history = historical;
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to search memory for planning context: {}", e);
+                }
+            }
+        }
+
         Ok(context)
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 3: Solidify successful plan execution into long-term memory
+    ///
+    /// Stores the plan + execution trail as a reusable experience entry.
+    /// Future similar queries can retrieve this experience via memory search.
+    async fn solidify_experience(
+        &self,
+        goal: &str,
+        plan: &Plan,
+        trail: &crate::planning::ToolTrail,
+        output: &str,
+    ) {
+        if self.memory_system.is_none() {
+            return;
+        }
+
+        // Generate experience summary
+        let steps_markdown: String = plan.steps.iter().enumerate().map(|(i, s)| {
+            format!("{}. {}\n", i + 1, s.description)
+        }).collect();
+
+        let key_tools: Vec<String> = trail.steps.iter().filter_map(|s| {
+            s.tool_calls.first().map(|tc| tc.tool_name.clone())
+        }).collect();
+
+        let experience = format!(
+            "## 问题类型: 规划执行\n\n\
+             ### 用户目标\n{}\n\n\
+             ### 执行步骤\n{}\n\n\
+             ### 关键工具\n{}\n\n\
+             ### 执行结果\n{}\n\n\
+             ### 计划ID\n{}",
+            goal,
+            steps_markdown,
+            key_tools.join(", "),
+            output.chars().take(500).collect::<String>(),
+            plan.id
+        );
+
+        let memory = self.memory_system.as_ref().unwrap();
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("category".to_string(), "solution".to_string());
+        metadata.insert("plan_id".to_string(), plan.id.to_string());
+        metadata.insert("user_id".to_string(), self.config.id.clone());
+        metadata.insert("step_count".to_string(), plan.steps.len().to_string());
+        metadata.insert("source".to_string(), "solidified_experience".to_string());
+
+        if let Err(e) = memory.add_entry(
+            uuid::Uuid::new_v4(),
+            &experience,
+            metadata,
+        ).await {
+            warn!("Failed to solidify experience to memory: {}", e);
+        } else {
+            info!("Solidified experience for plan {} into memory", plan.id);
+        }
     }
 
     /// Get available tools for planning
@@ -2289,59 +2944,67 @@ impl Agent {
     /// 🆕 OPTIMIZATION: Respects step dependencies when executing in parallel
     /// 🆕 FIX: Hard cap on step count to prevent LLM storm and timeout
     async fn execute_plan_internal(&self, plan: &Plan) -> Result<ExecutionResult, AgentError> {
-        const MAX_PLAN_STEPS: usize = 5;  // 🆕 FIX: 从 3 提升到 5，减少暴力截断
+        self.execute_plan_internal_with_trail(plan, None).await
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 3: Execute plan with ToolTrail tracking
+    async fn execute_plan_internal_with_trail(
+        &self,
+        plan: &Plan,
+        trail: Option<&mut crate::planning::ToolTrail>,
+    ) -> Result<ExecutionResult, AgentError> {
+        const MAX_PLAN_STEPS: usize = 5;
         
-        // 🆕 FIX: Reject or truncate plans with too many steps
         if plan.steps.len() > MAX_PLAN_STEPS {
             warn!("Plan {} has {} steps, exceeding max {}. Truncating to first {} steps.", 
                   plan.id, plan.steps.len(), MAX_PLAN_STEPS, MAX_PLAN_STEPS);
-            // Note: Truncation requires rebuilding dependencies, so we fall back to sequential
-            // execution on a truncated view. For safety, we execute sequentially.
             let mut truncated_plan = plan.clone();
             truncated_plan.steps.truncate(MAX_PLAN_STEPS);
             truncated_plan.dependencies.clear();
             for i in 1..truncated_plan.steps.len() {
                 let _ = truncated_plan.add_step_with_deps(truncated_plan.steps[i].clone(), vec![i - 1]);
             }
-            return self.execute_plan_sequential_or_dependency_aware(&truncated_plan).await;
+            return self.execute_plan_sequential_or_dependency_aware_with_trail(&truncated_plan, trail).await;
         }
         
-        // Check if parallel execution is enabled via plan metadata
         let enable_parallel = plan.metadata.get("enable_parallel")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         
         let max_concurrency = plan.metadata.get("max_concurrency")
             .and_then(|v| v.as_u64())
-            .unwrap_or(3) as usize; // 🆕 FIX: Reduced default from 5 to 3
+            .unwrap_or(3) as usize;
 
-        // 🆕 FIX: Only run truly independent steps in parallel.
-        // Simple chain dependencies (0->1->2->...) MUST run sequentially to avoid
-        // wasting LLM calls on steps that depend on prior outputs.
         let has_simple_chain_deps = plan.dependencies.len() + 1 == plan.steps.len()
             && plan.dependencies.iter().all(|(k, v)| v.len() == 1 && v[0] + 1 == *k);
 
         if enable_parallel && plan.dependencies.is_empty() {
-            // Parallel execution only for truly independent steps
-            self.execute_plan_parallel(plan, max_concurrency).await
+            self.execute_plan_parallel_with_trail(plan, max_concurrency, trail).await
         } else if enable_parallel && has_simple_chain_deps {
-            // 🆕 FIX: Chain dependencies → sequential execution, NOT parallel
             info!("Plan {} has chain dependencies ({} steps), executing sequentially to avoid LLM waste", 
                   plan.id, plan.steps.len());
-            self.execute_plan_sequential_or_dependency_aware(plan).await
+            self.execute_plan_sequential_or_dependency_aware_with_trail(plan, trail).await
         } else {
-            // Sequential execution (or dependency-aware)
-            self.execute_plan_sequential_or_dependency_aware(plan).await
+            self.execute_plan_sequential_or_dependency_aware_with_trail(plan, trail).await
         }
     }
     
     /// Execute plan steps in parallel
-    /// 
-    /// 🆕 OPTIMIZATION: Uses futures::future::join_all for concurrent execution
+    #[allow(dead_code)]
     async fn execute_plan_parallel(
         &self, 
         plan: &Plan,
         max_concurrency: usize,
+    ) -> Result<ExecutionResult, AgentError> {
+        self.execute_plan_parallel_with_trail(plan, max_concurrency, None).await
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 3: Execute plan steps in parallel with ToolTrail
+    async fn execute_plan_parallel_with_trail(
+        &self, 
+        plan: &Plan,
+        max_concurrency: usize,
+        _trail: Option<&mut crate::planning::ToolTrail>,
     ) -> Result<ExecutionResult, AgentError> {
         let start_time = std::time::Instant::now();
         use tokio::sync::Semaphore;
@@ -2398,11 +3061,19 @@ impl Agent {
     }
     
     /// Execute plan steps sequentially or with dependency awareness
-    /// 
-    /// 🆕 OPTIMIZATION: Supports dependency-aware execution
+    #[allow(dead_code)]
     async fn execute_plan_sequential_or_dependency_aware(
         &self, 
         plan: &Plan,
+    ) -> Result<ExecutionResult, AgentError> {
+        self.execute_plan_sequential_or_dependency_aware_with_trail(plan, None).await
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 3: Execute plan steps sequentially with ToolTrail
+    async fn execute_plan_sequential_or_dependency_aware_with_trail(
+        &self, 
+        plan: &Plan,
+        mut trail: Option<&mut crate::planning::ToolTrail>,
     ) -> Result<ExecutionResult, AgentError> {
         let start_time = std::time::Instant::now();
         
@@ -2411,8 +3082,18 @@ impl Agent {
             let mut final_output = "Plan executed successfully".to_string();
             for (step_idx, step) in plan.steps.iter().enumerate() {
                 info!("Executing plan {} step {}: {}", plan.id, step_idx, step.description);
+                
+                if let Some(ref mut t) = trail {
+                    t.set_step_status(step_idx, crate::planning::TrailStepStatus::Running);
+                }
 
-                let step_result = self.execute_step_by_type(step).await;
+                let step_start = std::time::Instant::now();
+                let step_result = self.execute_step_by_type_with_trail(step, step_idx, trail.as_deref_mut()).await;
+                let step_duration = step_start.elapsed().as_millis() as u64;
+                
+                if let Some(ref mut t) = trail {
+                    t.set_step_duration(step_idx, step_duration);
+                }
 
                 match step_result {
                     Ok(result) => {
@@ -2422,12 +3103,21 @@ impl Agent {
                                     final_output = output.to_string();
                                 }
                             }
+                            if let Some(ref mut t) = trail {
+                                t.set_step_status(step_idx, crate::planning::TrailStepStatus::Success);
+                            }
                         } else if !self.should_continue_on_failure(plan) {
+                            if let Some(ref mut t) = trail {
+                                t.set_step_status(step_idx, crate::planning::TrailStepStatus::Failed);
+                            }
                             return Ok(result);
                         }
                     }
                     Err(e) => {
                         error!("Step {} execution failed: {}", step_idx, e);
+                        if let Some(ref mut t) = trail {
+                            t.set_step_status(step_idx, crate::planning::TrailStepStatus::Failed);
+                        }
                         return Err(e);
                     }
                 }
@@ -2448,13 +3138,43 @@ impl Agent {
     
     /// Execute step based on its type
     async fn execute_step_by_type(&self, step: &PlanStep) -> Result<ExecutionResult, AgentError> {
-        match step.step_type {
+        self.execute_step_by_type_with_trail(step, 0, None).await
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 3: Execute step with ToolTrail tracking
+    async fn execute_step_by_type_with_trail(
+        &self,
+        step: &PlanStep,
+        step_idx: usize,
+        mut trail: Option<&mut crate::planning::ToolTrail>,
+    ) -> Result<ExecutionResult, AgentError> {
+        let result = match step.step_type {
             StepType::Action => self.execute_action_step(step).await,
             StepType::Decision => self.execute_decision_step(step).await,
             StepType::Reasoning => self.execute_reasoning_step(step).await,
             StepType::Information => self.execute_information_step(step).await,
             StepType::Validation => self.execute_validation_step(step).await,
+        };
+
+        // Record result in ToolTrail
+        if let Some(ref mut t) = trail {
+            match &result {
+                Ok(exec_result) => {
+                    let success = exec_result.success;
+                    let output = exec_result.data.as_ref()
+                        .and_then(|d| d.get("output"))
+                        .and_then(|o| o.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    t.record_tool_call(step_idx, format!("{:?}", step.step_type), serde_json::Value::Null, &output, success);
+                }
+                Err(e) => {
+                    t.record_tool_call(step_idx, format!("{:?}", step.step_type), serde_json::Value::Null, &e.to_string(), false);
+                }
+            }
         }
+
+        result
     }
     
     /// Execute plan with dependency awareness

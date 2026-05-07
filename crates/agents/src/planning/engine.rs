@@ -272,6 +272,7 @@ impl PlanningEngine {
     /// Create a plan using the configured strategy
     ///
     /// ARCHITECTURE FIX: Plans are now persisted to storage and subject to TTL cleanup.
+    /// 🆕 OPTIMIZATION PHASE 3: Supports memory-injected planning with historical solutions.
     pub async fn create_plan(
         &self,
         goal: &str,
@@ -279,6 +280,14 @@ impl PlanningEngine {
         strategy: Option<PlanStrategy>,
     ) -> PlanningResult<Plan> {
         let strategy = strategy.unwrap_or(self.config.default_strategy);
+
+        // 🆕 OPTIMIZATION PHASE 3: Inject historical solutions from memory if available
+        let enriched_goal = if !context.history.is_empty() {
+            let historical = context.history.join("\n");
+            format!("{}\n\n[历史参考方案]\n{}", goal, historical)
+        } else {
+            goal.to_string()
+        };
 
         // Select planner based on strategy
         let planner: Box<dyn Planner> = match strategy {
@@ -288,7 +297,7 @@ impl PlanningEngine {
             PlanStrategy::Hybrid => Box::new(HybridPlanner::new()),
         };
 
-        let plan = planner.plan(goal, context).await?;
+        let plan = planner.plan(&enriched_goal, context).await?;
 
         // Store in memory
         let mut plans = self.plans.write().await;

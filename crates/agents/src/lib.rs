@@ -63,6 +63,8 @@ pub mod tests_integration;
 pub mod performance_optimizations;
 pub mod events;
 pub mod health;
+// 🆕 OPTIMIZATION: Intent engine for pre-LLM classification
+pub mod intent;
 pub mod llm;
 pub mod mcp;
 pub mod media;
@@ -70,6 +72,8 @@ pub mod memory;
 pub mod message_bus;
 pub mod metrics;
 pub mod models;
+// 🆕 OPTIMIZATION: Prompt builder for dynamic modular assembly
+pub mod prompt;
 // 🟢 P1 FIX: Planning module - structured agent planning capabilities
 pub mod planning;
 pub mod queue;

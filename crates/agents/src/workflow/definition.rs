@@ -6,39 +6,74 @@
 use serde::{Deserialize, Serialize};
 
 /// Workflow definition parsed from YAML or JSON
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WorkflowDefinition {
     /// Unique workflow identifier (auto-populated from filename if empty)
-    #[serde(default)]
     pub id: String,
     /// Human-readable name
-    #[serde(default)]
     pub name: String,
     /// Description of what this workflow does
     pub description: String,
     /// Version string
-    #[serde(default = "default_version")]
     pub version: String,
     /// Author information
     pub author: Option<String>,
     /// Tags for categorization
-    #[serde(default)]
     pub tags: Vec<String>,
     /// Triggers that can start this workflow
-    #[serde(default)]
     pub triggers: Vec<TriggerDefinition>,
     /// Global workflow configuration
-    #[serde(default)]
     pub config: WorkflowGlobalConfig,
     /// Execution steps
     pub steps: Vec<WorkflowStep>,
     /// Global error handler (OpenClaw compatible)
-    #[serde(default, rename = "error_handler")]
     pub error_handler: Option<ErrorHandler>,
 }
 
 fn default_version() -> String {
     "1.0.0".to_string()
+}
+
+impl<'de> Deserialize<'de> for WorkflowDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            id: String,
+            #[serde(default)]
+            name: String,
+            description: String,
+            #[serde(default = "default_version")]
+            version: String,
+            author: Option<String>,
+            #[serde(default)]
+            tags: Vec<String>,
+            #[serde(default)]
+            triggers: Vec<TriggerDefinition>,
+            #[serde(default)]
+            config: WorkflowGlobalConfig,
+            steps: Vec<WorkflowStep>,
+            #[serde(default, rename = "error_handler")]
+            error_handler: Option<ErrorHandler>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(WorkflowDefinition {
+            id: if raw.id.is_empty() { raw.name.clone() } else { raw.id },
+            name: raw.name,
+            description: raw.description,
+            version: raw.version,
+            author: raw.author,
+            tags: raw.tags,
+            triggers: raw.triggers,
+            config: raw.config,
+            steps: raw.steps,
+            error_handler: raw.error_handler,
+        })
+    }
 }
 
 /// Global configuration for a workflow

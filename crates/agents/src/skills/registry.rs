@@ -101,6 +101,14 @@ pub struct SkillDefinition {
     pub tags: Vec<String>,
 }
 
+/// Skill disclosure level for progressive loading
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillDisclosureLevel {
+    L1, // ~30 tokens — name + one-liner
+    L2, // ~200 tokens — summary
+    L3, // ~2000 tokens — full doc
+}
+
 /// Registered skill
 #[derive(Debug, Clone)]
 pub struct RegisteredSkill {
@@ -110,6 +118,10 @@ pub struct RegisteredSkill {
     pub installed_at: u64,
     pub usage_count: u64,
     pub enabled: bool,
+    /// 🆕 OPTIMIZATION: L1/L2/L3 progressive disclosure content
+    pub l1_index: Option<String>,
+    pub l2_summary: Option<String>,
+    pub l3_full_doc: Option<String>,
 }
 
 impl SkillRegistry {
@@ -140,6 +152,9 @@ impl SkillRegistry {
                 .as_secs(),
             usage_count: 0,
             enabled: true,
+            l1_index: None,
+            l2_summary: None,
+            l3_full_doc: None,
         };
 
         // Lock order: skills first, then categories to avoid deadlocks
@@ -188,6 +203,69 @@ impl SkillRegistry {
             .filter(|s| s.tags.contains(&tag))
             .cloned()
             .collect()
+    }
+
+    /// 🆕 OPTIMIZATION: Get skill description at specified disclosure level
+    pub async fn get_skill_description(&self, skill_id: &str, level: SkillDisclosureLevel) -> Option<String> {
+        let skills = self.skills.read().await;
+        let skill = skills.get(skill_id)?;
+        
+        match level {
+            SkillDisclosureLevel::L1 => {
+                skill.l1_index.clone()
+                    .or_else(|| Some(skill.skill.name.clone()))
+            }
+            SkillDisclosureLevel::L2 => {
+                skill.l2_summary.clone()
+                    .or_else(|| Some(skill.skill.manifest.description.clone()))
+            }
+            SkillDisclosureLevel::L3 => {
+                skill.l3_full_doc.clone()
+                    .or_else(|| Some(skill.skill.manifest.description.clone()))
+            }
+        }
+    }
+
+    /// 🆕 OPTIMIZATION: Register skill with progressive disclosure levels
+    pub async fn register_with_levels(
+        &self,
+        skill: LoadedSkill,
+        category: impl Into<String>,
+        tags: Vec<String>,
+        l1_index: Option<String>,
+        l2_summary: Option<String>,
+        l3_full_doc: Option<String>,
+    ) {
+        let skill_id = skill.id.clone();
+        let category = category.into();
+
+        let registered = RegisteredSkill {
+            skill,
+            category: category.clone(),
+            tags,
+            installed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or(std::time::Duration::from_secs(0))
+                .as_secs(),
+            usage_count: 0,
+            enabled: true,
+            l1_index,
+            l2_summary,
+            l3_full_doc,
+        };
+
+        {
+            let mut skills = self.skills.write().await;
+            skills.insert(skill_id.clone(), registered);
+        }
+
+        {
+            let mut categories = self.categories.write().await;
+            categories
+                .entry(category)
+                .or_insert_with(Vec::new)
+                .push(skill_id);
+        }
     }
 
     /// Search skills by name or description with semantic keyword overlap scoring.

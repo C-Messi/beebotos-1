@@ -16,6 +16,23 @@ pub trait TaskDecomposer: Send + Sync {
     fn can_handle(&self, goal: &str, context: &DecompositionContext) -> bool;
 }
 
+/// Resource allocation for a plan step
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceAllocation {
+    /// Step index in the plan
+    pub step_index: usize,
+    /// Assigned skill IDs
+    pub assigned_skills: Vec<String>,
+    /// Assigned tool IDs (MCP or native)
+    pub assigned_tools: Vec<String>,
+    /// Assigned MCP server names
+    pub assigned_mcp_servers: Vec<String>,
+    /// Estimated token consumption
+    pub estimated_tokens: u32,
+    /// Estimated execution time in seconds
+    pub estimated_time_secs: u32,
+}
+
 /// Decomposition context
 #[derive(Debug, Clone, Default)]
 pub struct DecompositionContext {
@@ -29,6 +46,10 @@ pub struct DecompositionContext {
     pub constraints: Vec<String>,
     /// Max decomposition depth
     pub max_depth: usize,
+    /// Intent-extracted entities (e.g. symbol, side, qty)
+    pub intent_entities: HashMap<String, String>,
+    /// Intent-extracted constraints
+    pub intent_constraints: Vec<String>,
     /// Additional metadata
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -42,6 +63,8 @@ impl DecompositionContext {
             patterns: Vec::new(),
             constraints: Vec::new(),
             max_depth: 2,  // 🆕 FIX: Reduced from 5 to prevent exponential step explosion
+            intent_entities: HashMap::new(),
+            intent_constraints: Vec::new(),
             metadata: HashMap::new(),
         }
     }
@@ -61,6 +84,18 @@ impl DecompositionContext {
     /// Set max depth
     pub fn with_max_depth(mut self, depth: usize) -> Self {
         self.max_depth = depth;
+        self
+    }
+
+    /// Add intent entity
+    pub fn with_entity(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.intent_entities.insert(key.into(), value.into());
+        self
+    }
+
+    /// Add intent constraint
+    pub fn with_intent_constraint(mut self, constraint: impl Into<String>) -> Self {
+        self.intent_constraints.push(constraint.into());
         self
     }
 }
@@ -496,6 +531,120 @@ impl Decomposer {
     /// Quick decompose with default context
     pub fn quick_decompose(&self, goal: &str) -> PlanningResult<Plan> {
         self.decompose(goal, &DecompositionContext::default())
+    }
+
+    /// Allocate resources for each step in a plan based on intent analysis
+    pub fn allocate_resources(
+        &self,
+        plan: &Plan,
+        context: &DecompositionContext,
+    ) -> Vec<ResourceAllocation> {
+        let mut allocations = Vec::new();
+        for (i, step) in plan.steps.iter().enumerate() {
+            let allocation = Self::allocate_for_step(i, step, context);
+            allocations.push(allocation);
+        }
+        allocations
+    }
+
+    fn allocate_for_step(
+        step_index: usize,
+        step: &PlanStep,
+        context: &DecompositionContext,
+    ) -> ResourceAllocation {
+        let desc_lower = step.description.to_lowercase();
+        let mut skills = Vec::new();
+        let mut tools = Vec::new();
+        let mut mcp_servers = Vec::new();
+
+        // Match step description to tools based on intent entities
+        if desc_lower.contains("order") || desc_lower.contains("buy") || desc_lower.contains("sell")
+            || desc_lower.contains("下单") || desc_lower.contains("买入") || desc_lower.contains("卖出")
+        {
+            if let Some(symbol) = context.intent_entities.get("symbol") {
+                if symbol.contains("BTC") || symbol.contains("ETH") {
+                    tools.push("mcp:alpaca/place_crypto_order".to_string());
+                } else {
+                    tools.push("mcp:alpaca/place_stock_order".to_string());
+                }
+            } else {
+                tools.push("mcp:alpaca/place_stock_order".to_string());
+            }
+            mcp_servers.push("alpaca".to_string());
+            skills.push("trading".to_string());
+        }
+
+        if desc_lower.contains("price") || desc_lower.contains("quote")
+            || desc_lower.contains("价格") || desc_lower.contains("行情")
+        {
+            if let Some(symbol) = context.intent_entities.get("symbol") {
+                if symbol.contains("BTC") || symbol.contains("ETH") {
+                    tools.push("mcp:alpaca/get_crypto_quote".to_string());
+                } else {
+                    tools.push("mcp:alpaca/get_stock_quote".to_string());
+                }
+            } else {
+                tools.push("mcp:alpaca/get_stock_quote".to_string());
+            }
+            mcp_servers.push("alpaca".to_string());
+            skills.push("stock-data".to_string());
+        }
+
+        if desc_lower.contains("search") || desc_lower.contains("find")
+            || desc_lower.contains("查") || desc_lower.contains("搜索")
+        {
+            tools.push("search".to_string());
+            skills.push("research".to_string());
+        }
+
+        if desc_lower.contains("analyze") || desc_lower.contains("analysis")
+            || desc_lower.contains("分析")
+        {
+            tools.push("llm".to_string());
+            skills.push("analysis".to_string());
+        }
+
+        if desc_lower.contains("report") || desc_lower.contains("summary")
+            || desc_lower.contains("报告") || desc_lower.contains("总结")
+        {
+            tools.push("llm".to_string());
+            skills.push("reporting".to_string());
+        }
+
+        // Add from available_tools if matched by name
+        for tool in &context.available_tools {
+            let tool_lower = tool.to_lowercase();
+            if desc_lower.contains(&tool_lower) {
+                if !tools.contains(tool) {
+                    tools.push(tool.clone());
+                }
+            }
+        }
+
+        // Estimate tokens based on step complexity
+        let estimated_tokens = if tools.len() > 2 {
+            2000u32
+        } else if tools.len() > 0 {
+            1000u32
+        } else {
+            500u32
+        };
+
+        // Estimate time based on tool count and type
+        let estimated_time_secs = if mcp_servers.contains(&"alpaca".to_string()) {
+            15u32 + (tools.len() as u32 * 5)
+        } else {
+            10u32 + (tools.len() as u32 * 3)
+        };
+
+        ResourceAllocation {
+            step_index,
+            assigned_skills: skills,
+            assigned_tools: tools,
+            assigned_mcp_servers: mcp_servers,
+            estimated_tokens,
+            estimated_time_secs,
+        }
     }
 }
 

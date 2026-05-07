@@ -6,10 +6,14 @@
 //! - Session isolation
 //! - Secure memory handling
 
+pub mod approval;
 pub mod permission_system;
 pub mod session_isolation;
 pub mod webhook_security;
 
+pub use approval::{
+    ApprovalGate, ApprovalMode, ApprovalRequest, ApprovalResult, ApprovalRule, RiskLevel,
+};
 pub use permission_system::{
     capabilities as common_capabilities, Capability, PermissionAuditEvent, PermissionChecker,
     PermissionContext, PermissionResult,

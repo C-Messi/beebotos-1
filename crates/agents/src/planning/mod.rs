@@ -56,6 +56,14 @@ pub mod replanner;
 // ARCHITECTURE FIX: Plan storage module for persistence
 pub mod storage;
 
+// 🆕 OPTIMIZATION PHASE 3: ToolTrail execution visualization
+pub mod tool_trail;
+
+// 🆕 OPTIMIZATION PHASE 3: Tool chain compression for multi-step reasoning
+pub mod tool_chain;
+
+
+
 // Re-export core plan types
 pub use plan::{
     Action, Plan, PlanId, PlanStatus, PlanStep, PlanningError, PlanningResult, Priority,
@@ -66,6 +74,7 @@ pub use plan::{
 pub use decomposer::{
     CompositeDecomposer, Decomposer, DecompositionContext, DecompositionStrategy,
     DomainDecomposer, HierarchicalDecomposer, ParallelDecomposer, TaskDecomposer,
+    ResourceAllocation,
 };
 
 // Re-export engine types
@@ -88,6 +97,18 @@ pub use engine::PlannerToolRegistry;
 pub use replanner::{
     AdaptationResult, AdaptationStrategy, CompositeRePlanner, ConditionRePlanner,
     FeedbackRePlanner, RePlanTrigger, RePlanner, ResourceRePlanner,
+};
+
+// 🆕 OPTIMIZATION PHASE 3: Re-export ToolTrail types
+// Note: StepStatus from tool_trail is distinct from plan::StepStatus
+pub use tool_trail::{
+    ToolTrail, TrailStep, TrailStatus, StepStatus as TrailStepStatus, ToolCallRecord, TrailCollector,
+};
+
+// 🆕 OPTIMIZATION PHASE 3: Re-export tool chain compression types
+pub use tool_chain::{
+    ConditionalToolCall, ToolCall, ToolChain, ToolChainParser, ToolChainParseError,
+    ToolChainStep, ChainExecutionResult,
 };
 
 // ARCHITECTURE FIX: Re-export storage types

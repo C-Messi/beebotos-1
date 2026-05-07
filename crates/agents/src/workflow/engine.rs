@@ -877,6 +877,7 @@ mod tests {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "b".to_string(),
@@ -887,6 +888,7 @@ mod tests {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "c".to_string(),
@@ -897,6 +899,7 @@ mod tests {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
         ];
 
@@ -918,6 +921,7 @@ mod tests {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "b".to_string(),
@@ -928,6 +932,7 @@ mod tests {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
         ];
 
@@ -972,6 +977,7 @@ mod tests {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "b".to_string(),
@@ -982,6 +988,7 @@ mod tests {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "c".to_string(),
@@ -992,6 +999,7 @@ mod tests {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
             WorkflowStep {
                 id: "d".to_string(),
@@ -1002,6 +1010,7 @@ mod tests {
                 condition: None,
                 timeout_sec: None,
                 retries: None,
+                on_error: None,
             },
         ];
 
@@ -1035,7 +1044,8 @@ mod tests {
             tags: vec![],
             triggers: vec![],
             config: crate::workflow::definition::WorkflowGlobalConfig::default(),
-            steps: vec![
+            error_handler: None,
+                        steps: vec![
                 WorkflowStep {
                     id: "step_a".to_string(),
                     name: "A".to_string(),
@@ -1045,6 +1055,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
                 WorkflowStep {
                     id: "step_b".to_string(),
@@ -1055,6 +1066,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
                 WorkflowStep {
                     id: "step_merge".to_string(),
@@ -1068,6 +1080,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
             ],
         };
@@ -1113,7 +1126,8 @@ mod tests {
             tags: vec![],
             triggers: vec![],
             config: crate::workflow::definition::WorkflowGlobalConfig::default(),
-            steps: vec![
+            error_handler: None,
+                        steps: vec![
                 WorkflowStep {
                     id: "step1".to_string(),
                     name: "Fetch".to_string(),
@@ -1123,6 +1137,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
                 WorkflowStep {
                     id: "step2".to_string(),
@@ -1133,6 +1148,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
                 WorkflowStep {
                     id: "step3".to_string(),
@@ -1143,6 +1159,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
             ],
         };
@@ -1184,6 +1201,7 @@ mod tests {
                 continue_on_failure: true,
                 ..Default::default()
             },
+            error_handler: None,
             steps: vec![
                 WorkflowStep {
                     id: "s1".to_string(),
@@ -1194,6 +1212,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
                 WorkflowStep {
                     id: "s2".to_string(),
@@ -1204,6 +1223,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
                 WorkflowStep {
                     id: "s3".to_string(),
@@ -1214,6 +1234,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
             ],
         };
@@ -1261,6 +1282,7 @@ mod tests {
                 continue_on_failure: false,
                 ..Default::default()
             },
+            error_handler: None,
             steps: vec![
                 WorkflowStep {
                     id: "s1".to_string(),
@@ -1271,6 +1293,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
                 WorkflowStep {
                     id: "s2".to_string(),
@@ -1281,6 +1304,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
                 WorkflowStep {
                     id: "s3".to_string(),
@@ -1291,6 +1315,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
             ],
         };
@@ -1318,7 +1343,8 @@ mod tests {
             tags: vec![],
             triggers: vec![],
             config: crate::workflow::definition::WorkflowGlobalConfig::default(),
-            steps: vec![
+            error_handler: None,
+                        steps: vec![
                 WorkflowStep {
                     id: "s1".to_string(),
                     name: "A".to_string(),
@@ -1328,6 +1354,7 @@ mod tests {
                     condition: Some("摘要质量是否合格".to_string()),
                     timeout_sec: None,
                     retries: None,
+                on_error: None,
                 },
             ],
         };

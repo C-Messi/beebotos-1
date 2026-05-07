@@ -10,6 +10,7 @@ pub mod composition;
 pub mod discovery;
 pub mod dynamic;
 pub mod executor;
+pub mod feedback;
 pub mod hub;
 pub mod instance_manager;
 pub mod knowledge_executor;
