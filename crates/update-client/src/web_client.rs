@@ -23,13 +23,13 @@ impl WebUpdater {
         let window = window().ok_or_else(|| UpdateError::Network("No window available".to_string()))?;
         let navigator = window.navigator();
 
-        let registration = if let Ok(sw) = navigator.service_worker() {
-            JsFuture::from(sw.ready())
+        let sw = navigator.service_worker();
+        let registration = match sw.ready() {
+            Ok(promise) => JsFuture::from(promise)
                 .await
                 .ok()
-                .and_then(|r| r.dyn_into::<ServiceWorkerRegistration>().ok())
-        } else {
-            None
+                .and_then(|r| r.dyn_into::<ServiceWorkerRegistration>().ok()),
+            Err(_) => None,
         };
 
         Ok(Self {
