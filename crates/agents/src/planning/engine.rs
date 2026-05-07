@@ -165,6 +165,67 @@ impl PlanContext {
     }
 }
 
+/// 🆕 OPTIMIZATION PHASE 3: Intent Analyzer for planning前置
+///
+/// Parses user query to extract goal, entities, constraints, and historical solutions
+/// before decomposition begins.
+pub struct IntentAnalyzer;
+
+impl IntentAnalyzer {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Analyze user intent for planning
+    pub async fn analyze(&self, query: &str, memory: Option<&dyn crate::memory::MemorySearch>) -> IntentResult {
+        use crate::intent::IntentEngine;
+
+        // 1. Run intent classification
+        let intent_analysis = IntentEngine::classify_heuristic(query);
+
+        // 2. Extract entities and constraints
+        let entities = intent_analysis.entities.clone();
+        let constraints = intent_analysis.constraints.clone();
+
+        // 3. Search historical solutions from memory
+        let historical_solutions = if let Some(mem) = memory {
+            match mem.search(&format!("如何解决: {}", query)).await {
+                Ok(results) => results.into_iter().take(3).map(|r| r.content).collect(),
+                Err(_) => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // 4. Infer approach from entities + constraints
+        let suggested_approach = if !entities.is_empty() {
+            format!("使用 {:?} 实体执行 {:?} 意图", entities.keys().collect::<Vec<_>>(), intent_analysis.intent)
+        } else {
+            "标准分解".to_string()
+        };
+
+        IntentResult {
+            goal: query.to_string(),
+            intent: intent_analysis.intent,
+            entities,
+            constraints,
+            historical_solutions,
+            suggested_approach,
+        }
+    }
+}
+
+/// Result of intent analysis for planning
+#[derive(Debug, Clone)]
+pub struct IntentResult {
+    pub goal: String,
+    pub intent: crate::intent::UserIntent,
+    pub entities: std::collections::HashMap<String, String>,
+    pub constraints: Vec<String>,
+    pub historical_solutions: Vec<String>,
+    pub suggested_approach: String,
+}
+
 /// Planner trait
 #[async_trait::async_trait]
 pub trait Planner: Send + Sync {
@@ -313,6 +374,75 @@ impl PlanningEngine {
         }
 
         Ok(plan)
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 3: Create plan with memory-enhanced intent analysis
+    ///
+    /// 1. Runs IntentAnalyzer to extract entities/constraints/historical solutions
+    /// 2. If a historical solution has high similarity, adapts it instead of creating from scratch
+    /// 3. Otherwise injects historical references into the planning context
+    pub async fn create_plan_with_memory(
+        &self,
+        goal: &str,
+        context: &PlanContext,
+        strategy: Option<PlanStrategy>,
+        memory: Option<&dyn crate::memory::MemorySearch>,
+    ) -> PlanningResult<Plan> {
+        let analyzer = IntentAnalyzer::new();
+        let intent_result = analyzer.analyze(goal, memory).await;
+
+        // 🆕 FIX: Check if we have a highly relevant historical solution (similarity > 0.85)
+        // In the absence of true embedding similarity, we use keyword overlap as a proxy.
+        if let Some(best_match) = intent_result.historical_solutions.first() {
+            let overlap = Self::keyword_overlap(goal, best_match);
+            if overlap > 0.85 {
+                tracing::info!("Plan cache hit: reusing historical solution for '{}'", goal);
+                // Adapt historical plan: copy structure but update with current goal
+                let mut adapted = self.create_plan(
+                    &format!("{}\n\n[历史参考方案]\n{}", goal, best_match),
+                    context,
+                    strategy,
+                ).await?;
+                adapted.metadata.insert("adapted_from_history".to_string(), serde_json::json!(true));
+                return Ok(adapted);
+            }
+        }
+
+        // Enrich context with historical references
+        let mut enriched_context = context.clone();
+        if !intent_result.historical_solutions.is_empty() {
+            enriched_context.history.extend(intent_result.historical_solutions);
+        }
+        if !intent_result.constraints.is_empty() {
+            enriched_context.constraints.extend(intent_result.constraints);
+        }
+        // Store intent metadata for downstream use
+        enriched_context.metadata.insert("intent_entities".to_string(), 
+            serde_json::to_value(&intent_result.entities).unwrap_or_default());
+        enriched_context.metadata.insert("suggested_approach".to_string(), 
+            serde_json::json!(intent_result.suggested_approach));
+
+        self.create_plan(goal, &enriched_context, strategy).await
+    }
+
+    /// Simple keyword overlap similarity (0.0-1.0) as a proxy for semantic similarity
+    fn keyword_overlap(a: &str, b: &str) -> f32 {
+        let a_words: std::collections::HashSet<String> = a.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 3)
+            .map(|w| w.to_string())
+            .collect();
+        let b_words: std::collections::HashSet<String> = b.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 3)
+            .map(|w| w.to_string())
+            .collect();
+        if a_words.is_empty() || b_words.is_empty() {
+            return 0.0;
+        }
+        let intersection = a_words.intersection(&b_words).count();
+        let union = a_words.union(&b_words).count();
+        intersection as f32 / union as f32
     }
 
     /// Get plan by ID

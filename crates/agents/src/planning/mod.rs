@@ -79,8 +79,8 @@ pub use decomposer::{
 
 // Re-export engine types
 pub use engine::{
-    ChainOfThoughtPlanner, GoalBasedPlanner, HybridPlanner, PlanContext, PlanStrategy,
-    Planner, PlanningConfig, PlanningEngine, ReActPlanner,
+    ChainOfThoughtPlanner, GoalBasedPlanner, HybridPlanner, IntentAnalyzer, IntentResult,
+    PlanContext, PlanStrategy, Planner, PlanningConfig, PlanningEngine, ReActPlanner,
 };
 
 // Re-export executor types

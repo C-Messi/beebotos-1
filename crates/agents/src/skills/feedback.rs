@@ -47,6 +47,22 @@ pub enum ImprovementCategory {
     Performance,
 }
 
+/// 🆕 PHASE 5: Evolution-specific feedback extending SkillFeedback
+///
+/// Adds lineage-aware fields for tracking how a skill evolves over time:
+/// - version snapshot at execution time
+/// - quality delta from previous version
+/// - whether the execution triggered a lineage update
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillEvolutionFeedback {
+    pub base: SkillFeedback,
+    pub version_at_execution: String,
+    pub quality_score: f32,
+    pub triggered_distillation: bool,
+    pub triggered_patch: bool,
+    pub lineage_node_id: Option<String>,
+}
+
 /// Skill improvement engine
 pub struct SkillImprovementEngine;
 
@@ -149,6 +165,88 @@ impl SkillImprovementEngine {
         
         report
     }
+
+    /// 🆕 OPTIMIZATION PHASE 3: Generate structured skill update proposals from feedback
+    ///
+    /// Converts aggregated improvements into actionable skill update instructions
+    /// that can be fed into the PatchEngine or SkillDistiller.
+    pub fn generate_skill_updates(&self, skill_id: &str, feedbacks: &[SkillFeedback]) -> Vec<SkillUpdateProposal> {
+        let mut proposals = Vec::new();
+        let mut description_changes = Vec::new();
+        let mut example_changes = Vec::new();
+        let mut parameter_changes = Vec::new();
+        let mut error_patterns = Vec::new();
+
+        for fb in feedbacks {
+            if fb.skill_id != skill_id {
+                continue;
+            }
+            // Collect failure patterns for error handling improvements
+            if !fb.execution_success {
+                error_patterns.push(format!("Execution failed ({}ms)", fb.execution_time_ms));
+            }
+            // Collect user-suggested improvements
+            for suggestion in &fb.suggested_improvements {
+                let lower = suggestion.to_lowercase();
+                if lower.contains("example") || lower.contains("示例") {
+                    example_changes.push(suggestion.clone());
+                } else if lower.contains("parameter") || lower.contains("参数") {
+                    parameter_changes.push(suggestion.clone());
+                } else {
+                    description_changes.push(suggestion.clone());
+                }
+            }
+            // Parse LLM self-evaluation for additional hints
+            if !fb.llm_self_evaluation.is_empty() {
+                description_changes.push(format!("[LLM评估] {}", fb.llm_self_evaluation));
+            }
+        }
+
+        // Build proposals by category
+        if !description_changes.is_empty() {
+            proposals.push(SkillUpdateProposal {
+                skill_id: skill_id.to_string(),
+                category: ImprovementCategory::Description,
+                changes: description_changes,
+                reason: "Aggregated user and LLM feedback".to_string(),
+            });
+        }
+        if !example_changes.is_empty() {
+            proposals.push(SkillUpdateProposal {
+                skill_id: skill_id.to_string(),
+                category: ImprovementCategory::Examples,
+                changes: example_changes,
+                reason: "User requests for better examples".to_string(),
+            });
+        }
+        if !parameter_changes.is_empty() {
+            proposals.push(SkillUpdateProposal {
+                skill_id: skill_id.to_string(),
+                category: ImprovementCategory::Parameters,
+                changes: parameter_changes,
+                reason: "User requests for parameter clarity".to_string(),
+            });
+        }
+        if !error_patterns.is_empty() {
+            proposals.push(SkillUpdateProposal {
+                skill_id: skill_id.to_string(),
+                category: ImprovementCategory::ErrorHandling,
+                changes: error_patterns,
+                reason: "Recurring execution failures".to_string(),
+            });
+        }
+
+        proposals
+    }
+}
+
+/// 🆕 OPTIMIZATION PHASE 3: Structured proposal for updating a skill
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillUpdateProposal {
+    pub skill_id: String,
+    pub category: ImprovementCategory,
+    pub changes: Vec<String>,
+    pub reason: String,
 }
 
 impl Default for SkillImprovementEngine {

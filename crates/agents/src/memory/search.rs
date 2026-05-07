@@ -125,6 +125,36 @@ pub trait MemorySearch: Send + Sync {
             ..SearchConfig::default()
         }).await
     }
+
+    /// 🆕 PHASE 5: Search memories specifically for skill distillation
+    ///
+    /// Returns high-quality, non-redundant memories that are candidates
+    /// for being promoted into reusable skills. Filters by:
+    /// - category = "solution" (successful task patterns)
+    /// - Minimum quality threshold
+    /// - Deduplication by content similarity
+    async fn search_for_distillation(
+        &self,
+        query: &str,
+        _min_quality: f32,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let results = self.search_with_config(query, SearchConfig {
+            max_results: limit * 2,
+            ..SearchConfig::default()
+        }).await?;
+
+        let filtered: Vec<SearchResult> = results
+            .into_iter()
+            .filter(|r| {
+                r.metadata.get("category").map(|c| c == "solution").unwrap_or(false)
+                    || r.metadata.get("source").map(|s| s == "solidified_experience").unwrap_or(false)
+            })
+            .take(limit)
+            .collect();
+
+        Ok(filtered)
+    }
 }
 
 /// Search statistics

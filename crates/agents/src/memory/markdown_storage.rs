@@ -294,20 +294,122 @@ impl Default for MarkdownStorageConfig {
     }
 }
 
+/// Capacity alert types for proactive consolidation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapacityAlert {
+    /// L1 (MEMORY.md) approaching capacity limit
+    L1NearLimit { current: usize, max: usize },
+    /// L2 (USER.md) approaching capacity limit
+    L2NearLimit { current: usize, max: usize },
+}
+
+/// Capacity monitoring for L1/L2 memory files
+#[derive(Debug, Clone)]
+pub struct CapacityMonitor {
+    /// Current L1 (MEMORY.md) character count
+    pub l1_chars: usize,
+    /// Current L2 (USER.md) character count
+    pub l2_chars: usize,
+    /// L1 max capacity
+    pub l1_max: usize,
+    /// L2 max capacity
+    pub l2_max: usize,
+}
+
+impl CapacityMonitor {
+    pub fn new(l1_max: usize, l2_max: usize) -> Self {
+        Self {
+            l1_chars: 0,
+            l2_chars: 0,
+            l1_max,
+            l2_max,
+        }
+    }
+
+    /// Update from current file contents
+    pub fn update(&mut self, l1_content: &str, l2_content: &str) {
+        self.l1_chars = l1_content.chars().count();
+        self.l2_chars = l2_content.chars().count();
+    }
+
+    /// Check if L1 is approaching capacity (> 85%)
+    pub fn l1_near_capacity(&self) -> bool {
+        self.l1_chars as f32 > self.l1_max as f32 * 0.85
+    }
+
+    /// Check if L2 is approaching capacity (> 85%)
+    pub fn l2_near_capacity(&self) -> bool {
+        self.l2_chars as f32 > self.l2_max as f32 * 0.85
+    }
+
+    /// Remaining capacity for L1
+    pub fn l1_remaining(&self) -> usize {
+        self.l1_max.saturating_sub(self.l1_chars)
+    }
+
+    /// Remaining capacity for L2
+    pub fn l2_remaining(&self) -> usize {
+        self.l2_max.saturating_sub(self.l2_chars)
+    }
+}
+
 /// Markdown-based memory storage
 pub struct MarkdownStorage {
     config: MarkdownStorageConfig,
+    /// Capacity monitor for active consolidation
+    pub capacity_monitor: CapacityMonitor,
 }
 
 impl MarkdownStorage {
     /// Create new Markdown storage
     pub fn new(config: MarkdownStorageConfig) -> Result<Self> {
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            capacity_monitor: CapacityMonitor::new(2200, 1375),
+        })
     }
 
     /// Create with default configuration
     pub fn default() -> Result<Self> {
         Self::new(MarkdownStorageConfig::default())
+    }
+
+    /// Read current L1/L2 content and update capacity monitor
+    pub async fn refresh_capacity(&mut self) -> Result<()> {
+        let l1_path = self.config.workspace_dir.join(CORE_MEMORY_FILE);
+        let l2_path = self.config.workspace_dir.join(USER_PROFILE_FILE);
+
+        let l1_content = if l1_path.exists() {
+            fs::read_to_string(&l1_path).await.unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let l2_content = if l2_path.exists() {
+            fs::read_to_string(&l2_path).await.unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        self.capacity_monitor.update(&l1_content, &l2_content);
+        Ok(())
+    }
+
+    /// Check if capacity is near limit and return consolidation recommendation
+    pub fn check_capacity(&self) -> Option<CapacityAlert> {
+        if self.capacity_monitor.l1_near_capacity() {
+            return Some(CapacityAlert::L1NearLimit {
+                current: self.capacity_monitor.l1_chars,
+                max: self.capacity_monitor.l1_max,
+            });
+        }
+        if self.capacity_monitor.l2_near_capacity() {
+            return Some(CapacityAlert::L2NearLimit {
+                current: self.capacity_monitor.l2_chars,
+                max: self.capacity_monitor.l2_max,
+            });
+        }
+        None
     }
 
     /// Initialize workspace directories

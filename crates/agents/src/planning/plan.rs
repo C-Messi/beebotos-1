@@ -282,6 +282,8 @@ pub struct PlanStep {
     pub result: Option<serde_json::Value>,
     /// Error if failed
     pub error: Option<String>,
+    /// 🆕 OPTIMIZATION PHASE 3: Step metadata for resource allocation and intent
+    pub metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl PlanStep {
@@ -300,6 +302,7 @@ impl PlanStep {
             completed_at: None,
             result: None,
             error: None,
+            metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -318,6 +321,7 @@ impl PlanStep {
             completed_at: None,
             result: None,
             error: None,
+            metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -336,6 +340,7 @@ impl PlanStep {
             completed_at: None,
             result: None,
             error: None,
+            metadata: std::collections::HashMap::new(),
         }
     }
 

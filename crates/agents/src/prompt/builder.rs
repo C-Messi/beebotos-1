@@ -45,9 +45,11 @@ impl SkillLevelDesc {
 pub struct PromptComponents {
     /// Base persona (SOUL.md)
     pub soul: Option<String>,
-    /// User profile (USER.md)
+    /// User profile (USER.md) — L2 memory
     pub user_profile: Option<String>,
-    /// Dynamic memories
+    /// Project memory (MEMORY.md) — L1 memory
+    pub project_memory: Option<String>,
+    /// Dynamic memories (L3 retrieved context)
     pub memories: Vec<MemoryEntry>,
     /// Skills at different levels
     pub skills: Vec<SkillLevelDesc>,
@@ -99,6 +101,11 @@ impl PromptBuilder {
         self
     }
 
+    pub fn with_project_memory(mut self, memory: impl Into<String>) -> Self {
+        self.components.project_memory = Some(memory.into());
+        self
+    }
+
     pub fn with_memories(mut self, memories: Vec<MemoryEntry>) -> Self {
         self.components.memories = memories;
         self
@@ -144,12 +151,17 @@ impl PromptBuilder {
             parts.push(soul);
         }
 
-        // 3. User profile (always loaded)
+        // 3. User profile (L2, always loaded)
         if let Some(profile) = c.user_profile {
-            parts.push(profile);
+            parts.push(format!("[用户偏好]\n{}", profile));
         }
 
-        // 4. Dynamic memories (filtered by intent relevance)
+        // 4. Project memory (L1, always loaded)
+        if let Some(project) = c.project_memory {
+            parts.push(format!("[项目约定]\n{}", project));
+        }
+
+        // 5. Dynamic memories (L3, filtered by intent relevance)
         let relevant_memories = Self::filter_memories_by_intent(&c.memories, intent);
         if !relevant_memories.is_empty() {
             let memory_text = relevant_memories

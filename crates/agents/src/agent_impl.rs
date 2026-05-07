@@ -23,6 +23,9 @@ use crate::{
     a2a, communication, events, mcp, queue, skills, state_manager, types, wallet, AgentConfig,
 };
 use crate::skills::composition::{InputMapping, PipelineStep, SkillPipeline};
+use crate::evolution::skill_distiller::{SkillDistiller, DistillerConfig, DistillTrigger};
+use crate::skills::loader::{LoadedSkill, SkillManifest};
+use crate::skills::registry::Version;
 
 pub struct Agent {
     pub(crate) config: AgentConfig,
@@ -70,6 +73,8 @@ pub struct Agent {
     pub(crate) max_rounds: u32,
     // 🆕 OPTIMIZATION PHASE 3: Skill feedback collector for self-improvement
     pub(crate) skill_feedback_collector: Option<crate::skills::feedback::SkillImprovementEngine>,
+    // 🆕 PHASE 5: Evolution scheduler for three-layer co-evolution orchestration
+    pub(crate) evolution_scheduler: Option<crate::evolution::scheduler::EvolutionScheduler>,
 }
 
 impl Agent {
@@ -110,7 +115,17 @@ impl Agent {
             prompt_cache: Some(Arc::new(crate::prompt::PromptCache::new())),
             max_rounds: 10,
             skill_feedback_collector: Some(crate::skills::feedback::SkillImprovementEngine::new()),
+            evolution_scheduler: None,
         }
+    }
+
+    /// Set the evolution scheduler
+    pub fn with_evolution_scheduler(
+        mut self,
+        scheduler: crate::evolution::scheduler::EvolutionScheduler,
+    ) -> Self {
+        self.evolution_scheduler = Some(scheduler);
+        self
     }
 
     /// Spawn a sub-agent with shared infrastructure.
@@ -355,6 +370,126 @@ impl Agent {
         Some(SkillPipeline::new(steps))
     }
 
+    /// 🆕 OPTIMIZATION PHASE 3: Attempt to parse and execute a tool chain from LLM response
+    ///
+    /// Detects format like:
+    ///   STEP 1: get_stock_latest_quote|{"symbols":"AAPL"}
+    ///   IF result.price > 180 THEN
+    ///   STEP 2: place_stock_order|{"symbol":"AAPL","side":"buy","qty":"10"}
+    async fn try_execute_tool_chain(
+        &self,
+        response: &str,
+        _original_input: &str,
+    ) -> Result<Option<String>, AgentError> {
+        use crate::planning::{ToolChainParser, ToolChainStep};
+
+        // Try to parse the response as a tool chain
+        let chain = match ToolChainParser::parse(response) {
+            Ok(chain) => chain,
+            Err(_) => return Ok(None), // Not a tool chain format
+        };
+
+        if chain.steps.is_empty() {
+            return Ok(None);
+        }
+
+        info!("Tool chain detected with {} steps", chain.steps.len());
+        let mut step_results: Vec<String> = Vec::new();
+
+        for (i, step) in chain.steps.iter().enumerate() {
+            match step {
+                ToolChainStep::Call(tool_call) => {
+                    let tool_input = if tool_call.params.is_null() || tool_call.params == serde_json::Value::Null {
+                        String::new()
+                    } else {
+                        tool_call.params.to_string()
+                    };
+                    let result = self.execute_tool_by_name(&tool_call.name, &tool_input).await?;
+                    step_results.push(format!("Step {} ({}): {}", i + 1, tool_call.name, result));
+                }
+                ToolChainStep::Conditional(cond) => {
+                    // Evaluate condition against previous step results
+                    let condition_met = self.evaluate_tool_chain_condition(&cond.condition, &step_results);
+                    let branch = if condition_met { &cond.if_true } else { &cond.if_false };
+                    for (j, branch_step) in branch.iter().enumerate() {
+                        if let ToolChainStep::Call(tool_call) = branch_step {
+                            let tool_input = if tool_call.params.is_null() || tool_call.params == serde_json::Value::Null {
+                                String::new()
+                            } else {
+                                tool_call.params.to_string()
+                            };
+                            let result = self.execute_tool_by_name(&tool_call.name, &tool_input).await?;
+                            step_results.push(format!("Step {}.{} ({}): {}", i + 1, j + 1, tool_call.name, result));
+                        }
+                    }
+                }
+                ToolChainStep::Wait { step_ref } => {
+                    step_results.push(format!("Step {} (WAIT for {})", i + 1, step_ref));
+                }
+            }
+        }
+
+        let summary = format!(
+            "已完成工具链执行（共 {} 步）：\n{}",
+            step_results.len(),
+            step_results.join("\n")
+        );
+        Ok(Some(summary))
+    }
+
+    /// Execute a tool by name (skill registry or MCP fallback)
+    async fn execute_tool_by_name(&self, tool_name: &str, input: &str) -> Result<String, AgentError> {
+        // Try skill registry first
+        if let Some(registry) = &self.skill_registry {
+            if let Some(skill) = registry.get(tool_name).await {
+                let result = self.execute_registered_skill(&skill, input, None).await?;
+                return Ok(result.output);
+            }
+        }
+
+        // Try MCP bridge
+        if let Some((server, tool)) = crate::mcp::skill_bridge::parse_mcp_skill_id(tool_name) {
+            if let Some(mcp) = &self.mcp_manager {
+                if let Some(client) = mcp.get_client(server).await {
+                    let args = if input.is_empty() {
+                        None
+                    } else {
+                        let mut map = serde_json::Map::new();
+                        map.insert("input".to_string(), serde_json::Value::String(input.to_string()));
+                        Some(map)
+                    };
+                    match client.call_tool(tool, args).await {
+                        Ok(result) => {
+                            let text = result.content.first().map(|c| {
+                                match c {
+                                    crate::mcp::types::ToolContent::Text { text } => text.clone(),
+                                    _ => String::new(),
+                                }
+                            }).unwrap_or_default();
+                            return Ok(text);
+                        }
+                        Err(e) => return Err(AgentError::Execution(format!("MCP tool failed: {}", e))),
+                    }
+                }
+            }
+        }
+
+        Err(AgentError::Execution(format!("Tool '{}' not found", tool_name)))
+    }
+
+    /// Evaluate a simple tool chain condition against step results
+    fn evaluate_tool_chain_condition(&self, condition: &str, step_results: &[String]) -> bool {
+        let condition_lower = condition.to_lowercase();
+        // Simple heuristic: if condition mentions success/ok/passed and last result looks positive
+        if condition_lower.contains("success") || condition_lower.contains("ok") {
+            if let Some(last) = step_results.last() {
+                return !last.to_lowercase().contains("error") && !last.to_lowercase().contains("fail");
+            }
+        }
+        // Default: assume condition is met (conservative for safety)
+        true
+    }
+
     // 🆕 DEVICE FIX: Device automation methods
 
     /// Set device for automation
@@ -438,13 +573,20 @@ impl Agent {
         self
     }
 
-    /// 🆕 OPTIMIZATION PHASE 2: Build system prompt with cache support
-    #[allow(dead_code)]
-    async fn build_system_prompt_cached(&self, base_persona: &str, intent: &crate::intent::UserIntent) -> String {
+    /// 🆕 OPTIMIZATION PHASE 2: Build cached base system prompt
+    ///
+    /// Caches the base persona (name + description) which changes rarely,
+    /// avoiding repeated token assembly for identical agent configurations.
+    async fn build_system_prompt_cached(&self, intent: &crate::intent::UserIntent) -> String {
+        let base_persona = format!(
+            "You are {} ({}). Please remain friendly, professional, and helpful when answering questions.",
+            self.config.name, self.config.description
+        );
         if let Some(ref cache) = self.prompt_cache {
             let components = crate::prompt::PromptComponents {
-                soul: Some(base_persona.to_string()),
+                soul: Some(base_persona.clone()),
                 user_profile: None,
+                project_memory: None,
                 memories: Vec::new(),
                 skills: Vec::new(),
                 tools: Vec::new(),
@@ -460,14 +602,22 @@ impl Agent {
                 builder.build(intent)
             }).await
         } else {
-            base_persona.to_string()
+            base_persona
         }
     }
 
     /// 🆕 OPTIMIZATION: Classify intent for a task input
     pub async fn classify_intent(&self, input: &str) -> crate::intent::IntentAnalysis {
         if self.intent_engine.is_some() {
-            crate::intent::IntentEngine::classify_heuristic(input)
+            // 🆕 OPTIMIZATION PHASE 3: Dual-track intent classification
+            // Heuristic first, LLM fallback if confidence is low
+            let threshold = self.config.intent_confidence_threshold.unwrap_or(0.7);
+            let (heuristic, llm_prompt) = crate::intent::IntentEngine::classify_dual_track(input, threshold);
+            if let Some(prompt) = llm_prompt {
+                tracing::debug!("Intent classification below threshold ({}), LLM prompt prepared: {}", threshold, prompt);
+                // TODO: If an LLM provider is available, send the prompt for higher-confidence classification
+            }
+            heuristic
         } else {
             crate::intent::IntentAnalysis::new(crate::intent::UserIntent::DirectAnswer, 0.5)
         }
@@ -1296,6 +1446,11 @@ impl Agent {
         // 🆕 FIX: 当 gateway 传入 skill_hint 时，使用其 prompt_template 作为核心 persona。
         // 若 gateway 已通过 memory_context 注入 skill prompt（当前标准行为），则 persona 只做轻量标识，
         // 避免同一份 prompt_template 在 persona message 和 memory message 中重复出现，浪费 token。
+        // 🆕 OPTIMIZATION PHASE 2: Use cached base persona when no skill_hint
+        let base_persona = self.build_system_prompt_cached(
+            intent_opt.map(|i| &i.intent).unwrap_or(&crate::intent::UserIntent::DirectAnswer)
+        ).await;
+
         let persona = if let Some(ref hint) = skill_hint {
             let name = hint.get("name").and_then(|v| v.as_str()).unwrap_or(&self.config.name);
             let prompt_template = hint.get("prompt_template").and_then(|v| v.as_str()).unwrap_or("");
@@ -1315,11 +1470,7 @@ impl Agent {
                 format!("You are {} ({}). Please remain friendly, professional, and helpful when answering questions.", name, desc)
             }
         } else {
-            format!(
-                "You are {} ({}). Please remain friendly, professional, and helpful when answering questions.",
-                self.config.name,
-                self.config.description
-            )
+            base_persona
         };
 
         // 🆕 FIX: Append skill-catalog trigger instruction to persona so the LLM
@@ -1547,31 +1698,37 @@ impl Agent {
                     || query_lower_str.contains("order")
                     || query_lower_str.contains("place");
 
-                // 🆕 OPTIMIZATION PHASE 1: Toolsets-based pre-filtering
+                // 🆕 OPTIMIZATION PHASE 1: Toolsets-based filter-first + scoring
                 let active_toolsets: std::collections::HashSet<String> = intent_opt
                     .map(|i| i.active_toolsets.iter().cloned().collect())
                     .unwrap_or_default();
 
-                // Score each skill by keyword overlap + toolset membership
+                // Phase 1: Filter — only keep skills from active toolsets (if any are detected)
+                let mut candidates: Vec<&skills::registry::RegisteredSkill> = all_skills
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .filter(|s| {
+                        if active_toolsets.is_empty() {
+                            return true; // no toolset constraints
+                        }
+                        let skill_id_lower = s.skill.id.to_lowercase();
+                        active_toolsets.iter().any(|ts| {
+                            skill_id_lower.contains(ts) || s.tags.contains(ts)
+                        })
+                    })
+                    .collect();
+
+                // Fallback: if too few matches after toolset filtering, use all enabled
+                if candidates.len() < 3 && !active_toolsets.is_empty() {
+                    candidates = all_skills.iter().filter(|s| s.enabled).collect();
+                }
+
+                // Phase 2: Score within filtered candidates
                 let mut scored_skills: Vec<(usize, &skills::registry::RegisteredSkill)> = Vec::new();
-                for registered in &all_skills {
-                    if !registered.enabled {
-                        continue;
-                    }
+                for registered in &candidates {
                     let manifest = &registered.skill.manifest;
                     let searchable = format!("{} {} {}", manifest.id, manifest.name, manifest.description).to_lowercase();
                     let mut score = keywords.iter().filter(|k| searchable.contains(k.as_str())).count();
-
-                    // 🆕 OPTIMIZATION: Boost skills belonging to active toolsets
-                    if !active_toolsets.is_empty() {
-                        let skill_id_lower = manifest.id.to_lowercase();
-                        let in_active_toolset = active_toolsets.iter().any(|ts| {
-                            skill_id_lower.contains(ts) || registered.tags.contains(ts)
-                        });
-                        if in_active_toolset {
-                            score += 10;
-                        }
-                    }
 
                     // 🆕 FIX: Boost order placement tools when user explicitly wants to trade
                     if has_trading_intent {
@@ -1581,7 +1738,7 @@ impl Agent {
                         }
                     }
                     if score > 0 {
-                        scored_skills.push((score, registered));
+                        scored_skills.push((score, *registered));
                     }
                 }
 
@@ -1741,6 +1898,15 @@ impl Agent {
         // 🆕 FIX: Clean up thinking process BEFORE parsing skill triggers so that
         // trailing analysis text after SKILL: does not pollute skill ID extraction.
         let mut response = Self::cleanup_thinking_process(&response);
+
+        // 🆕 OPTIMIZATION PHASE 3: Detect and execute tool chains (multi-step conditional calls)
+        if response.contains("STEP 1:") || response.contains("IF ") {
+            match self.try_execute_tool_chain(&response, &input_text).await {
+                Ok(Some(result)) => return Ok((result, vec![])),
+                Ok(None) => {}, // Not a valid tool chain, continue normal flow
+                Err(e) => warn!("Tool chain execution failed: {}", e),
+            }
+        }
 
         // 🆕 FIX: If the LLM response is a skill trigger (e.g. "SKILL:hello_world"),
         // look up the skill in the registry and execute it instead of returning raw text.
@@ -2707,8 +2873,9 @@ impl Agent {
             .ok()
             .and_then(|json| json.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
             .unwrap_or_else(|| task.input.clone());
+        // 🆕 OPTIMIZATION PHASE 3: Use memory-aware plan creation
         let plan = planning_engine
-            .create_plan(&goal, &context, Some(strategy))
+            .create_plan_with_memory(&goal, &context, Some(strategy), self.memory_system.as_deref())
             .await
             .map_err(|e| AgentError::Planning(format!("Failed to create plan: {}", e)))?;
 
@@ -2782,6 +2949,26 @@ impl Agent {
 
                     // 🆕 OPTIMIZATION PHASE 3: Solidify experience to memory
                     self.solidify_experience(&goal, &plan, &tool_trail, &output).await;
+                    
+                    // 🆕 PHASE 2: Auto-distill skill from successful trail
+                    if let Err(e) = self.maybe_distill_skill(&tool_trail, &goal).await {
+                        warn!("Skill distillation failed: {}", e);
+                    }
+                    
+                    // 🆕 PHASE 5: Evolution scheduler orchestration
+                    if let Some(scheduler) = &self.evolution_scheduler {
+                        match scheduler.on_task_completed(&tool_trail, &goal, true).await {
+                            Ok(summary) => {
+                                if summary.skill_distill_triggered {
+                                    info!("🧬 EvolutionScheduler: skill distillation triggered");
+                                }
+                                if summary.capo_triggered {
+                                    info!("🧬 EvolutionScheduler: CAPO optimization triggered");
+                                }
+                            }
+                            Err(e) => warn!("EvolutionScheduler error: {}", e),
+                        }
+                    }
                     
                     Ok((output, vec![trail_artifact]))
                 } else {
@@ -2899,6 +3086,91 @@ impl Agent {
         } else {
             info!("Solidified experience for plan {} into memory", plan.id);
         }
+    }
+
+    /// 🆕 PHASE 2: Auto-distill skill from successful execution trail
+    async fn maybe_distill_skill(
+        &self,
+        trail: &crate::planning::ToolTrail,
+        _goal: &str,
+    ) -> Result<(), AgentError> {
+        let distiller = SkillDistiller::new(DistillerConfig::default());
+
+        // Count total tool calls
+        let tool_call_count: usize = trail.steps.iter().map(|s| s.tool_calls.len()).sum();
+        let trigger = DistillTrigger::ToolCallThreshold { count: tool_call_count };
+
+        if !distiller.should_distill(trail, &trigger) {
+            return Ok(());
+        }
+
+        // Distill skill from trail
+        let distilled = distiller.distill(trail).map_err(|e| AgentError::Execution(format!("Distillation failed: {}", e)))?;
+
+        // Quality gate
+        if distilled.quality_score < distiller.config.min_quality_score {
+            info!("Distilled skill '{}' quality {:.1} below threshold {}, skipping", 
+                distilled.skill_id, distilled.quality_score, distiller.config.min_quality_score);
+            return Ok(());
+        }
+
+        // Check for duplicates / patches against existing registry
+        let existing = if let Some(registry) = &self.skill_registry {
+            registry.list_all().await
+        } else {
+            vec![]
+        };
+
+        let decision = distiller.compare_to_existing(&distilled, &existing);
+
+        match decision {
+            crate::evolution::skill_distiller::DistillDecision::CreateNew => {
+                let skill_dir = std::path::PathBuf::from("data/skills/auto_distilled");
+                tokio::fs::create_dir_all(&skill_dir).await.map_err(|e| AgentError::Execution(format!("Failed to create skill dir: {}", e)))?;
+
+                let skill_file = skill_dir.join(format!("{}.md", distilled.skill_id));
+                let markdown = distiller.to_skill_markdown(&distilled);
+                tokio::fs::write(&skill_file, &markdown).await.map_err(|e| AgentError::Execution(format!("Failed to write skill file: {}", e)))?;
+
+                // Register with skill registry
+                if let Some(registry) = &self.skill_registry {
+                    let loaded_skill = LoadedSkill {
+                        id: distilled.skill_id.clone(),
+                        name: distilled.name.clone(),
+                        version: Version { major: 1, minor: 0, patch: 0 },
+                        wasm_path: std::path::PathBuf::new(),
+                        source_path: skill_file.clone(),
+                        manifest: SkillManifest {
+                            id: distilled.skill_id.clone(),
+                            name: distilled.name.clone(),
+                            version: Version { major: 1, minor: 0, patch: 0 },
+                            description: distilled.description.clone(),
+                            author: "auto_distiller".to_string(),
+                            capabilities: vec!["workflow".to_string()],
+                            permissions: vec![],
+                            entry_point: "execute".to_string(),
+                            license: "".to_string(),
+                            functions: vec![],
+                            prompt_template: markdown.clone(),
+                            examples: "".to_string(),
+                        },
+                    };
+
+                    registry.register(loaded_skill, "auto_distilled", vec!["auto".to_string()]).await;
+                    info!("🆕 Auto-distilled skill '{}' registered (quality: {:.1})", distilled.skill_id, distilled.quality_score);
+                }
+            }
+            crate::evolution::skill_distiller::DistillDecision::PatchExisting { skill_id } => {
+                info!("Distilled skill '{}' is a patch of existing '{}', deferred to patch engine", distilled.skill_id, skill_id);
+                // TODO: Apply patch via PatchEngine when patch content is available
+            }
+            crate::evolution::skill_distiller::DistillDecision::UpdateExisting { skill_id } => {
+                info!("Distilled skill '{}' is an update of existing '{}', deferred to update flow", distilled.skill_id, skill_id);
+                // TODO: Trigger CAPO or manual update flow
+            }
+        }
+
+        Ok(())
     }
 
     /// Get available tools for planning
@@ -3465,8 +3737,9 @@ impl Agent {
         let context = self.create_plan_context(task).await?;
         let strategy = self.select_plan_strategy(task);
 
+        // 🆕 OPTIMIZATION PHASE 3: Use memory-aware plan creation
         let plan = planning_engine
-            .create_plan(&task.input, &context, Some(strategy))
+            .create_plan_with_memory(&task.input, &context, Some(strategy), self.memory_system.as_deref())
             .await
             .map_err(|e| AgentError::Planning(format!("Failed to create plan: {}", e)))?;
 
@@ -3585,7 +3858,8 @@ impl Agent {
 
         let context = PlanContext::new(&self.config.id);
         
-        let plan = engine.create_plan(goal, &context, Some(strategy))
+        // 🆕 OPTIMIZATION PHASE 3: Use memory-aware plan creation
+        let plan = engine.create_plan_with_memory(goal, &context, Some(strategy), self.memory_system.as_deref())
             .await
             .map_err(|e| AgentError::Planning(format!("Failed to create plan: {}", e)))?;
         

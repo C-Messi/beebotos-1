@@ -49,6 +49,9 @@ pub mod communication;
 pub mod config_watcher;
 pub mod context;
 
+// 🆕 EVOLUTION PHASE 1: Memory auto-evolution system
+pub mod evolution;
+
 pub mod deduplicator;
 pub mod device;
 pub mod did;
@@ -207,6 +210,10 @@ pub struct AgentConfig {
     pub models: ModelConfig,
     pub memory: MemoryConfig,
     pub personality: PersonalityConfig,
+    /// 🆕 OPTIMIZATION PHASE 3: Minimum confidence threshold for heuristic intent classification
+    /// Below this threshold, the system may fall back to LLM-based classification
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_confidence_threshold: Option<f32>,
 }
 
 impl Default for AgentConfig {
@@ -220,6 +227,7 @@ impl Default for AgentConfig {
             models: ModelConfig::default(),
             memory: MemoryConfig::default(),
             personality: PersonalityConfig::default(),
+            intent_confidence_threshold: Some(0.7),
         }
     }
 }
@@ -303,6 +311,7 @@ impl AgentBuilder {
                     neuroticism: 0.5,
                     base_mood: "neutral".to_string(),
                 },
+                intent_confidence_threshold: Some(0.7),
             },
         }
     }

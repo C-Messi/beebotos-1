@@ -533,6 +533,37 @@ impl Decomposer {
         self.decompose(goal, &DecompositionContext::default())
     }
 
+    /// 🆕 OPTIMIZATION PHASE 3: Decompose with explicit resource allocation
+    ///
+    /// After decomposition, assigns skills/tools/MCP servers to each step
+    /// and stores the allocation in step metadata.
+    pub fn decompose_with_allocation(
+        &self,
+        goal: &str,
+        context: &DecompositionContext,
+    ) -> PlanningResult<(Plan, Vec<ResourceAllocation>)> {
+        let mut plan = self.decompose(goal, context)?;
+        let allocations = self.allocate_resources(&plan, context);
+
+        // Write allocations into step metadata
+        for (i, step) in plan.steps.iter_mut().enumerate() {
+            if let Some(alloc) = allocations.get(i) {
+                step.metadata.insert("assigned_skills".to_string(), 
+                    serde_json::to_value(&alloc.assigned_skills).unwrap_or_default());
+                step.metadata.insert("assigned_tools".to_string(), 
+                    serde_json::to_value(&alloc.assigned_tools).unwrap_or_default());
+                step.metadata.insert("assigned_mcp_servers".to_string(), 
+                    serde_json::to_value(&alloc.assigned_mcp_servers).unwrap_or_default());
+                step.metadata.insert("estimated_tokens".to_string(), 
+                    serde_json::json!(alloc.estimated_tokens));
+                step.metadata.insert("estimated_time_secs".to_string(), 
+                    serde_json::json!(alloc.estimated_time_secs));
+            }
+        }
+
+        Ok((plan, allocations))
+    }
+
     /// Allocate resources for each step in a plan based on intent analysis
     pub fn allocate_resources(
         &self,

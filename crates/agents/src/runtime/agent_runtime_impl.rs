@@ -418,6 +418,7 @@ impl GatewayAgentRuntime {
                         models: persisted_config.model_config,
                         memory: persisted_config.memory_config,
                         personality: persisted_config.personality_config,
+                        intent_confidence_threshold: Some(0.7),
                     });
                 }
                 Ok(None) => {
@@ -485,6 +486,7 @@ impl GatewayAgentRuntime {
             models: models.clone(),
             memory: memory.clone(),
             personality: personality.clone(),
+            intent_confidence_threshold: Some(0.7),
         };
 
         // 🔧 FIX: Fast-sync agents table for fallback config too
@@ -594,6 +596,7 @@ impl GatewayAgentRuntime {
                 neuroticism: 0.5,
                 base_mood: "neutral".to_string(),
             },
+            intent_confidence_threshold: Some(0.7),
         }
     }
 

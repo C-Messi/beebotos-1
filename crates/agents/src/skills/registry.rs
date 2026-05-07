@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 
 use crate::skills::loader::LoadedSkill;
+use crate::evolution::skill_lineage::SkillLineage;
 
 /// Skill registry
 pub struct SkillRegistry {
@@ -104,6 +105,7 @@ pub struct SkillDefinition {
 /// Skill disclosure level for progressive loading
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillDisclosureLevel {
+    L0, // ~10 tokens — skill list index (name only)
     L1, // ~30 tokens — name + one-liner
     L2, // ~200 tokens — summary
     L3, // ~2000 tokens — full doc
@@ -122,6 +124,8 @@ pub struct RegisteredSkill {
     pub l1_index: Option<String>,
     pub l2_summary: Option<String>,
     pub l3_full_doc: Option<String>,
+    /// 🆕 PHASE 5: Skill lineage tracking
+    pub lineage: Option<SkillLineage>,
 }
 
 impl SkillRegistry {
@@ -155,6 +159,7 @@ impl SkillRegistry {
             l1_index: None,
             l2_summary: None,
             l3_full_doc: None,
+            lineage: Some(SkillLineage::new(&skill_id, "1.0.0")),
         };
 
         // Lock order: skills first, then categories to avoid deadlocks
@@ -211,9 +216,12 @@ impl SkillRegistry {
         let skill = skills.get(skill_id)?;
         
         match level {
+            SkillDisclosureLevel::L0 => {
+                Some(skill.skill.name.clone())
+            }
             SkillDisclosureLevel::L1 => {
                 skill.l1_index.clone()
-                    .or_else(|| Some(skill.skill.name.clone()))
+                    .or_else(|| Some(format!("{}: {}", skill.skill.name, skill.skill.manifest.description.chars().take(50).collect::<String>())))
             }
             SkillDisclosureLevel::L2 => {
                 skill.l2_summary.clone()
@@ -221,7 +229,7 @@ impl SkillRegistry {
             }
             SkillDisclosureLevel::L3 => {
                 skill.l3_full_doc.clone()
-                    .or_else(|| Some(skill.skill.manifest.description.clone()))
+                    .or_else(|| Some(skill.skill.manifest.prompt_template.clone()))
             }
         }
     }
@@ -252,6 +260,7 @@ impl SkillRegistry {
             l1_index,
             l2_summary,
             l3_full_doc,
+            lineage: Some(SkillLineage::new(&skill_id, "1.0.0")),
         };
 
         {
@@ -382,6 +391,57 @@ impl SkillRegistry {
     pub async fn categories(&self) -> Vec<String> {
         let categories = self.categories.read().await;
         categories.keys().cloned().collect()
+    }
+
+    /// 🆕 PHASE 5: Get skill lineage
+    pub async fn get_lineage(&self, skill_id: &str) -> Option<SkillLineage> {
+        let skills = self.skills.read().await;
+        skills.get(skill_id).and_then(|s| s.lineage.clone())
+    }
+
+    /// 🆕 PHASE 5: Rollback skill to a specific version
+    ///
+    /// Creates a rollback lineage node to preserve immutable history,
+    /// then updates current_version to the target.
+    pub async fn rollback(&self, skill_id: &str, target_version: &str) -> Result<(), String> {
+        use crate::evolution::skill_lineage::{LineageNode, LineageSource};
+        use chrono::Utc;
+
+        let mut skills = self.skills.write().await;
+        let skill = skills.get_mut(skill_id).ok_or("Skill not found")?;
+        let lineage = skill.lineage.as_mut().ok_or("No lineage for skill")?;
+
+        if !lineage.has_version(target_version) {
+            return Err(format!("Version {} not found in lineage", target_version));
+        }
+
+        let current_version = lineage.current_version.clone();
+        let rollback_version = format!("{}-rollback-{}", current_version, uuid::Uuid::new_v4());
+
+        lineage.add_version(LineageNode {
+            version: rollback_version.clone(),
+            parent_ids: vec![current_version.clone()],
+            source: LineageSource::Rollback {
+                target_version: target_version.to_string(),
+                reason: format!("Rollback from {} to {}", current_version, target_version),
+            },
+            change_summary: format!("Rollback to version {}", target_version),
+            created_at: Utc::now(),
+            quality_score: 0.0,
+            usage_stats: Default::default(),
+            content_hash: String::new(),
+        });
+
+        lineage.current_version = target_version.to_string();
+        Ok(())
+    }
+
+    /// 🆕 PHASE 5: Update skill lineage with a new version node
+    pub async fn update_lineage(&self, skill_id: &str, lineage: SkillLineage) -> Result<(), String> {
+        let mut skills = self.skills.write().await;
+        let skill = skills.get_mut(skill_id).ok_or("Skill not found")?;
+        skill.lineage = Some(lineage);
+        Ok(())
     }
 }
 

@@ -445,6 +445,7 @@ mod tests {
                 neuroticism: 0.5,
                 base_mood: "neutral".to_string(),
             },
+            intent_confidence_threshold: Some(0.7),
         }
     }
 

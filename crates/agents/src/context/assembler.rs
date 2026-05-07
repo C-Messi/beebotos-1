@@ -19,6 +19,20 @@ use crate::media::formatter::{FormattedMessage, MessageFormatter, MessageRole};
 pub trait Summarizer: Send + Sync {
     /// Summarize a list of messages into a concise summary
     async fn summarize(&self, messages: &[ContextMessage]) -> Result<String>;
+
+    /// 🆕 PHASE 5: Memory-aware summarization
+    ///
+    /// Injects relevant long-term memories into the summary process,
+    /// producing a summary that references past experiences and solutions.
+    /// Default implementation delegates to regular summarize.
+    async fn memory_aware_summarize(
+        &self,
+        messages: &[ContextMessage],
+        _relevant_memories: &[String],
+    ) -> Result<String> {
+        // Default: ignore memories, delegate to base summarize
+        self.summarize(messages).await
+    }
 }
 
 /// Simple rule-based summarizer (no LLM required)

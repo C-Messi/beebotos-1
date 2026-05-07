@@ -446,7 +446,7 @@ windows-sys = { version = "0.52", features = ["Win32_System_Threading"] }
 ```toml
 [update]
 enabled = true
-server_url = "https://beeweb.beebotos.dev"
+server_url = "https://beeweb.beeagentos.ai"
 channel = "stable"  # stable, beta, nightly
 
 [update.schedule]
@@ -468,7 +468,7 @@ enabled = false
 
 ```toml
 [update]
-server_url = "https://beeweb.beebotos.dev"
+server_url = "https://beeweb.beeagentos.ai"
 channel = "stable"
 auto_check = true
 ```
@@ -1092,6 +1092,8 @@ async fn test_full_update_flow() {
 **交付物:**
 - 完整的端到端流程
 - 生产环境验证
+
+注意：需要开发beeweb server 代码，把beeweb server代码放在位置：/root/BeeWeb
 
 ---
 

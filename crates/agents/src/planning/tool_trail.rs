@@ -146,6 +146,59 @@ impl ToolTrail {
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
+
+    /// 🆕 PHASE 5: Convert trail to RL training data format
+    ///
+    /// Produces a compact representation suitable for DAPO/PAPO training:
+    /// - Action sequence (tool calls)
+    /// - State snapshots (step descriptions)
+    /// - Terminal reward (success/failure)
+    /// - Token consumption
+    pub fn to_training_data(&self) -> TrainingData {
+        let actions: Vec<String> = self.steps.iter()
+            .flat_map(|s| s.tool_calls.iter().map(|c| c.tool_name.clone()))
+            .collect();
+
+        let states: Vec<String> = self.steps.iter()
+            .map(|s| s.description.clone())
+            .collect();
+
+        let step_rewards: Vec<f32> = self.steps.iter()
+            .map(|s| {
+                let successes = s.tool_calls.iter().filter(|c| c.success).count();
+                let total = s.tool_calls.len().max(1);
+                successes as f32 / total as f32
+            })
+            .collect();
+
+        let final_reward = match self.status {
+            TrailStatus::Success => 1.0,
+            TrailStatus::Failed => -1.0,
+            _ => 0.0,
+        };
+
+        TrainingData {
+            plan_id: self.plan_id.clone(),
+            states,
+            actions,
+            step_rewards,
+            final_reward,
+            total_tokens: self.total_input_tokens + self.total_output_tokens,
+            duration_ms: self.duration_ms(),
+        }
+    }
+}
+
+/// RL training data extracted from a ToolTrail
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingData {
+    pub plan_id: String,
+    pub states: Vec<String>,
+    pub actions: Vec<String>,
+    pub step_rewards: Vec<f32>,
+    pub final_reward: f32,
+    pub total_tokens: u32,
+    pub duration_ms: u64,
 }
 
 /// Trail collector for aggregating trails across sessions

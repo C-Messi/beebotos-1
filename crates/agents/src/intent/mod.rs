@@ -270,6 +270,94 @@ impl IntentEngine {
         }
         constraints
     }
+
+    /// 🆕 OPTIMIZATION: Dual-track classification
+    ///
+    /// 1. Run heuristic classifier first (fast, no LLM call)
+    /// 2. If confidence < threshold, construct LLM classification prompt
+    ///    for the caller to execute
+    pub fn classify_dual_track(query: &str, confidence_threshold: f32) -> (IntentAnalysis, Option<String>) {
+        let heuristic = Self::classify_heuristic(query);
+        if heuristic.confidence >= confidence_threshold {
+            return (heuristic, None);
+        }
+
+        // Low confidence — provide LLM prompt for caller to execute
+        let llm_prompt = Self::build_llm_classification_prompt(query);
+        (heuristic, Some(llm_prompt))
+    }
+
+    /// Build LLM classification prompt for ambiguous intents
+    pub fn build_llm_classification_prompt(query: &str) -> String {
+        format!(
+            "分析以下用户输入，输出 JSON（只输出 JSON，不要其他内容）：\n\
+            {{\n\
+              \"intent\": \"DirectAnswer|SingleToolCall|MultiStepPlanning|WorkflowTrigger|MetaQuestion|Correction\",\n\
+              \"entities\": {{\"symbol\":\"...\",\"side\":\"...\"}},\n\
+              \"constraints\": [\"不要先查询价格\"],\n\
+              \"confidence\": 0.95\n\
+            }}\n\
+            \n\
+            规则：\n\
+            - 包含\"下单/购买/buy/sell/place order\" → SingleToolCall（除非有\"先...再...\"）\n\
+            - 包含\"先...再...然后...\" → MultiStepPlanning\n\
+            - 以\"/\"开头 → WorkflowTrigger\n\
+            - \"你会什么/有哪些技能\" → MetaQuestion\n\
+            - \"不要/别/直接\" → Correction\n\
+            \n\
+            用户输入：{}\n",
+            query
+        )
+    }
+
+    /// Parse LLM classification response into IntentAnalysis
+    pub fn parse_llm_classification_response(response: &str) -> IntentAnalysis {
+        // Try to extract JSON from response
+        let json_str = if response.trim().starts_with('{') {
+            response.trim()
+        } else if let Some(start) = response.find('{') {
+            if let Some(end) = response.rfind('}') {
+                &response[start..=end]
+            } else {
+                response.trim()
+            }
+        } else {
+            response.trim()
+        };
+
+        match serde_json::from_str::<serde_json::Value>(json_str) {
+            Ok(val) => {
+                let intent_str = val.get("intent").and_then(|v| v.as_str()).unwrap_or("DirectAnswer");
+                let intent = match intent_str {
+                    "SingleToolCall" => UserIntent::SingleToolCall,
+                    "MultiStepPlanning" => UserIntent::MultiStepPlanning,
+                    "WorkflowTrigger" => UserIntent::WorkflowTrigger,
+                    "MetaQuestion" => UserIntent::MetaQuestion,
+                    "Correction" => UserIntent::Correction,
+                    _ => UserIntent::DirectAnswer,
+                };
+                let confidence = val.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.7) as f32;
+                let mut analysis = IntentAnalysis::new(intent, confidence);
+
+                if let Some(entities) = val.get("entities").and_then(|v| v.as_object()) {
+                    for (k, v) in entities {
+                        if let Some(s) = v.as_str() {
+                            analysis.entities.insert(k.clone(), s.to_string());
+                        }
+                    }
+                }
+                if let Some(constraints) = val.get("constraints").and_then(|v| v.as_array()) {
+                    analysis.constraints = constraints.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                }
+                analysis.active_toolsets = Self::detect_toolsets(&response.to_lowercase());
+                analysis
+            }
+            Err(_) => {
+                // Fallback to heuristic on parse failure
+                Self::classify_heuristic(response)
+            }
+        }
+    }
 }
 
 impl Default for IntentEngine {
