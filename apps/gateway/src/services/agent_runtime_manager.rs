@@ -51,7 +51,10 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
             } else if let Some(rest) = content.strip_prefix("用户:") {
                 llm_messages.push(LLMMessage::user(rest.trim().to_string()));
             } else if let Some(rest) = content.strip_prefix("助手:") {
-                llm_messages.push(LLMMessage::assistant(rest.trim().to_string()));
+                let trimmed = rest.trim();
+                if !trimmed.is_empty() {
+                    llm_messages.push(LLMMessage::assistant(trimmed.to_string()));
+                }
             } else if let Some(rest) = content.strip_prefix("系统:") {
                 system_parts.push(rest.trim().to_string());
             } else {

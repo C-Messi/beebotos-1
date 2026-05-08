@@ -674,13 +674,25 @@ impl Agent {
 
                 for (key, val) in map {
                     if critical_fields.contains(key.as_str()) {
-                        truncated.insert(key.clone(), val.clone());
-                        current_len += key.len() + val.to_string().len();
+                        let val_str = Self::truncate_json_value(val, max_chars / 4);
+                        let val_json: serde_json::Value = serde_json::from_str(&val_str).unwrap_or_else(|_| val.clone());
+                        truncated.insert(key.clone(), val_json);
+                        current_len += key.len() + val_str.len();
                     } else if current_len < max_chars * 3 / 4 {
-                        let val_str = val.to_string();
+                        let val_str = Self::truncate_json_value(val, max_chars / 4);
+                        let val_json: serde_json::Value = serde_json::from_str(&val_str).unwrap_or_else(|_| val.clone());
                         if current_len + key.len() + val_str.len() < max_chars {
-                            truncated.insert(key.clone(), val.clone());
+                            truncated.insert(key.clone(), val_json);
                             current_len += key.len() + val_str.len();
+                        }
+                    }
+                }
+                // Fallback: if nothing was preserved, keep the first key with a truncated value
+                if truncated.is_empty() && !map.is_empty() {
+                    if let Some((first_key, first_val)) = map.iter().next() {
+                        let val_str = Self::truncate_json_value(first_val, max_chars.saturating_sub(first_key.len() + 5));
+                        if let Ok(val_json) = serde_json::from_str(&val_str) {
+                            truncated.insert(first_key.clone(), val_json);
                         }
                     }
                 }
@@ -691,6 +703,25 @@ impl Agent {
                     let mut truncated: Vec<serde_json::Value> = arr.iter().take(3).cloned().collect();
                     truncated.push(serde_json::json!(format!("... and {} more items", arr.len() - 3)));
                     serde_json::Value::Array(truncated).to_string()
+                } else {
+                    let mut result = Vec::new();
+                    let mut current_len = 2; // []
+                    for item in arr {
+                        let item_str = Self::truncate_json_value(item, max_chars / arr.len().max(1));
+                        if let Ok(item_json) = serde_json::from_str(&item_str) {
+                            current_len += item_str.len() + 1;
+                            result.push(item_json);
+                        }
+                        if current_len >= max_chars {
+                            break;
+                        }
+                    }
+                    serde_json::Value::Array(result).to_string()
+                }
+            }
+            serde_json::Value::String(s) => {
+                if s.len() > max_chars {
+                    serde_json::Value::String(format!("{}...[truncated, {} chars total]", &s[..max_chars.saturating_sub(30)], s.len())).to_string()
                 } else {
                     value.to_string()
                 }
@@ -1856,10 +1887,18 @@ impl Agent {
         // 🆕 FIX: When native function calling is active (tools_json present), skip the
         // bulky text-based skill catalog and inject a strong command-style system hint.
         let messages = if extra_params.contains_key("tools_json") {
+            // 🆕 FIX: Set tool_choice to required for SingleToolCall to force tool invocation
+            if matches!(intent_opt.map(|i| &i.intent), Some(crate::intent::UserIntent::SingleToolCall)) {
+                extra_params.insert("tool_choice".to_string(), "required".to_string());
+            }
             let mut result = vec![communication::Message::new(
                 uuid::Uuid::new_v4(),
                 communication::PlatformType::Custom,
-                "You are a BeeBotOS AI assistant. Your sole duty is to call tools to fulfill the user request.\n\nFORBIDDEN:\n- Analysis, reasoning, explanations\n- Listing parameter descriptions\n- Describing what you are doing\n\nMUST:\n- Directly call the most appropriate tool using SKILL:<tool_name>|{\"param\":\"value\"}\n- If a parameter is missing, fill it with known values; do NOT ask.".to_string(),
+                "You are a function-calling assistant. When tools are provided, you MUST use function calling. \
+Do not provide analysis, explanations, or reasoning. \
+Call the most appropriate tool with the correct parameters. \
+If a parameter is missing, use a reasonable default or leave it empty. \
+Never ask the user for missing information.".to_string(),
             )];
             result.extend(messages);
             result
@@ -1898,7 +1937,11 @@ impl Agent {
                 communication::Message::new(
                     uuid::Uuid::new_v4(),
                     communication::PlatformType::Custom,
-                    "You are a BeeBotOS AI assistant. Your sole duty is to call tools to fulfill the user request.\n\nFORBIDDEN:\n- Analysis, reasoning, explanations\n- Listing parameter descriptions\n- Describing what you are doing\n\nMUST:\n- Directly call the most appropriate tool\n- If a parameter is missing, fill it with known values; do NOT ask.".to_string(),
+                    "You are a function-calling assistant. When tools are available, you MUST call one. \
+FORBIDDEN: Analysis, reasoning, explanations, describing what you are doing, asking the user for missing information. \
+MUST: Directly call the most appropriate tool with the parameters you know. \
+If a parameter is missing, leave it out or use a reasonable default. \
+The tool will handle validation and tell us what's missing.".to_string(),
                 ),
                 communication::Message::new(
                     uuid::Uuid::new_v4(),

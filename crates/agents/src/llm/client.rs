@@ -426,15 +426,28 @@ impl LLMClient {
         user_message: impl Into<String>,
         tool_handlers: Vec<Box<dyn ToolHandler>>,
         max_rounds: usize,
+        max_tokens: Option<u32>,
+        tool_choice: Option<String>,
     ) -> LLMResult<String> {
         let user_message: String = user_message.into();
         let mut messages = self.context.read().await.clone();
         messages.push(Message::user(user_message.clone()));
 
         for _round in 0..max_rounds {
+            let mut config = self.config.clone();
+            if let Some(mt) = max_tokens {
+                config.max_tokens = Some(mt);
+            }
+            if let Some(ref tc) = tool_choice {
+                config.tool_choice = match tc.as_str() {
+                    "required" => Some(ToolChoice::Required("required".to_string())),
+                    "none" => Some(ToolChoice::None("none".to_string())),
+                    _ => Some(ToolChoice::Auto("auto".to_string())),
+                };
+            }
             let mut request = LLMRequest {
                 messages: messages.clone(),
-                config: self.config.clone(),
+                config,
             };
             request.config.tools = Some(
                 tool_handlers.iter().map(|t| t.definition()).collect()

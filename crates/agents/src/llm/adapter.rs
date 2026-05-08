@@ -118,7 +118,7 @@ impl LLMCallInterface for LLMClientAdapter {
         &self,
         messages: Vec<CommMessage>,
         tools: Vec<crate::communication::ToolDefinition>,
-        _context: Option<HashMap<String, String>>,
+        context: Option<HashMap<String, String>>,
     ) -> AgentResult<String> {
         // Preserve message roles by separating system context from user query.
         // System messages become the prompt prefix; the last user message is the actual input.
@@ -155,9 +155,13 @@ impl LLMCallInterface for LLMClientAdapter {
             })
             .collect();
 
+        // 🆕 FIX: Pass max_tokens and tool_choice from context
+        let max_tokens = context.as_ref().and_then(|c| c.get("max_tokens")).and_then(|s| s.parse::<u32>().ok());
+        let tool_choice = context.as_ref().and_then(|c| c.get("tool_choice")).cloned();
+
         let result = self
             .client
-            .chat_with_tools_react(&prompt, tool_handlers, 10)
+            .chat_with_tools_react(&prompt, tool_handlers, 10, max_tokens, tool_choice)
             .await
             .map_err(|e| crate::error::AgentError::Execution(e.to_string()))?;
 
