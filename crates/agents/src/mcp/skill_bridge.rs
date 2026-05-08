@@ -72,8 +72,28 @@ impl McpSkillBridge {
             let skill_id = format!("mcp:{}/{}", server_name, tool.name);
             let loaded_skill = Self::tool_to_skill(&skill_id, server_name, &tool);
 
+            let mut tags = vec![server_name.to_string(), "mcp".to_string()];
+            let tool_name_lower = tool.name.to_lowercase();
+            if tool_name_lower.contains("order") || tool_name_lower.contains("buy") || tool_name_lower.contains("sell") || tool_name_lower.contains("place") {
+                tags.push("trading".to_string());
+            }
+            if tool_name_lower.contains("crypto") || tool_name_lower.contains("btc") || tool_name_lower.contains("eth") {
+                tags.push("crypto".to_string());
+                tags.push("cryptocurrency".to_string());
+            }
+            if tool_name_lower.contains("stock") || tool_name_lower.contains("equity") {
+                tags.push("stock".to_string());
+                tags.push("equity".to_string());
+            }
+            if tool_name_lower.contains("quote") || tool_name_lower.contains("price") || tool_name_lower.contains("snapshot") || tool_name_lower.contains("bar") || tool_name_lower.contains("trade") {
+                tags.push("market-data".to_string());
+            }
+            if tool_name_lower.contains("weather") || tool_name_lower.contains("forecast") || tool_name_lower.contains("temperature") {
+                tags.push("weather".to_string());
+            }
+
             skill_registry
-                .register(loaded_skill, "mcp", vec![server_name.to_string(), "mcp".to_string()])
+                .register(loaded_skill, "mcp", tags)
                 .await;
 
             registered += 1;
@@ -98,6 +118,21 @@ impl McpSkillBridge {
                     }
                 }
             }
+        }
+
+        // 🆕 FIX: Append Chinese keywords for CJK query matching.
+        let tool_name_lower = tool.name.to_lowercase();
+        if tool_name_lower.contains("order") || tool_name_lower.contains("place") {
+            rich_description.push_str(" 下单 购买 买入 卖出 buy sell order trade trading");
+        }
+        if tool_name_lower.contains("crypto") {
+            rich_description.push_str(" 加密货币 比特币 BTC 以太坊 ETH cryptocurrency");
+        }
+        if tool_name_lower.contains("stock") {
+            rich_description.push_str(" 股票 stock equity shares AAPL TSLA");
+        }
+        if tool_name_lower.contains("quote") || tool_name_lower.contains("price") || tool_name_lower.contains("snapshot") || tool_name_lower.contains("bar") || tool_name_lower.contains("trade") {
+            rich_description.push_str(" 行情 价格 price quote snapshot market data");
         }
 
         // Convert JSON Schema input_schema into FunctionDef parameters

@@ -582,8 +582,17 @@ impl LlmService {
                 // 🆕 FIX: If the model returned tool_calls, format them as SKILL: lines
                 // so the agent can reuse its existing skill execution logic.
                 if let Some(choice) = response.choices.first() {
+                    let finish_reason = choice.finish_reason.as_deref().unwrap_or("unknown");
                     if let Some(ref tool_calls) = choice.message.tool_calls {
                         if !tool_calls.is_empty() {
+                            for tc in tool_calls {
+                                info!(
+                                    "🔧 tool_call: name={}, args_len={}, finish_reason={}",
+                                    tc.function.name,
+                                    tc.function.arguments.len(),
+                                    finish_reason
+                                );
+                            }
                             let skill_lines: Vec<String> = tool_calls
                                 .iter()
                                 .map(|tc| {

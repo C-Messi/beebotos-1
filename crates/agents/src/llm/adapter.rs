@@ -52,11 +52,22 @@ impl LLMCallInterface for LLMClientAdapter {
         context: Option<HashMap<String, String>>,
     ) -> AgentResult<String> {
         // Build a combined prompt from all messages to preserve context.
-        let prompt = messages
+        let mut prompt = messages
             .into_iter()
             .map(|m| m.content)
             .collect::<Vec<_>>()
             .join("\n\n");
+
+        // 🆕 FIX: When native tools are provided but the LLM does not support native
+        // function calling, inject the tool definitions into the prompt so the model
+        // can still see them and emit SKILL:xxx triggers.
+        if let Some(ref ctx) = context {
+            if let Some(tools_json) = ctx.get("tools_json") {
+                prompt.push_str("\n\n--- AVAILABLE TOOLS ---\n");
+                prompt.push_str(tools_json);
+                prompt.push_str("\n\nWhen a tool can answer the request, output ONLY: SKILL:<tool_name>\nDo NOT explain or analyze.");
+            }
+        }
 
         // 🟢 P2 FIX: Support dynamic max_tokens from context
         // 🟢 P1 OPTIMIZE: Use chat_one_shot when 'one_shot' flag is set to avoid

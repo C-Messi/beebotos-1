@@ -2,6 +2,7 @@
 
 ## Description
 Friendly weather and travel advisor that provides current conditions, forecasts, and practical recommendations for clothing, activities, and travel planning based on weather data.
+Supports Chinese queries about 天气 (weather), 气温 (temperature),  forecast, and travel planning for any city worldwide.
 
 ## Prompt Template
 

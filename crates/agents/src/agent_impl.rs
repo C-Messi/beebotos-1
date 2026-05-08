@@ -1644,6 +1644,7 @@ impl Agent {
         };
 
         let mut tool_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut native_tools: Vec<communication::ToolDefinition> = Vec::new();
         if let Some(ref registry) = self.skill_registry {
             let all_skills = registry.list_all().await;
             if !all_skills.is_empty() && top_n > 0 {
@@ -1653,11 +1654,28 @@ impl Agent {
                     "the","a","an","is","are","was","were","be","been","being","have","has","had","do","does","did","will","would","could","should","may","might","must","shall","can","need","dare","ought","used","to","of","in","for","on","with","at","by","from","as","into","through","during","before","after","above","below","between","under","and","but","or","yet","so","if","because","although","though","while","where","when","that","which","who","whom","whose","what","how","why","it","its","this","these","those","i","me","my","myself","we","our","you","your","he","him","his","she","her","they","them","their","just","only","even","also","too","very","so","such","no","not","than","then","now","here","there","up","out","off","down","over","again","further","once","more","most","other","some","any","each","few","much","many","all","both","either","neither","one","two","first","last","good","new","old","great","high","small","different","large","next","early","young","important","public","same","able",
                 ].iter().cloned().collect();
 
-                let mut keywords: Vec<String> = query_lower
-                    .split(|c: char| !c.is_alphanumeric() && c != '/')
-                    .filter(|s| s.len() >= 2 && !stopwords.contains(s))
-                    .map(|s| s.to_string())
-                    .collect();
+                // 🆕 FIX: Split on non-alphanumeric; for CJK text also extract individual
+                // characters so Chinese queries can match skills with Chinese descriptions.
+                let mut keywords: Vec<String> = Vec::new();
+                for part in query_lower.split(|c: char| !c.is_alphanumeric() && c != '/') {
+                    if part.is_empty() || part.len() < 2 {
+                        continue;
+                    }
+                    if !stopwords.contains(part) {
+                        keywords.push(part.to_string());
+                    }
+                    // For CJK text, also add individual CJK characters as keywords
+                    if part.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
+                        for ch in part.chars() {
+                            if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+                                let ch_str = ch.to_string();
+                                if !stopwords.contains(ch_str.as_str()) && !keywords.contains(&ch_str) {
+                                    keywords.push(ch_str);
+                                }
+                            }
+                        }
+                    }
+                }
                 keywords.sort();
                 keywords.dedup();
 
@@ -1804,10 +1822,11 @@ impl Agent {
                 }
 
                 if !tools.is_empty() {
-                    match serde_json::to_string(&tools) {
+                    native_tools = tools;
+                    match serde_json::to_string(&native_tools) {
                         Ok(json) => {
                             extra_params.insert("tools_json".to_string(), json);
-                            info!("handle_llm_task: injected {} / {} tools for native function calling (keywords: {:?})", tools.len(), all_skills.len(), keywords);
+                            info!("handle_llm_task: injected {} / {} tools for native function calling (keywords: {:?})", native_tools.len(), all_skills.len(), keywords);
                         }
                         Err(e) => warn!("Failed to serialize tools: {}", e),
                     }
@@ -1840,7 +1859,7 @@ impl Agent {
             let mut result = vec![communication::Message::new(
                 uuid::Uuid::new_v4(),
                 communication::PlatformType::Custom,
-                "You are a BeeBotOS AI assistant. Your duty is to use the provided tools to fulfill user requests.\n\nRules:\n1. If a tool can handle the request, you MUST call it.\n2. NEVER output analysis, reasoning, or explanations.\n3. If a required parameter is missing, pass the values you know; the system will handle errors.".to_string(),
+                "You are a BeeBotOS AI assistant. Your sole duty is to call tools to fulfill the user request.\n\nFORBIDDEN:\n- Analysis, reasoning, explanations\n- Listing parameter descriptions\n- Describing what you are doing\n\nMUST:\n- Directly call the most appropriate tool using SKILL:<tool_name>|{\"param\":\"value\"}\n- If a parameter is missing, fill it with known values; do NOT ask.".to_string(),
             )];
             result.extend(messages);
             result
@@ -1850,10 +1869,16 @@ impl Agent {
         info!("handle_llm_task: messages count after inject = {}, skill_catalog set = {}, native_tools = {}",
               messages.len(), self.skill_catalog.is_some(), extra_params.contains_key("tools_json"));
 
-        let mut response = llm
-            .call_llm(messages.clone(), Some(extra_params.clone()))
-            .await
-            .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?;
+        let mut response = if !native_tools.is_empty() && llm.supports_native_tools() {
+            info!("handle_llm_task: using native function calling with {} tools", native_tools.len());
+            llm.call_llm_with_tools(messages.clone(), native_tools, Some(extra_params.clone()))
+                .await
+                .map_err(|e| AgentError::Execution(format!("LLM call with tools failed: {}", e)))?
+        } else {
+            llm.call_llm(messages.clone(), Some(extra_params.clone()))
+                .await
+                .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?
+        };
 
         info!("handle_llm_task: LLM raw response (first 200 chars) = {}", &response.chars().take(200).collect::<String>());
 
@@ -3553,6 +3578,11 @@ impl Agent {
             (&["finance", "portfolio", "invest", "理财", "投资", "组合"], "portfolio_manager"),
             (&["social", "community", "content", "社媒", "社群", "内容"], "content_creator"),
             (&["security", "audit", "vulnerability", "安全", "审计", "漏洞"], "auditor"),
+            (&["crypto", "cryptocurrency", "比特币", "btc", "eth", "以太坊", "crypto order", "加密货币"], "mcp:alpaca/place_crypto_order"),
+            (&["stock", "股票", "aapl", "tsla", "equity", "shares", "stock order"], "mcp:alpaca/place_stock_order"),
+            (&["order", "下单", "购买", "买入", "卖出", "buy", "sell", "place order", "trade"], "mcp:alpaca/place_crypto_order"),
+            (&["crypto snapshot", "crypto quote", "crypto price", "crypto bars", "crypto trades", "比特币行情", "btc价格", "加密货币价格", "btc", "bitcoin", "eth", "ethereum", "crypto market"], "mcp:alpaca/get_crypto_snapshot"),
+            (&["stock snapshot", "stock quote", "stock price", "stock bars", "stock trades", "股票价格", "aapl价格", "tsla价格", "stock market", "aapl", "tsla"], "mcp:alpaca/get_stock_snapshot"),
         ];
         
         let mut matched_skill_ids = std::collections::HashSet::new();

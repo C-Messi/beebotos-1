@@ -168,14 +168,18 @@ impl IntentEngine {
     }
 
     fn count_distinct_actions(lower: &str) -> usize {
-        let action_keywords = [
-            "查", "查询", "搜索", "找", "看",
-            "买", "卖", "下单", "交易",
-            "发", "发送", "写", "创建",
-            "分析", "总结", "对比",
-            "search", "find", "buy", "sell", "order", "send", "create", "analyze", "compare",
+        // Group synonymous actions so "下单购买" counts as ONE action, not two
+        let action_groups: &[&[&str]] = &[
+            // Group 1: query/search
+            &["查", "查询", "搜索", "找", "看", "search", "find", "look"],
+            // Group 2: trade/order/buy/sell (all synonyms)
+            &["买", "卖", "下单", "交易", "买入", "卖出", "购买", "order", "buy", "sell", "place"],
+            // Group 3: send/create/write
+            &["发", "发送", "写", "创建", "send", "create", "write"],
+            // Group 4: analyze/summarize/compare
+            &["分析", "总结", "对比", "analyze", "compare", "summary", "summarize"],
         ];
-        action_keywords.iter().filter(|k| lower.contains(**k)).count()
+        action_groups.iter().filter(|group| group.iter().any(|k| lower.contains(*k))).count()
     }
 
     fn detect_toolsets(lower: &str) -> Vec<String> {
