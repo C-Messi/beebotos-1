@@ -3,16 +3,17 @@
 //! Visualize workflow definitions, execution stats, recent instances,
 //! and skill compositions with full CRUD operations.
 
+use leptos::either::Either;
+use leptos::prelude::*;
+use leptos::view;
+use leptos_meta::*;
+
 use crate::api::{
     CompositionInfo, DashboardStats, ExecuteWorkflowRequest, InstallWorkflowRequest, WorkflowInfo,
     WorkflowInstanceSummary,
 };
 use crate::components::Modal;
 use crate::state::use_app_state;
-use leptos::either::Either;
-use leptos::prelude::*;
-use leptos::view;
-use leptos_meta::*;
 
 const POLL_INTERVAL_MS: u32 = 10_000;
 
@@ -339,7 +340,12 @@ fn StatsCards(stats: DashboardStats) -> impl IntoView {
 }
 
 #[component]
-fn StatCard(label: String, value: String, icon: &'static str, color: &'static str) -> impl IntoView {
+fn StatCard(
+    label: String,
+    value: String,
+    icon: &'static str,
+    color: &'static str,
+) -> impl IntoView {
     let color_class = format!("stat-card stat-card-{}", color);
     view! {
         <div class={color_class}>
@@ -450,7 +456,13 @@ fn WorkflowCard(
     let is_executing = RwSignal::new(false);
     let is_stopping = RwSignal::new(false);
 
-    let trigger_types = wf_sig.get().triggers.iter().map(|t| t.trigger_type.clone()).collect::<Vec<_>>().join(", ");
+    let trigger_types = wf_sig
+        .get()
+        .triggers
+        .iter()
+        .map(|t| t.trigger_type.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
 
     view! {
         <div class="workflow-card">

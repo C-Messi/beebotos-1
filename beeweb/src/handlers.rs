@@ -1,24 +1,21 @@
 //! HTTP handlers for BeeWeb Update Server
 
-use axum::{
-    extract::{Path, Query, State},
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
-    Json,
-};
-use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::{
-    metrics::UpdateMetrics,
-    models::{
-        UpdateCheckRequest, UpdateCheckResponse, UpdateMetricRecord, UpdateReportRequest,
-        UpdateReportResponse, UpdateStatus,
-    },
-    storage::Storage,
-};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use prometheus::Encoder;
+use serde::Deserialize;
+
+use crate::metrics::UpdateMetrics;
+use crate::models::{
+    UpdateCheckRequest, UpdateCheckResponse, UpdateMetricRecord, UpdateReportRequest,
+    UpdateReportResponse, UpdateStatus,
+};
+use crate::storage::Storage;
 
 /// Application state shared across handlers
 #[derive(Debug, Clone)]
@@ -67,7 +64,8 @@ pub async fn check_update_get(
 
     let release = state
         .storage
-        .find_latest_release(&query.app, &query.channel).await;
+        .find_latest_release(&query.app, &query.channel)
+        .await;
 
     let response = match release {
         Some(record) => {
@@ -113,7 +111,8 @@ pub async fn check_update_post(
 
     let release = state
         .storage
-        .find_latest_release(&req.app_name, &req.channel).await;
+        .find_latest_release(&req.app_name, &req.channel)
+        .await;
 
     let response = match release {
         Some(record) => {
@@ -124,22 +123,14 @@ pub async fn check_update_post(
             let mut version_info = record.version_info;
             if !req.platform.is_empty() {
                 version_info.packages.retain(|pkg| {
-                    format!("{:?}", pkg.platform).to_lowercase()
-                        == req.platform.to_lowercase()
+                    format!("{:?}", pkg.platform).to_lowercase() == req.platform.to_lowercase()
                         || match pkg.platform {
-                            crate::models::Platform::Linux => {
-                                req.platform.contains("linux")
-                            }
-                            crate::models::Platform::Windows => {
-                                req.platform.contains("windows")
-                            }
+                            crate::models::Platform::Linux => req.platform.contains("linux"),
+                            crate::models::Platform::Windows => req.platform.contains("windows"),
                             crate::models::Platform::MacOS => {
-                                req.platform.contains("macos")
-                                    || req.platform.contains("darwin")
+                                req.platform.contains("macos") || req.platform.contains("darwin")
                             }
-                            crate::models::Platform::Wasm => {
-                                req.platform.contains("wasm")
-                            }
+                            crate::models::Platform::Wasm => req.platform.contains("wasm"),
                         }
                 });
             }
@@ -186,7 +177,8 @@ pub async fn download_package(
 
     let (release, _package) = state
         .storage
-        .find_package(&package_id).await
+        .find_package(&package_id)
+        .await
         .ok_or(StatusCode::NOT_FOUND)?;
 
     // Read from packages_dir - must exist
@@ -214,10 +206,7 @@ pub async fn download_package(
                 return Err(StatusCode::RANGE_NOT_SATISFIABLE);
             }
             let partial = body[start..=end].to_vec();
-            (
-                StatusCode::PARTIAL_CONTENT,
-                partial,
-            )
+            (StatusCode::PARTIAL_CONTENT, partial)
         } else {
             (StatusCode::OK, body)
         }
@@ -282,7 +271,9 @@ pub async fn report_update(
     // Update metrics based on status
     match req.status {
         UpdateStatus::Completed => {
-            state.metrics.record_success(&req.app_name, req.duration_secs as f64);
+            state
+                .metrics
+                .record_success(&req.app_name, req.duration_secs as f64);
         }
         UpdateStatus::Failed => {
             let error_type = req.error.as_deref().unwrap_or("unknown");
@@ -313,14 +304,14 @@ pub async fn report_update(
 }
 
 /// Get metrics summary (admin endpoint)
-pub async fn metrics_summary(State(state): State<AppState>) -> Json<crate::storage::MetricsSummary> {
+pub async fn metrics_summary(
+    State(state): State<AppState>,
+) -> Json<crate::storage::MetricsSummary> {
     Json(state.storage.get_metrics_summary().await)
 }
 
 /// Prometheus metrics scrape endpoint
-pub async fn prometheus_metrics(
-    State(state): State<AppState>,
-) -> Result<Response, StatusCode> {
+pub async fn prometheus_metrics(State(state): State<AppState>) -> Result<Response, StatusCode> {
     let encoder = prometheus::TextEncoder::new();
     let metric_families = state.metrics.registry().gather();
     let mut buffer = String::new();

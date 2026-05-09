@@ -8,25 +8,22 @@
 //! - Request logging
 //! - Error handling
 
-use axum::{
-    extract::{ConnectInfo, FromRequestParts, Request, State},
-    http::{header, request::Parts, HeaderValue},
-    middleware::Next,
-    response::{IntoResponse, Response},
-};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Instant;
 
+use axum::extract::{ConnectInfo, FromRequestParts, Request, State};
+use axum::http::request::Parts;
+use axum::http::{header, HeaderValue};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use chrono::{Duration as ChronoDuration, Utc};
 use jsonwebtoken::{
     decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation,
 };
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Instant;
-use tower_http::{
-    cors::{AllowOrigin, Any, CorsLayer},
-    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
-};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use uuid::Uuid;
 
@@ -470,15 +467,16 @@ pub async fn logging_middleware(
 
 /// CORS layer configuration
 ///
-/// 🟠 HIGH SECURITY: Blocks dangerous combination of allow_any_origin + allow_credentials
+/// 🟠 HIGH SECURITY: Blocks dangerous combination of allow_any_origin +
+/// allow_credentials
 pub fn cors_layer(config: &crate::config::CorsConfig) -> CorsLayer {
     // 🟠 HIGH SECURITY FIX: Prevent dangerous CORS configuration
     // Allowing any origin with credentials is a security vulnerability (CSRF risk)
     if config.allow_any_origin && config.allow_credentials {
         panic!(
-            "SECURITY ERROR: CORS 'allow_any_origin' cannot be combined with 'allow_credentials'.\n\
-             This combination creates a security vulnerability.\n\
-             Either disable allow_any_origin or set allow_credentials to false."
+            "SECURITY ERROR: CORS 'allow_any_origin' cannot be combined with \
+             'allow_credentials'.\nThis combination creates a security vulnerability.\nEither \
+             disable allow_any_origin or set allow_credentials to false."
         );
     }
 
@@ -539,12 +537,8 @@ fn is_public_path(path: &str) -> bool {
         "/ws",
         "/ws/status",
     ];
-    const PUBLIC_PREFIXES: &[&str] = &[
-        "/api/v1/channels/wechat/qr",
-    ];
-    const PUBLIC_EXACT: &[&str] = &[
-        "/api/v1/channels",
-    ];
+    const PUBLIC_PREFIXES: &[&str] = &["/api/v1/channels/wechat/qr"];
+    const PUBLIC_EXACT: &[&str] = &["/api/v1/channels"];
 
     PUBLIC_PATHS.iter().any(|p| path.starts_with(p))
         || PUBLIC_PREFIXES.iter().any(|p| path.starts_with(p))
@@ -595,9 +589,10 @@ pub fn require_any_role(auth_user: &AuthUser, roles: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use secrecy::Secret;
+
     use super::*;
     use crate::config::{GatewayConfig, JwtConfig};
-    use secrecy::Secret;
 
     #[test]
     fn test_auth_user_roles() {

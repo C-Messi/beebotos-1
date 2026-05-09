@@ -80,6 +80,11 @@ pub fn default_platform() -> String {
     return "linux".to_string();
     #[cfg(target_arch = "wasm32")]
     return "wasm".to_string();
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux", target_arch = "wasm32")))]
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_arch = "wasm32"
+    )))]
     return "unknown".to_string();
 }

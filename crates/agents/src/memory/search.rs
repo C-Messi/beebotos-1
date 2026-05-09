@@ -1,12 +1,15 @@
 //! Unified Memory Search Interface
 //!
 //! Provides a common trait for all memory search implementations.
-//! Unifies hybrid_search, hybrid_search_sqlite, markdown_search, and markdown_storage.
+//! Unifies hybrid_search, hybrid_search_sqlite, markdown_search, and
+//! markdown_storage.
+
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use uuid::Uuid;
 
 /// Default weight for vector search results
 pub const DEFAULT_VECTOR_WEIGHT: f32 = 0.7;
@@ -89,7 +92,12 @@ pub trait MemorySearch: Send + Sync {
     async fn keyword_search(&self, keywords: &[String]) -> Result<Vec<SearchResult>>;
 
     /// Add a memory entry to the search index
-    async fn add_entry(&self, id: Uuid, content: &str, metadata: HashMap<String, String>) -> Result<()>;
+    async fn add_entry(
+        &self,
+        id: Uuid,
+        content: &str,
+        metadata: HashMap<String, String>,
+    ) -> Result<()>;
 
     /// Remove a memory entry from the search index
     async fn remove_entry(&self, id: Uuid) -> Result<()>;
@@ -108,7 +116,8 @@ pub trait MemorySearch: Send + Sync {
     /// Clear all entries from the search index
     async fn clear(&self) -> Result<()>;
 
-    /// 🆕 OPTIMIZATION PHASE 2: Cross-session FTS5 search for historical solutions
+    /// 🆕 OPTIMIZATION PHASE 2: Cross-session FTS5 search for historical
+    /// solutions
     ///
     /// Searches across all user sessions using full-text search.
     /// Returns results ranked by relevance.
@@ -120,10 +129,14 @@ pub trait MemorySearch: Send + Sync {
     ) -> Result<Vec<SearchResult>> {
         // Default implementation delegates to regular search
         let _ = user_id;
-        self.search_with_config(query, SearchConfig {
-            max_results: limit,
-            ..SearchConfig::default()
-        }).await
+        self.search_with_config(
+            query,
+            SearchConfig {
+                max_results: limit,
+                ..SearchConfig::default()
+            },
+        )
+        .await
     }
 
     /// 🆕 PHASE 5: Search memories specifically for skill distillation
@@ -139,16 +152,27 @@ pub trait MemorySearch: Send + Sync {
         _min_quality: f32,
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
-        let results = self.search_with_config(query, SearchConfig {
-            max_results: limit * 2,
-            ..SearchConfig::default()
-        }).await?;
+        let results = self
+            .search_with_config(
+                query,
+                SearchConfig {
+                    max_results: limit * 2,
+                    ..SearchConfig::default()
+                },
+            )
+            .await?;
 
         let filtered: Vec<SearchResult> = results
             .into_iter()
             .filter(|r| {
-                r.metadata.get("category").map(|c| c == "solution").unwrap_or(false)
-                    || r.metadata.get("source").map(|s| s == "solidified_experience").unwrap_or(false)
+                r.metadata
+                    .get("category")
+                    .map(|c| c == "solution")
+                    .unwrap_or(false)
+                    || r.metadata
+                        .get("source")
+                        .map(|s| s == "solidified_experience")
+                        .unwrap_or(false)
             })
             .take(limit)
             .collect();
@@ -273,4 +297,4 @@ pub mod utils {
 }
 
 // Re-export types from hybrid_search for backward compatibility
-pub use utils::{cosine_similarity, normalize_vector, hash_content};
+pub use utils::{cosine_similarity, hash_content, normalize_vector};

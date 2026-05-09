@@ -12,11 +12,11 @@
 
 use std::time::{Duration, Instant};
 
-use crate::evolution::skill_distiller::{SkillDistiller, DistillerConfig};
+use crate::evolution::capo::{CapoConfig, CapoEngine};
+use crate::evolution::sandbox::{EvolutionProposal, EvolutionSandbox, EvolutionTarget};
+use crate::evolution::scheduler::{EvolutionSchedule, EvolutionScheduler};
+use crate::evolution::skill_distiller::{DistillerConfig, SkillDistiller};
 use crate::evolution::skill_lineage::SkillLifecycleManager;
-use crate::evolution::capo::{CapoEngine, CapoConfig};
-use crate::evolution::sandbox::{EvolutionSandbox, EvolutionProposal, EvolutionTarget};
-use crate::evolution::scheduler::{EvolutionScheduler, EvolutionSchedule};
 use crate::planning::ToolTrail;
 
 /// Target: evolution overhead must be < 5% of assumed task latency
@@ -37,7 +37,13 @@ mod tests {
         // Simulate a 10-step trail with tool calls
         for i in 0..10 {
             trail.add_step(i, &format!("Step {}", i));
-            trail.record_tool_call(i, "http_request", serde_json::json!({"url": "http://example.com"}), "OK", true);
+            trail.record_tool_call(
+                i,
+                "http_request",
+                serde_json::json!({"url": "http://example.com"}),
+                "OK",
+                true,
+            );
         }
         trail.finish(crate::planning::TrailStatus::Success);
 
@@ -48,7 +54,8 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(OVERHEAD_BUDGET_MS),
             "Skill distillation took {:?}, budget is {}ms",
-            elapsed, OVERHEAD_BUDGET_MS
+            elapsed,
+            OVERHEAD_BUDGET_MS
         );
         assert!(distilled.quality_score >= 0.0);
     }
@@ -78,7 +85,8 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(OVERHEAD_BUDGET_MS),
             "CAPO attribution took {:?}, budget is {}ms",
-            elapsed, OVERHEAD_BUDGET_MS
+            elapsed,
+            OVERHEAD_BUDGET_MS
         );
         assert!(!scores.is_empty());
     }
@@ -102,7 +110,8 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(OVERHEAD_BUDGET_MS),
             "Sandbox preflight took {:?}, budget is {}ms",
-            elapsed, OVERHEAD_BUDGET_MS
+            elapsed,
+            OVERHEAD_BUDGET_MS
         );
         assert!(result.is_ok());
     }
@@ -110,8 +119,11 @@ mod tests {
     /// Benchmark: Lifecycle evaluation on a skill with 10 versions
     #[test]
     fn bench_lifecycle_evaluation_overhead() {
-        use crate::evolution::skill_lineage::{SkillLineage, LineageNode, LineageSource, UsageStats};
         use chrono::Utc;
+
+        use crate::evolution::skill_lineage::{
+            LineageNode, LineageSource, SkillLineage, UsageStats,
+        };
 
         let manager = SkillLifecycleManager::new();
         let mut lineage = SkillLineage::new("bench-skill", "1.0.0");
@@ -145,7 +157,8 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(OVERHEAD_BUDGET_MS),
             "Lifecycle evaluation took {:?}, budget is {}ms",
-            elapsed, OVERHEAD_BUDGET_MS
+            elapsed,
+            OVERHEAD_BUDGET_MS
         );
         assert_eq!(health.skill_id, "bench-skill");
     }
@@ -163,7 +176,10 @@ mod tests {
             trail.record_tool_call(0, "test_tool", serde_json::json!({}), "ok", true);
             trail.finish(crate::planning::TrailStatus::Success);
 
-            let _ = scheduler.on_task_completed(&trail, "goal", true).await.unwrap();
+            let _ = scheduler
+                .on_task_completed(&trail, "goal", true)
+                .await
+                .unwrap();
         }
         let total_elapsed = start.elapsed();
         let avg_overhead_ms = total_elapsed.as_millis() as f64 / task_count as f64;
@@ -172,7 +188,8 @@ mod tests {
         assert!(
             avg_overhead_ms < budget_ms,
             "Average scheduler overhead {:.2}ms exceeds budget {:.2}ms",
-            avg_overhead_ms, budget_ms
+            avg_overhead_ms,
+            budget_ms
         );
 
         // Verify cumulative overhead ratio is < 5%
@@ -233,7 +250,10 @@ mod tests {
             }
             trail.finish(crate::planning::TrailStatus::Success);
 
-            let summary = scheduler.on_task_completed(&trail, "goal", true).await.unwrap();
+            let summary = scheduler
+                .on_task_completed(&trail, "goal", true)
+                .await
+                .unwrap();
             if summary.skill_distill_triggered {
                 skill_triggers += 1;
             }
@@ -243,10 +263,18 @@ mod tests {
         }
 
         // With threshold=2 and 10 tasks (all complex), skill should trigger 5 times
-        assert!(skill_triggers >= 4, "Expected >=4 skill triggers, got {}", skill_triggers);
+        assert!(
+            skill_triggers >= 4,
+            "Expected >=4 skill triggers, got {}",
+            skill_triggers
+        );
 
         // With threshold=5 and 10 trajectories, capo should trigger 2 times
-        assert!(capo_triggers >= 1, "Expected >=1 CAPO triggers, got {}", capo_triggers);
+        assert!(
+            capo_triggers >= 1,
+            "Expected >=1 CAPO triggers, got {}",
+            capo_triggers
+        );
     }
 
     /// Security integration test: Sandbox blocks malicious evolution proposals

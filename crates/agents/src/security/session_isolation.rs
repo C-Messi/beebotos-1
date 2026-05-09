@@ -43,9 +43,9 @@ impl IsolationLevel {
     pub fn provides_network_isolation(&self) -> bool {
         matches!(self, Self::Wasm | Self::Process)
     }
-    
+
     /// Apply isolation for session execution
-    /// 
+    ///
     /// ARCHITECTURE FIX: Actually implements isolation mechanisms
     pub async fn apply<F, Fut, R>(&self, f: F) -> std::result::Result<R, IsolationError>
     where
@@ -58,7 +58,9 @@ impl IsolationLevel {
             IsolationLevel::Thread => {
                 // Thread-level isolation using tokio spawn
                 let handle = tokio::spawn(async move { f().await });
-                handle.await.map_err(|e| IsolationError::ThreadError(e.to_string()))
+                handle
+                    .await
+                    .map_err(|e| IsolationError::ThreadError(e.to_string()))
             }
             IsolationLevel::Wasm => {
                 // 🆕 OPTIMIZATION PHASE 4: WASM sandbox isolation
@@ -72,7 +74,7 @@ impl IsolationLevel {
                 // - Timeout enforcement (prevents infinite loops)
                 // - Resource limit checks
                 tracing::info!("WASM isolation: enforcing runtime sandbox constraints");
-                
+
                 let result = tokio::spawn(async move {
                     let limits = ResourceLimits {
                         max_memory_mb: 128,
@@ -81,24 +83,28 @@ impl IsolationLevel {
                         max_fs_usage_mb: 100,
                         max_network_requests_per_min: 0, // WASM sandbox: no network
                     };
-                    
+
                     let timeout_duration = std::time::Duration::from_millis(limits.max_cpu_time_ms);
                     match tokio::time::timeout(timeout_duration, f()).await {
                         Ok(result) => Ok(result),
                         Err(_) => Err(IsolationError::ResourceLimit(
-                            "WASM sandbox execution exceeded time limit".to_string()
+                            "WASM sandbox execution exceeded time limit".to_string(),
                         )),
                     }
                 });
-                
-                result.await.map_err(|e| IsolationError::WasmError(e.to_string()))?
+
+                result
+                    .await
+                    .map_err(|e| IsolationError::WasmError(e.to_string()))?
             }
             IsolationLevel::Process => {
                 // Process-level isolation would spawn a separate process
                 // For now, use thread + strict resource limits
                 tracing::info!("Process isolation: using thread + strict limits");
                 let handle = tokio::spawn(async move { f().await });
-                handle.await.map_err(|e| IsolationError::ProcessError(e.to_string()))
+                handle
+                    .await
+                    .map_err(|e| IsolationError::ProcessError(e.to_string()))
             }
         }
     }
@@ -253,9 +259,9 @@ impl IsolatedSession {
             .signed_duration_since(self.started_at)
             .num_seconds()
     }
-    
+
     /// Execute code within this isolated session
-    /// 
+    ///
     /// ARCHITECTURE FIX: Actually applies isolation level during execution
     pub async fn execute<F, Fut, R>(&self, operation: F) -> std::result::Result<R, IsolationError>
     where
@@ -264,14 +270,14 @@ impl IsolatedSession {
         R: Send + 'static,
     {
         // Check resource limits before execution
-        self.check_resource_limits().await.map_err(|e| {
-            IsolationError::ResourceLimit(e.to_string())
-        })?;
-        
+        self.check_resource_limits()
+            .await
+            .map_err(|e| IsolationError::ResourceLimit(e.to_string()))?;
+
         // Apply isolation based on level
         self.isolation_level.apply(operation).await
     }
-    
+
     /// Execute with timeout enforcement
     pub async fn execute_with_timeout<F, Fut, R>(
         &self,
@@ -284,12 +290,13 @@ impl IsolatedSession {
         R: Send + 'static,
     {
         let timeout_duration = std::time::Duration::from_secs(timeout_secs);
-        
+
         match tokio::time::timeout(timeout_duration, self.execute(operation)).await {
             Ok(result) => result,
-            Err(_) => Err(IsolationError::ResourceLimit(
-                format!("Execution timeout after {} seconds", timeout_secs)
-            )),
+            Err(_) => Err(IsolationError::ResourceLimit(format!(
+                "Execution timeout after {} seconds",
+                timeout_secs
+            ))),
         }
     }
 }

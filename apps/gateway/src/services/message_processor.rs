@@ -4,23 +4,22 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{info, warn, error, debug};
-use uuid::Uuid;
+
+use beebotos_agents::communication::channel::session_manager::{SessionManager, SessionMessage};
+use beebotos_agents::communication::channel::ChannelEvent;
+use beebotos_agents::communication::{Message, MessageType, PlatformType};
+use beebotos_agents::deduplicator::MessageDeduplicator;
+use beebotos_agents::media::multimodal::MultimodalProcessor;
+use beebotos_agents::ChannelRegistry;
 use regex::Regex;
+use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
-use beebotos_agents::{
-    ChannelRegistry,
-    deduplicator::MessageDeduplicator,
-    communication::{Message, MessageType, PlatformType, channel::ChannelEvent},
-    communication::channel::session_manager::{SessionManager, SessionMessage},
-    media::multimodal::MultimodalProcessor,
-};
-
-use crate::services::llm_service::LlmService;
-use crate::services::agent_resolver::AgentResolver;
-use crate::services::webchat_service::WebchatService;
-use crate::error::GatewayError;
 use crate::clients::ClawHubClient;
+use crate::error::GatewayError;
+use crate::services::agent_resolver::AgentResolver;
+use crate::services::llm_service::LlmService;
+use crate::services::webchat_service::WebchatService;
 
 /// 消息处理器
 pub struct MessageProcessor {
@@ -41,7 +40,8 @@ pub struct MessageProcessor {
     /// Skill 注册表
     skill_registry: Option<Arc<beebotos_agents::skills::SkillRegistry>>,
     /// Workflow 注册表
-    workflow_registry: Option<Arc<tokio::sync::RwLock<beebotos_agents::workflow::WorkflowRegistry>>>,
+    workflow_registry:
+        Option<Arc<tokio::sync::RwLock<beebotos_agents::workflow::WorkflowRegistry>>>,
     /// ClawHub 客户端（技能市场）
     clawhub_client: Option<ClawHubClient>,
 }
@@ -54,7 +54,9 @@ impl MessageProcessor {
         memory_system: Option<Arc<beebotos_agents::memory::UnifiedMemorySystem>>,
         webchat_service: Option<Arc<WebchatService>>,
         skill_registry: Option<Arc<beebotos_agents::skills::SkillRegistry>>,
-        workflow_registry: Option<Arc<tokio::sync::RwLock<beebotos_agents::workflow::WorkflowRegistry>>>,
+        workflow_registry: Option<
+            Arc<tokio::sync::RwLock<beebotos_agents::workflow::WorkflowRegistry>>,
+        >,
         clawhub_client: Option<ClawHubClient>,
     ) -> Self {
         Self {
@@ -74,9 +76,11 @@ impl MessageProcessor {
     /// 处理频道事件
     pub async fn process_event(&self, event: ChannelEvent) -> Result<(), GatewayError> {
         match event {
-            ChannelEvent::MessageReceived { platform, channel_id, message } => {
-                self.handle_message(platform, &channel_id, message).await
-            }
+            ChannelEvent::MessageReceived {
+                platform,
+                channel_id,
+                message,
+            } => self.handle_message(platform, &channel_id, message).await,
             _ => {
                 debug!("Unhandled channel event: {:?}", event);
                 Ok(())
@@ -93,19 +97,26 @@ impl MessageProcessor {
     ) -> Result<(), GatewayError> {
         // 1. 消息去重检查
         if let Some(msg_id) = message.metadata.get("message_id") {
-            if !self.deduplicator.should_process_key(&platform.to_string(), msg_id).await {
+            if !self
+                .deduplicator
+                .should_process_key(&platform.to_string(), msg_id)
+                .await
+            {
                 warn!("🔄 重复消息，跳过处理: {}", msg_id);
                 return Ok(());
             }
         }
 
         // 2. 获取或创建会话
-        let user_id = message.metadata.get("sender_id")
+        let user_id = message
+            .metadata
+            .get("sender_id")
             .or_else(|| message.metadata.get("open_id"))
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
-        let session = self.session_manager
+        let session = self
+            .session_manager
             .get_or_create_session(platform, channel_id, &user_id)
             .await
             .map_err(|e| GatewayError::Internal {
@@ -119,13 +130,22 @@ impl MessageProcessor {
         let db_session_id = if let Some(ref svc) = self.webchat_service {
             if platform == PlatformType::WebChat {
                 // WebChat: 验证前端提供的 session_id，无效则自动创建
-                let provided_sid = message.metadata.get("session_id")
+                let provided_sid = message
+                    .metadata
+                    .get("session_id")
                     .cloned()
                     .unwrap_or_else(|| session.id.clone());
                 match svc.validate_session(&provided_sid, &user_id).await {
                     Ok(true) => provided_sid,
                     _ => {
-                        match svc.get_or_create_channel_session(&user_id, &platform.to_string(), &user_id).await {
+                        match svc
+                            .get_or_create_channel_session(
+                                &user_id,
+                                &platform.to_string(),
+                                &user_id,
+                            )
+                            .await
+                        {
                             Ok(sid) => sid,
                             Err(e) => {
                                 warn!("Failed to get/create webchat session: {}", e);
@@ -136,8 +156,15 @@ impl MessageProcessor {
                 }
             } else {
                 // 外部渠道：按 user_id + channel 查找或创建
-                let sender_id = message.metadata.get("sender_id").cloned().unwrap_or_else(|| channel_id.to_string());
-                match svc.get_or_create_channel_session(&user_id, &platform.to_string(), &sender_id).await {
+                let sender_id = message
+                    .metadata
+                    .get("sender_id")
+                    .cloned()
+                    .unwrap_or_else(|| channel_id.to_string());
+                match svc
+                    .get_or_create_channel_session(&user_id, &platform.to_string(), &sender_id)
+                    .await
+                {
                     Ok(sid) => sid,
                     Err(e) => {
                         warn!("Failed to get/create channel session: {}", e);
@@ -169,8 +196,14 @@ impl MessageProcessor {
                     // Persist and send reply
                     let msg_id = if let Some(ref svc) = self.webchat_service {
                         svc.save_message(&db_session_id, "assistant", &result_text, Some(serde_json::json!({"platform": platform.to_string(), "channel_id": channel_id})), None).await.ok()
-                    } else { None };
-                    if self.send_reply(platform, channel_id, &message, &result_text).await.is_ok() {
+                    } else {
+                        None
+                    };
+                    if self
+                        .send_reply(platform, channel_id, &message, &result_text)
+                        .await
+                        .is_ok()
+                    {
                         if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
                             let _ = svc.mark_ws_delivered(&id).await;
                         }
@@ -179,7 +212,8 @@ impl MessageProcessor {
                 }
                 Err(e) => {
                     let error_msg = format!("Workflow execution error: {}", e);
-                    self.send_reply(platform, channel_id, &message, &error_msg).await?;
+                    self.send_reply(platform, channel_id, &message, &error_msg)
+                        .await?;
                     return Ok(());
                 }
             }
@@ -199,8 +233,14 @@ impl MessageProcessor {
                         .ok();
                     let msg_id = if let Some(ref svc) = self.webchat_service {
                         svc.save_message(&db_session_id, "assistant", &result_text, Some(serde_json::json!({"platform": platform.to_string(), "channel_id": channel_id})), None).await.ok()
-                    } else { None };
-                    if self.send_reply(platform, channel_id, &message, &result_text).await.is_ok() {
+                    } else {
+                        None
+                    };
+                    if self
+                        .send_reply(platform, channel_id, &message, &result_text)
+                        .await
+                        .is_ok()
+                    {
                         if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
                             let _ = svc.mark_ws_delivered(&id).await;
                         }
@@ -209,24 +249,42 @@ impl MessageProcessor {
                 }
                 Err(e) => {
                     let error_msg = format!("Workflow execution error: {}", e);
-                    self.send_reply(platform, channel_id, &message, &error_msg).await?;
+                    self.send_reply(platform, channel_id, &message, &error_msg)
+                        .await?;
                     return Ok(());
                 }
             }
         }
 
         // 🆕 FIX: 元问题快速路径（如"有哪些skills"），直接回答不走LLM
-        if self.try_answer_meta_question(platform, channel_id, &message, &content, &session.id, &db_session_id).await? {
+        if self
+            .try_answer_meta_question(
+                platform,
+                channel_id,
+                &message,
+                &content,
+                &session.id,
+                &db_session_id,
+            )
+            .await?
+        {
             return Ok(());
         }
 
         // 4. 添加用户消息到会话历史
-        let image_urls: Vec<String> = images.iter()
+        let image_urls: Vec<String> = images
+            .iter()
             .map(|img| format!("data:{};base64,{},", img.mime_type, img.data))
             .collect();
 
         self.session_manager
-            .add_message(&session.id, "user", &content, !images.is_empty(), image_urls)
+            .add_message(
+                &session.id,
+                "user",
+                &content,
+                !images.is_empty(),
+                image_urls,
+            )
             .await
             .map_err(|e| GatewayError::Internal {
                 message: format!("Failed to add message to session: {}", e),
@@ -235,41 +293,49 @@ impl MessageProcessor {
 
         // 4.5 持久化用户消息
         if let Some(ref svc) = self.webchat_service {
-            let _ = svc.save_message(
-                &db_session_id,
-                "user",
-                &content,
-                Some(serde_json::json!({
-                    "platform": platform.to_string(),
-                    "sender_id": user_id,
-                    "has_image": !images.is_empty(),
-                    "channel_id": channel_id,
-                })),
-                None,
-            ).await;
+            let _ = svc
+                .save_message(
+                    &db_session_id,
+                    "user",
+                    &content,
+                    Some(serde_json::json!({
+                        "platform": platform.to_string(),
+                        "sender_id": user_id,
+                        "has_image": !images.is_empty(),
+                        "channel_id": channel_id,
+                    })),
+                    None,
+                )
+                .await;
         }
 
         // 5. 构建 LLM 上下文（包含历史消息）
         // 🆕 FIX: Limit history to 6 turns and truncate long messages.
-        let history = self.session_manager
+        let history = self
+            .session_manager
             .get_history_for_llm(&session.id, 6)
             .await
             .map_err(|e| GatewayError::Internal {
                 message: format!("Failed to get session history: {}", e),
                 correlation_id: Uuid::new_v4().to_string(),
             })?;
-        let history: Vec<_> = history.into_iter().map(|mut m| {
-            if m.content.chars().count() > 300 {
-                m.content = m.content.chars().take(300).collect::<String>() + "...";
-            }
-            m
-        }).collect();
+        let history: Vec<_> = history
+            .into_iter()
+            .map(|mut m| {
+                if m.content.chars().count() > 300 {
+                    m.content = m.content.chars().take(300).collect::<String>() + "...";
+                }
+                m
+            })
+            .collect();
 
         // 5.5 Memory 检索
         let (memory_context, _direct_answer) = self.build_memory_context(&content, &None).await;
 
         // 6. 调用 LLM（注入记忆上下文）
-        let llm_response = self.call_llm_with_context(&message, &history, &images, &memory_context).await?;
+        let llm_response = self
+            .call_llm_with_context(&message, &history, &images, &memory_context)
+            .await?;
 
         // 7. 添加助手回复到会话历史
         self.session_manager
@@ -288,30 +354,41 @@ impl MessageProcessor {
                 "prompt_tokens": history.len(),
                 "completion_tokens": llm_response.len(),
             });
-            if let Ok(id) = svc.save_message(
-                &db_session_id,
-                "assistant",
-                &llm_response,
-                Some(serde_json::json!({
-                    "platform": platform.to_string(),
-                    "channel_id": channel_id,
-                })),
-                Some(token_usage),
-            ).await {
+            if let Ok(id) = svc
+                .save_message(
+                    &db_session_id,
+                    "assistant",
+                    &llm_response,
+                    Some(serde_json::json!({
+                        "platform": platform.to_string(),
+                        "channel_id": channel_id,
+                    })),
+                    Some(token_usage),
+                )
+                .await
+            {
                 saved_message_id = Some(id);
             }
         }
 
         // 8. 发送回复
-        match self.send_reply(platform, channel_id, &message, &llm_response).await {
+        match self
+            .send_reply(platform, channel_id, &message, &llm_response)
+            .await
+        {
             Ok(()) => {
                 // WebSocket 投递成功，标记已投递
-                if let (Some(ref svc), Some(ref msg_id)) = (self.webchat_service.as_ref(), saved_message_id.as_ref()) {
+                if let (Some(ref svc), Some(ref msg_id)) =
+                    (self.webchat_service.as_ref(), saved_message_id.as_ref())
+                {
                     let _ = svc.mark_ws_delivered(msg_id).await;
                 }
             }
             Err(e) => {
-                warn!("Failed to send reply via WebSocket (will be available for polling): {}", e);
+                warn!(
+                    "Failed to send reply via WebSocket (will be available for polling): {}",
+                    e
+                );
             }
         }
 
@@ -341,7 +418,10 @@ impl MessageProcessor {
             let assistant_entry = MarkdownMemoryEntry {
                 id: Uuid::new_v4(),
                 timestamp: chrono::Utc::now(),
-                title: format!("Assistant: {}", llm_response.chars().take(30).collect::<String>()),
+                title: format!(
+                    "Assistant: {}",
+                    llm_response.chars().take(30).collect::<String>()
+                ),
                 content: llm_response.clone(),
                 category: "conversation".to_string(),
                 importance: 0.5,
@@ -355,7 +435,9 @@ impl MessageProcessor {
                 },
                 session_id: Some(db_session_id.clone()),
             };
-            let _ = memory.store(MemoryFileType::Core, &assistant_entry, None).await;
+            let _ = memory
+                .store(MemoryFileType::Core, &assistant_entry, None)
+                .await;
         }
 
         Ok(())
@@ -396,8 +478,17 @@ impl MessageProcessor {
             } else {
                 for skill in skills {
                     has_skills = true;
-                    let desc = skill.skill.manifest.description.chars().take(60).collect::<String>();
-                    reply.push_str(&format!("• {}（{}）\n  {}\n", skill.skill.name, skill.skill.id, desc));
+                    let desc = skill
+                        .skill
+                        .manifest
+                        .description
+                        .chars()
+                        .take(60)
+                        .collect::<String>();
+                    reply.push_str(&format!(
+                        "• {}（{}）\n  {}\n",
+                        skill.skill.name, skill.skill.id, desc
+                    ));
                 }
             }
         } else {
@@ -420,15 +511,29 @@ impl MessageProcessor {
 
         // 持久化
         let msg_id = if let Some(ref svc) = self.webchat_service {
-            svc.save_message(db_session_id, "assistant", &reply, Some(serde_json::json!({
-                "platform": platform.to_string(),
-                "channel_id": channel_id,
-                "meta_answer": true,
-            })), None).await.ok()
-        } else { None };
+            svc.save_message(
+                db_session_id,
+                "assistant",
+                &reply,
+                Some(serde_json::json!({
+                    "platform": platform.to_string(),
+                    "channel_id": channel_id,
+                    "meta_answer": true,
+                })),
+                None,
+            )
+            .await
+            .ok()
+        } else {
+            None
+        };
 
         // 发送
-        if self.send_reply(platform, channel_id, original_message, &reply).await.is_ok() {
+        if self
+            .send_reply(platform, channel_id, original_message, &reply)
+            .await
+            .is_ok()
+        {
             if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
                 let _ = svc.mark_ws_delivered(&id).await;
             }
@@ -448,19 +553,26 @@ impl MessageProcessor {
     ) -> Result<(), GatewayError> {
         // 1. 消息去重检查
         if let Some(msg_id) = message.metadata.get("message_id") {
-            if !self.deduplicator.should_process_key(&platform.to_string(), msg_id).await {
+            if !self
+                .deduplicator
+                .should_process_key(&platform.to_string(), msg_id)
+                .await
+            {
                 warn!("🔄 重复消息，跳过处理: {}", msg_id);
                 return Ok(());
             }
         }
 
         // 2. 获取或创建会话
-        let user_id = message.metadata.get("sender_id")
+        let user_id = message
+            .metadata
+            .get("sender_id")
             .or_else(|| message.metadata.get("open_id"))
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
-        let session = self.session_manager
+        let session = self
+            .session_manager
             .get_or_create_session(platform, channel_id, &user_id)
             .await
             .map_err(|e| GatewayError::Internal {
@@ -474,13 +586,22 @@ impl MessageProcessor {
         let db_session_id = if let Some(ref svc) = self.webchat_service {
             if platform == PlatformType::WebChat {
                 // WebChat: 验证前端提供的 session_id，无效则自动创建
-                let provided_sid = message.metadata.get("session_id")
+                let provided_sid = message
+                    .metadata
+                    .get("session_id")
                     .cloned()
                     .unwrap_or_else(|| session.id.clone());
                 match svc.validate_session(&provided_sid, &user_id).await {
                     Ok(true) => provided_sid,
                     _ => {
-                        match svc.get_or_create_channel_session(&user_id, &platform.to_string(), &user_id).await {
+                        match svc
+                            .get_or_create_channel_session(
+                                &user_id,
+                                &platform.to_string(),
+                                &user_id,
+                            )
+                            .await
+                        {
                             Ok(sid) => sid,
                             Err(e) => {
                                 warn!("Failed to get/create webchat session: {}", e);
@@ -491,8 +612,15 @@ impl MessageProcessor {
                 }
             } else {
                 // 外部渠道：按 user_id + channel 查找或创建
-                let sender_id = message.metadata.get("sender_id").cloned().unwrap_or_else(|| channel_id.to_string());
-                match svc.get_or_create_channel_session(&user_id, &platform.to_string(), &sender_id).await {
+                let sender_id = message
+                    .metadata
+                    .get("sender_id")
+                    .cloned()
+                    .unwrap_or_else(|| channel_id.to_string());
+                match svc
+                    .get_or_create_channel_session(&user_id, &platform.to_string(), &sender_id)
+                    .await
+                {
                     Ok(sid) => sid,
                     Err(e) => {
                         warn!("Failed to get/create channel session: {}", e);
@@ -508,7 +636,17 @@ impl MessageProcessor {
         let (content, images) = self.process_multimodal(&message).await?;
 
         // 🆕 FIX: 元问题快速路径（如"有哪些skills"），直接回答不走LLM
-        if self.try_answer_meta_question(platform, channel_id, &message, &content, &session.id, &db_session_id).await? {
+        if self
+            .try_answer_meta_question(
+                platform,
+                channel_id,
+                &message,
+                &content,
+                &session.id,
+                &db_session_id,
+            )
+            .await?
+        {
             return Ok(());
         }
 
@@ -526,8 +664,14 @@ impl MessageProcessor {
                         .ok();
                     let msg_id = if let Some(ref svc) = self.webchat_service {
                         svc.save_message(&db_session_id, "assistant", &result_text, Some(serde_json::json!({"platform": platform.to_string(), "channel_id": channel_id})), None).await.ok()
-                    } else { None };
-                    if self.send_reply(platform, channel_id, &message, &result_text).await.is_ok() {
+                    } else {
+                        None
+                    };
+                    if self
+                        .send_reply(platform, channel_id, &message, &result_text)
+                        .await
+                        .is_ok()
+                    {
                         if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
                             let _ = svc.mark_ws_delivered(&id).await;
                         }
@@ -536,19 +680,27 @@ impl MessageProcessor {
                 }
                 Err(e) => {
                     let error_msg = format!("Workflow execution error: {}", e);
-                    self.send_reply(platform, channel_id, &message, &error_msg).await?;
+                    self.send_reply(platform, channel_id, &message, &error_msg)
+                        .await?;
                     return Ok(());
                 }
             }
         }
 
         // 4. 添加用户消息到会话历史
-        let image_urls: Vec<String> = images.iter()
+        let image_urls: Vec<String> = images
+            .iter()
             .map(|img| format!("data:{};base64,{},", img.mime_type, img.data))
             .collect();
 
         self.session_manager
-            .add_message(&session.id, "user", &content, !images.is_empty(), image_urls)
+            .add_message(
+                &session.id,
+                "user",
+                &content,
+                !images.is_empty(),
+                image_urls,
+            )
             .await
             .map_err(|e| GatewayError::Internal {
                 message: format!("Failed to add message to session: {}", e),
@@ -557,33 +709,37 @@ impl MessageProcessor {
 
         // 4.5 持久化用户消息
         if let Some(ref svc) = self.webchat_service {
-            let _ = svc.save_message(
-                &db_session_id,
-                "user",
-                &content,
-                Some(serde_json::json!({
-                    "platform": platform.to_string(),
-                    "sender_id": user_id,
-                    "has_image": !images.is_empty(),
-                    "channel_id": channel_id,
-                })),
-                None,
-            ).await;
+            let _ = svc
+                .save_message(
+                    &db_session_id,
+                    "user",
+                    &content,
+                    Some(serde_json::json!({
+                        "platform": platform.to_string(),
+                        "sender_id": user_id,
+                        "has_image": !images.is_empty(),
+                        "channel_id": channel_id,
+                    })),
+                    None,
+                )
+                .await;
         }
 
         // 5. 解析 agent_id
         let agent_id = resolver.resolve(platform, channel_id, &user_id).await?;
 
         // 6.5 Memory 检索
-        // 🆕 FIX: 先匹配 skill，统一在 build_memory_context 内注入 skill prompt 并控制总预算
+        // 🆕 FIX: 先匹配 skill，统一在 build_memory_context 内注入 skill prompt
+        // 并控制总预算
         let mut skill_match = self.try_match_skill(&content).await;
-        
-        // 🆕 FIX: Session-level skill inheritance. If current message doesn't match any skill,
-        // but the session has an active_skill from previous turns, inherit it to avoid
-        // losing skill context in multi-turn conversations.
-        // 🆕 SKILL MATCHING V2: Removed all hardcoded keyword rules (exit_keywords, domain relevance).
-        // The Agent layer now uses LLM to determine if the user has switched topics.
-        // Gateway only checks if the skill still exists and is enabled.
+
+        // 🆕 FIX: Session-level skill inheritance. If current message doesn't match any
+        // skill, but the session has an active_skill from previous turns,
+        // inherit it to avoid losing skill context in multi-turn conversations.
+        // 🆕 SKILL MATCHING V2: Removed all hardcoded keyword rules (exit_keywords,
+        // domain relevance). The Agent layer now uses LLM to determine if the
+        // user has switched topics. Gateway only checks if the skill still
+        // exists and is enabled.
         if skill_match.is_none() {
             let active_skill = session.metadata.get("active_skill").cloned();
             if let Some(skill_id) = active_skill {
@@ -598,7 +754,11 @@ impl MessageProcessor {
                                 skill.skill.manifest.description.clone(),
                                 skill.skill.manifest.prompt_template.clone(),
                             ));
-                            info!("🎯 Inherited active skill '{}' for query '{}'", skill_id, content.chars().take(40).collect::<String>());
+                            info!(
+                                "🎯 Inherited active skill '{}' for query '{}'",
+                                skill_id,
+                                content.chars().take(40).collect::<String>()
+                            );
                         }
                     }
                 }
@@ -606,14 +766,18 @@ impl MessageProcessor {
         } else {
             // Update active_skill in session metadata when a new skill is matched
             if let Some((ref skill_id, _, _, _)) = skill_match {
-                let _ = self.session_manager.update_metadata(&session.id, "active_skill", skill_id).await;
+                let _ = self
+                    .session_manager
+                    .update_metadata(&session.id, "active_skill", skill_id)
+                    .await;
             }
         }
 
         // 6. 构建 LLM 上下文（包含历史消息）
         // 🆕 FIX: Limit history to 6 turns for ALL skills to prevent prompt bloat.
         let history_limit = 6;
-        let history = self.session_manager
+        let history = self
+            .session_manager
             .get_history_for_llm(&session.id, history_limit)
             .await
             .map_err(|e| GatewayError::Internal {
@@ -621,18 +785,25 @@ impl MessageProcessor {
                 correlation_id: Uuid::new_v4().to_string(),
             })?;
         // 🆕 FIX: Truncate each history message to max 300 chars to keep prompt small.
-        let history: Vec<_> = history.into_iter().map(|mut m| {
-            if m.content.chars().count() > 300 {
-                m.content = m.content.chars().take(300).collect::<String>() + "...";
-            }
-            m
-        }).collect();
-        
-        let (memory_context, direct_answer) = self.build_memory_context(&content, &skill_match).await;
+        let history: Vec<_> = history
+            .into_iter()
+            .map(|mut m| {
+                if m.content.chars().count() > 300 {
+                    m.content = m.content.chars().take(300).collect::<String>() + "...";
+                }
+                m
+            })
+            .collect();
+
+        let (memory_context, direct_answer) =
+            self.build_memory_context(&content, &skill_match).await;
 
         // 🟢 P2 FIX: Memory 精确匹配直接返回，跳过 LLM
         if let Some(answer) = direct_answer {
-            info!("🧠 P2 FAST PATH: Memory direct answer, skipping Agent/LLM for '{}'", content.chars().take(40).collect::<String>());
+            info!(
+                "🧠 P2 FAST PATH: Memory direct answer, skipping Agent/LLM for '{}'",
+                content.chars().take(40).collect::<String>()
+            );
             // 更新会话历史
             self.session_manager
                 .add_message(&session.id, "assistant", &answer, false, vec![])
@@ -644,8 +815,14 @@ impl MessageProcessor {
             // 持久化并发送回复
             let msg_id = if let Some(ref svc) = self.webchat_service {
                 svc.save_message(&db_session_id, "assistant", &answer, Some(serde_json::json!({"platform": platform.to_string(), "channel_id": channel_id})), None).await.ok()
-            } else { None };
-            if self.send_reply(platform, channel_id, &message, &answer).await.is_ok() {
+            } else {
+                None
+            };
+            if self
+                .send_reply(platform, channel_id, &message, &answer)
+                .await
+                .is_ok()
+            {
                 if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
                     let _ = svc.mark_ws_delivered(&id).await;
                 }
@@ -654,9 +831,10 @@ impl MessageProcessor {
         }
 
         // 7. 处理 Skill planning 判断
-        // 🆕 SKILL MATCHING V2: Removed all hardcoded skill type checks (travel/planner/analytical/generative).
-        // Planning need is now determined by the Agent's LLM Intent Analyzer.
-        // Gateway no longer injects plan=true based on skill name keywords.
+        // 🆕 SKILL MATCHING V2: Removed all hardcoded skill type checks
+        // (travel/planner/analytical/generative). Planning need is now
+        // determined by the Agent's LLM Intent Analyzer. Gateway no longer
+        // injects plan=true based on skill name keywords.
         let mut has_skill_plan = false;
 
         // 8. 构造 TaskConfig
@@ -673,16 +851,20 @@ impl MessageProcessor {
         });
         if let Some((skill_id, skill_name, skill_desc, skill_prompt)) = skill_match {
             if let Some(obj) = task_input.as_object_mut() {
-                obj.insert("skill_hint".to_string(), serde_json::json!({
-                    "id": skill_id,
-                    "name": skill_name,
-                    "description": skill_desc,
-                    "prompt_template": skill_prompt,
-                }));
+                obj.insert(
+                    "skill_hint".to_string(),
+                    serde_json::json!({
+                        "id": skill_id,
+                        "name": skill_name,
+                        "description": skill_desc,
+                        "prompt_template": skill_prompt,
+                    }),
+                );
                 if has_skill_plan {
                     obj.insert("plan".to_string(), serde_json::json!("true"));
                 }
-                // 🆕 FIX: For weather_assistant, fetch real-time weather data and inject into task_input
+                // 🆕 FIX: For weather_assistant, fetch real-time weather data and inject into
+                // task_input
                 if skill_name.to_lowercase().contains("weather") {
                     if let Some(city) = Self::extract_city_from_weather_query(&content) {
                         if let Some(weather_data) = Self::fetch_weather_data(&city).await {
@@ -703,7 +885,8 @@ impl MessageProcessor {
 
         // 🟢 P2 FIX: 发送"正在思考..."占位消息，然后后台异步执行 Agent
         let placeholder = "🤖 正在思考，请稍候...";
-        self.send_reply(platform, channel_id, &message, placeholder).await?;
+        self.send_reply(platform, channel_id, &message, placeholder)
+            .await?;
 
         // 克隆需要在后台任务中使用的数据
         let processor = Arc::new(MessageProcessor {
@@ -734,60 +917,87 @@ impl MessageProcessor {
 
             let result = agent_runtime_bg.execute_task(&agent_id_bg, task).await;
             let llm_response = match result {
-                Ok(r) if r.success => {
-                    r.output.as_str()
-                        .map(|s| s.to_string())
-                        .or_else(|| r.output.get("response").and_then(|v| v.as_str()).map(|s| s.to_string()))
-                        .unwrap_or_else(|| "Agent returned empty response".to_string())
-                }
-                Ok(r) => {
-                    r.error.clone().unwrap_or_else(|| "Agent processing failed".to_string())
-                }
+                Ok(r) if r.success => r
+                    .output
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        r.output
+                            .get("response")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| "Agent returned empty response".to_string()),
+                Ok(r) => r
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Agent processing failed".to_string()),
                 Err(e) => {
                     error!("❌ [BG] Agent execution failed: {}", e);
                     format!("处理失败: {}", e)
                 }
             };
 
-            info!("🤖 [BG] Agent {} 回复 ({}ms): {}", agent_id_bg, start.elapsed().as_millis(), llm_response.chars().take(100).collect::<String>());
+            info!(
+                "🤖 [BG] Agent {} 回复 ({}ms): {}",
+                agent_id_bg,
+                start.elapsed().as_millis(),
+                llm_response.chars().take(100).collect::<String>()
+            );
 
             // 更新会话历史
-            let _ = processor.session_manager
+            let _ = processor
+                .session_manager
                 .add_message(&session_id, "assistant", &llm_response, false, vec![])
                 .await;
 
             // 持久化 AI 回复
             let mut saved_message_id: Option<String> = None;
             if let Some(ref svc) = processor.webchat_service {
-                if let Ok(id) = svc.save_message(
-                    &db_session_id_bg,
-                    "assistant",
-                    &llm_response,
-                    Some(serde_json::json!({
-                        "platform": platform_bg.to_string(),
-                        "channel_id": channel_id_bg.clone(),
-                    })),
-                    None,
-                ).await {
+                if let Ok(id) = svc
+                    .save_message(
+                        &db_session_id_bg,
+                        "assistant",
+                        &llm_response,
+                        Some(serde_json::json!({
+                            "platform": platform_bg.to_string(),
+                            "channel_id": channel_id_bg.clone(),
+                        })),
+                        None,
+                    )
+                    .await
+                {
                     saved_message_id = Some(id);
                 }
             }
 
             // 发送最终回复
-            match processor.send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response).await {
+            match processor
+                .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
+                .await
+            {
                 Ok(()) => {
-                    if let (Some(ref svc), Some(ref msg_id)) = (processor.webchat_service.as_ref(), saved_message_id.as_ref()) {
+                    if let (Some(ref svc), Some(ref msg_id)) = (
+                        processor.webchat_service.as_ref(),
+                        saved_message_id.as_ref(),
+                    ) {
                         let _ = svc.mark_ws_delivered(msg_id).await;
                     }
                 }
                 Err(e) => {
-                    warn!("[BG] Failed to send reply via WebSocket (will be available for polling): {}", e);
+                    warn!(
+                        "[BG] Failed to send reply via WebSocket (will be available for polling): \
+                         {}",
+                        e
+                    );
                 }
             }
 
             // Memory 回写
             if let Some(ref memory) = processor.memory_system {
-                use beebotos_agents::memory::markdown_storage::{MarkdownMemoryEntry, MemoryFileType};
+                use beebotos_agents::memory::markdown_storage::{
+                    MarkdownMemoryEntry, MemoryFileType,
+                };
                 let user_entry = MarkdownMemoryEntry {
                     id: Uuid::new_v4(),
                     timestamp: chrono::Utc::now(),
@@ -810,7 +1020,10 @@ impl MessageProcessor {
                 let assistant_entry = MarkdownMemoryEntry {
                     id: Uuid::new_v4(),
                     timestamp: chrono::Utc::now(),
-                    title: format!("Assistant: {}", llm_response.chars().take(30).collect::<String>()),
+                    title: format!(
+                        "Assistant: {}",
+                        llm_response.chars().take(30).collect::<String>()
+                    ),
                     content: llm_response.clone(),
                     category: "conversation".to_string(),
                     importance: 0.5,
@@ -824,7 +1037,9 @@ impl MessageProcessor {
                     },
                     session_id: Some(db_session_id_bg),
                 };
-                let _ = memory.store(MemoryFileType::Core, &assistant_entry, None).await;
+                let _ = memory
+                    .store(MemoryFileType::Core, &assistant_entry, None)
+                    .await;
             }
         });
 
@@ -841,14 +1056,20 @@ impl MessageProcessor {
             info!("🖼️ 检测到图片: {}", image_key);
 
             // 获取 channel 以下载图片
-            if let Some(channel) = self.channel_registry
+            if let Some(channel) = self
+                .channel_registry
                 .get_channel_by_platform(message.platform)
                 .await
             {
                 let message_id = message.metadata.get("message_id").map(|s| s.as_str());
 
                 // 下载图片
-                match channel.read().await.download_image(&image_key, message_id).await {
+                match channel
+                    .read()
+                    .await
+                    .download_image(&image_key, message_id)
+                    .await
+                {
                     Ok(image_data) => {
                         // 处理图片
                         let processed = self.process_image(&image_data)?;
@@ -872,7 +1093,8 @@ impl MessageProcessor {
         if let Some(pos) = content.find("image_key:") {
             let start = pos + "image_key:".len();
             let rest = &content[start..];
-            let end = rest.find(|c: char| c.is_whitespace() || c == ']')
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == ']')
                 .unwrap_or(rest.len());
             let key = rest[..end].trim();
             if !key.is_empty() {
@@ -891,7 +1113,8 @@ impl MessageProcessor {
 
     /// 处理图片
     fn process_image(&self, data: &[u8]) -> Result<ProcessedImage, GatewayError> {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
 
         // 检测图片格式
         let format = self.detect_image_format(data)?;
@@ -938,32 +1161,44 @@ impl MessageProcessor {
         })
     }
 
-    /// Extract a direct MCP skill reference like "mcp:alpaca/get_crypto_latest_trade" from text.
+    /// Extract a direct MCP skill reference like
+    /// "mcp:alpaca/get_crypto_latest_trade" from text.
     fn extract_mcp_skill_reference(content: &str) -> Option<String> {
         // Look for pattern "mcp:word/word" (alphanumeric, underscore, hyphen allowed)
         let re = Regex::new(r"mcp:[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+").ok()?;
         re.find(content).map(|m| m.as_str().to_string())
     }
 
-    /// 🆕 FIX: Gateway-side skill matching is disabled. 
-    /// LLM now has full autonomy to choose the appropriate skill from the catalog based on user intent.
-    /// This avoids keyword-misunderstanding issues where gateway matches a skill that does not fit the user request.
+    /// 🆕 FIX: Gateway-side skill matching is disabled.
+    /// LLM now has full autonomy to choose the appropriate skill from the
+    /// catalog based on user intent. This avoids keyword-misunderstanding
+    /// issues where gateway matches a skill that does not fit the user request.
     async fn try_match_skill(&self, _content: &str) -> Option<(String, String, String, String)> {
         None
     }
 
-    /// 🆕 FIX: Try to discover and install a skill from ClawHub when no local match is found.
-    /// Downloads the skill package, extracts it, and registers it into the local SkillRegistry.
-    async fn try_install_from_clawhub(&self, query: &str) -> Option<(String, String, String, String)> {
+    /// 🆕 FIX: Try to discover and install a skill from ClawHub when no local
+    /// match is found. Downloads the skill package, extracts it, and
+    /// registers it into the local SkillRegistry.
+    async fn try_install_from_clawhub(
+        &self,
+        query: &str,
+    ) -> Option<(String, String, String, String)> {
         let client = self.clawhub_client.as_ref()?;
         let registry = self.skill_registry.as_ref()?;
 
         // 1. Search ClawHub for relevant skills
-        info!("🔍 ClawHub: searching for skill matching '{}'", query.chars().take(40).collect::<String>());
+        info!(
+            "🔍 ClawHub: searching for skill matching '{}'",
+            query.chars().take(40).collect::<String>()
+        );
         let results = match client.search_skills(query).await {
             Ok(r) if !r.is_empty() => r,
             Ok(_) => {
-                info!("🔍 ClawHub: no skills found for '{}'", query.chars().take(40).collect::<String>());
+                info!(
+                    "🔍 ClawHub: no skills found for '{}'",
+                    query.chars().take(40).collect::<String>()
+                );
                 return None;
             }
             Err(e) => {
@@ -983,22 +1218,34 @@ impl MessageProcessor {
                 return None;
             }
         };
-        info!("🔍 ClawHub: downloaded {} bytes for '{}'", pkg_bytes.len(), best.id);
+        info!(
+            "🔍 ClawHub: downloaded {} bytes for '{}'",
+            pkg_bytes.len(),
+            best.id
+        );
 
         // 3. Save to skills/market/{id}/
         let market_dir = std::path::PathBuf::from("skills/market").join(&best.id);
         if let Err(e) = tokio::fs::create_dir_all(&market_dir).await {
-            warn!("🔍 ClawHub: failed to create dir '{}': {}", market_dir.display(), e);
+            warn!(
+                "🔍 ClawHub: failed to create dir '{}': {}",
+                market_dir.display(),
+                e
+            );
             return None;
         }
 
         // Try to parse as ZIP first, then fallback to raw markdown
-        let skill_md_content = if pkg_bytes.len() > 4 && pkg_bytes[0..4] == [0x50, 0x4B, 0x03, 0x04] {
+        let skill_md_content = if pkg_bytes.len() > 4 && pkg_bytes[0..4] == [0x50, 0x4B, 0x03, 0x04]
+        {
             // ZIP archive
             match Self::extract_skill_md_from_zip(&pkg_bytes, &market_dir).await {
                 Ok(content) => content,
                 Err(e) => {
-                    warn!("🔍 ClawHub: ZIP extraction failed: {}, falling back to description", e);
+                    warn!(
+                        "🔍 ClawHub: ZIP extraction failed: {}, falling back to description",
+                        e
+                    );
                     Self::build_fallback_skill_md(best)
                 }
             }
@@ -1059,7 +1306,11 @@ impl MessageProcessor {
                 version: beebotos_agents::skills::registry::Version::new(1, 0, 0),
                 description: description.clone(),
                 author: best.author.clone(),
-                capabilities: if capabilities.is_empty() { vec!["llm:chat".to_string()] } else { capabilities },
+                capabilities: if capabilities.is_empty() {
+                    vec!["llm:chat".to_string()]
+                } else {
+                    capabilities
+                },
                 permissions: vec!["llm:chat".to_string()],
                 entry_point: "run".to_string(),
                 license: best.license.clone(),
@@ -1075,8 +1326,13 @@ impl MessageProcessor {
         };
 
         // 5. Register into SkillRegistry
-        registry.register(skill, "market", best.capabilities.clone()).await;
-        info!("✅ ClawHub: skill '{}' installed and registered from marketplace", best.id);
+        registry
+            .register(skill, "market", best.capabilities.clone())
+            .await;
+        info!(
+            "✅ ClawHub: skill '{}' installed and registered from marketplace",
+            best.id
+        );
 
         Some((
             best.id.clone(),
@@ -1086,24 +1342,31 @@ impl MessageProcessor {
         ))
     }
 
-    /// Build fallback markdown skill from metadata when download/extraction fails
+    /// Build fallback markdown skill from metadata when download/extraction
+    /// fails
     fn build_fallback_skill_md(meta: &crate::clients::SkillMetadata) -> String {
         format!(
-            "# {}\n\n## Description\n{}\n\n## Prompt Template\n\nYou are a helpful assistant specialized in {}. Answer user questions accurately and concisely.\n",
+            "# {}\n\n## Description\n{}\n\n## Prompt Template\n\nYou are a helpful assistant \
+             specialized in {}. Answer user questions accurately and concisely.\n",
             meta.name, meta.description, meta.name
         )
     }
 
     /// Extract SKILL.md from a ZIP archive
-    async fn extract_skill_md_from_zip(data: &[u8], _dest_dir: &std::path::Path) -> Result<String, String> {
+    async fn extract_skill_md_from_zip(
+        data: &[u8],
+        _dest_dir: &std::path::Path,
+    ) -> Result<String, String> {
         use std::io::{Cursor, Read};
         let cursor = Cursor::new(data);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("ZIP error: {}", e))?;
-        
+
         // Try to find SKILL.md or any .md file
         let mut found = None;
         for i in 0..archive.len() {
-            let file = archive.by_index(i).map_err(|e| format!("ZIP read error: {}", e))?;
+            let file = archive
+                .by_index(i)
+                .map_err(|e| format!("ZIP read error: {}", e))?;
             let name = file.name().to_lowercase();
             if name.ends_with("skill.md") || name.ends_with(".md") {
                 found = Some(i);
@@ -1112,11 +1375,14 @@ impl MessageProcessor {
                 }
             }
         }
-        
+
         if let Some(idx) = found {
-            let mut file = archive.by_index(idx).map_err(|e| format!("ZIP read error: {}", e))?;
+            let mut file = archive
+                .by_index(idx)
+                .map_err(|e| format!("ZIP read error: {}", e))?;
             let mut content = String::new();
-            file.read_to_string(&mut content).map_err(|e| format!("ZIP text read error: {}", e))?;
+            file.read_to_string(&mut content)
+                .map_err(|e| format!("ZIP text read error: {}", e))?;
             Ok(content)
         } else {
             Err("No .md file found in ZIP".to_string())
@@ -1155,7 +1421,10 @@ impl MessageProcessor {
     }
 
     /// 🟢 P1 FIX: Try to execute a workflow from chat command `/workflow <id>`
-    async fn try_execute_workflow_command(&self, content: &str) -> Option<Result<String, GatewayError>> {
+    async fn try_execute_workflow_command(
+        &self,
+        content: &str,
+    ) -> Option<Result<String, GatewayError>> {
         let trimmed = content.trim();
         if !trimmed.starts_with("/workflow") {
             return None;
@@ -1163,7 +1432,9 @@ impl MessageProcessor {
 
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
         if parts.len() < 2 {
-            return Some(Err(GatewayError::bad_request("Usage: /workflow <workflow_id>")));
+            return Some(Err(GatewayError::bad_request(
+                "Usage: /workflow <workflow_id>",
+            )));
         }
 
         let workflow_id = parts[1];
@@ -1181,11 +1452,19 @@ impl MessageProcessor {
         // Build temporary agent for execution
         let skill_registry = match self.skill_registry.as_ref() {
             Some(r) => r.clone(),
-            None => return Some(Err(GatewayError::service_unavailable("SkillRegistry", "Not initialized"))),
+            None => {
+                return Some(Err(GatewayError::service_unavailable(
+                    "SkillRegistry",
+                    "Not initialized",
+                )))
+            }
         };
 
-        let llm_interface: Arc<dyn beebotos_agents::communication::LLMCallInterface> =
-            Arc::new(crate::services::agent_runtime_manager::GatewayLLMInterface::new(self.llm_service.clone()));
+        let llm_interface: Arc<dyn beebotos_agents::communication::LLMCallInterface> = Arc::new(
+            crate::services::agent_runtime_manager::GatewayLLMInterface::new(
+                self.llm_service.clone(),
+            ),
+        );
 
         let agent = beebotos_agents::AgentBuilder::new("workflow-runner")
             .description("Temporary agent for workflow execution")
@@ -1203,10 +1482,18 @@ impl MessageProcessor {
         match engine.execute(&def, &agent, trigger_context, None).await {
             Ok(instance) => {
                 let status = instance.status.to_string();
-                let mut result = format!("✅ Workflow '{}' completed with status: {}\n\n", workflow_id, status);
+                let mut result = format!(
+                    "✅ Workflow '{}' completed with status: {}\n\n",
+                    workflow_id, status
+                );
 
                 for (step_id, step_state) in &instance.step_states {
-                    result.push_str(&format!("- **{}**: {} ({}s)\n", step_id, step_state.status, step_state.duration_secs()));
+                    result.push_str(&format!(
+                        "- **{}**: {} ({}s)\n",
+                        step_id,
+                        step_state.status,
+                        step_state.duration_secs()
+                    ));
                     if let Some(ref err) = step_state.error {
                         result.push_str(&format!("  - Error: {}\n", err));
                     }
@@ -1215,7 +1502,11 @@ impl MessageProcessor {
                 if !instance.error_log.is_empty() {
                     result.push_str("\n**Errors:**\n");
                     for err in &instance.error_log {
-                        result.push_str(&format!("- {}: {}\n", err.step_id.as_deref().unwrap_or("workflow"), err.message));
+                        result.push_str(&format!(
+                            "- {}: {}\n",
+                            err.step_id.as_deref().unwrap_or("workflow"),
+                            err.message
+                        ));
                     }
                 }
 
@@ -1228,9 +1519,13 @@ impl MessageProcessor {
         }
     }
 
-    /// 🟢 P1 FIX: Try to match and execute a workflow by natural language content
-    /// (e.g. user says "生成今日早报" matches workflow named "daily_news")
-    async fn try_match_workflow_by_content(&self, content: &str) -> Option<Result<String, GatewayError>> {
+    /// 🟢 P1 FIX: Try to match and execute a workflow by natural language
+    /// content (e.g. user says "生成今日早报" matches workflow named
+    /// "daily_news")
+    async fn try_match_workflow_by_content(
+        &self,
+        content: &str,
+    ) -> Option<Result<String, GatewayError>> {
         // Skip commands and very short inputs
         let trimmed = content.trim();
         if trimmed.starts_with('/') || trimmed.len() < 4 {
@@ -1239,15 +1534,34 @@ impl MessageProcessor {
 
         let lower_content = trimmed.to_lowercase();
 
-        // 🟢 P1 FIX: Negative word filtering — skip if user explicitly rejects or denies
+        // 🟢 P1 FIX: Negative word filtering — skip if user explicitly rejects or
+        // denies
         let negative_words = [
-            "不要", "不想", "别", "停止", "取消", "不需要", "不用", "不",
-            "no ", "don't ", "stop ", "cancel ", "not ", "never ", "no need",
-            "don't want", "stop doing", "cancel the",
+            "不要",
+            "不想",
+            "别",
+            "停止",
+            "取消",
+            "不需要",
+            "不用",
+            "不",
+            "no ",
+            "don't ",
+            "stop ",
+            "cancel ",
+            "not ",
+            "never ",
+            "no need",
+            "don't want",
+            "stop doing",
+            "cancel the",
         ];
         for neg in &negative_words {
             if lower_content.contains(neg) {
-                debug!("Workflow natural-language match skipped due to negative word '{}'", neg.trim());
+                debug!(
+                    "Workflow natural-language match skipped due to negative word '{}'",
+                    neg.trim()
+                );
                 return None;
             }
         }
@@ -1284,7 +1598,10 @@ impl MessageProcessor {
 
             // Only consider workflows with manual trigger for natural language matching
             let has_manual = def.triggers.iter().any(|t| {
-                matches!(t.trigger_type, beebotos_agents::workflow::TriggerType::Manual { .. })
+                matches!(
+                    t.trigger_type,
+                    beebotos_agents::workflow::TriggerType::Manual { .. }
+                )
             });
             if !has_manual {
                 score = 0;
@@ -1303,16 +1620,27 @@ impl MessageProcessor {
             return None;
         }
 
-        info!("Natural language workflow match: '{}' -> {} (score: {})", trimmed, def.id, score);
+        info!(
+            "Natural language workflow match: '{}' -> {} (score: {})",
+            trimmed, def.id, score
+        );
 
         // Execute matched workflow
         let skill_registry = match self.skill_registry.as_ref() {
             Some(r) => r.clone(),
-            None => return Some(Err(GatewayError::service_unavailable("SkillRegistry", "Not initialized"))),
+            None => {
+                return Some(Err(GatewayError::service_unavailable(
+                    "SkillRegistry",
+                    "Not initialized",
+                )))
+            }
         };
 
-        let llm_interface: Arc<dyn beebotos_agents::communication::LLMCallInterface> =
-            Arc::new(crate::services::agent_runtime_manager::GatewayLLMInterface::new(self.llm_service.clone()));
+        let llm_interface: Arc<dyn beebotos_agents::communication::LLMCallInterface> = Arc::new(
+            crate::services::agent_runtime_manager::GatewayLLMInterface::new(
+                self.llm_service.clone(),
+            ),
+        );
 
         let agent = beebotos_agents::AgentBuilder::new("workflow-runner")
             .description("Temporary agent for workflow execution")
@@ -1331,9 +1659,17 @@ impl MessageProcessor {
         match engine.execute(def, &agent, trigger_context, None).await {
             Ok(instance) => {
                 let status = instance.status.to_string();
-                let mut result = format!("✅ Workflow '{}' completed with status: {}\n\n", def.id, status);
+                let mut result = format!(
+                    "✅ Workflow '{}' completed with status: {}\n\n",
+                    def.id, status
+                );
                 for (step_id, step_state) in &instance.step_states {
-                    result.push_str(&format!("- **{}**: {} ({}s)\n", step_id, step_state.status, step_state.duration_secs()));
+                    result.push_str(&format!(
+                        "- **{}**: {} ({}s)\n",
+                        step_id,
+                        step_state.status,
+                        step_state.duration_secs()
+                    ));
                     if let Some(ref err) = step_state.error {
                         result.push_str(&format!("  - Error: {}\n", err));
                     }
@@ -1341,7 +1677,11 @@ impl MessageProcessor {
                 if !instance.error_log.is_empty() {
                     result.push_str("\n**Errors:**\n");
                     for err in &instance.error_log {
-                        result.push_str(&format!("- {}: {}\n", err.step_id.as_deref().unwrap_or("workflow"), err.message));
+                        result.push_str(&format!(
+                            "- {}: {}\n",
+                            err.step_id.as_deref().unwrap_or("workflow"),
+                            err.message
+                        ));
                     }
                 }
                 Some(Ok(result))
@@ -1353,10 +1693,10 @@ impl MessageProcessor {
         }
     }
 
-    /// 🟢 P1 FIX: Check if pattern matches content with word-boundary awareness.
-    /// For ASCII text, uses regex word boundaries to avoid substring matches like
-    /// "news" matching inside "newspaper". For non-ASCII (e.g. Chinese), falls back
-    /// to simple contains.
+    /// 🟢 P1 FIX: Check if pattern matches content with word-boundary
+    /// awareness. For ASCII text, uses regex word boundaries to avoid
+    /// substring matches like "news" matching inside "newspaper". For
+    /// non-ASCII (e.g. Chinese), falls back to simple contains.
     fn is_substring_match(content: &str, pattern: &str) -> bool {
         if pattern.is_empty() {
             return false;
@@ -1381,24 +1721,40 @@ impl MessageProcessor {
 
     /// P2 FIX: 提取共享的 Memory 搜索逻辑，消除双重搜索
     ///
-    /// 🟢 P2 FIX: 返回 (memory_context, direct_answer)。如果 Memory 中有高置信度的精确匹配问答对，
-    /// 直接提取答案返回，跳过 LLM 调用。
+    /// 🟢 P2 FIX: 返回 (memory_context, direct_answer)。如果 Memory
+    /// 中有高置信度的精确匹配问答对， 直接提取答案返回，跳过 LLM 调用。
     ///
     /// 🆕 FIX (方案B): 固定档案与动态记忆分独立预算，简单查询可跳过冗余档案
-    async fn build_memory_context(&self, content: &str, skill_match: &Option<(String, String, String, String)>) -> (String, Option<String>) {
+    async fn build_memory_context(
+        &self,
+        content: &str,
+        skill_match: &Option<(String, String, String, String)>,
+    ) -> (String, Option<String>) {
         let mut memory_context = String::new();
         let mut direct_answer: Option<String> = None;
 
         // 🆕 FIX: 根据 query 复杂度动态调整参数
-        // 🆕 SKILL MATCHING V2: Removed hardcoded skill-based profile skipping (travel_planner/weather).
-        // All skills now receive consistent context; the Agent's LLM decides what to use.
+        // 🆕 SKILL MATCHING V2: Removed hardcoded skill-based profile skipping
+        // (travel_planner/weather). All skills now receive consistent context;
+        // the Agent's LLM decides what to use.
         let char_count = content.chars().count();
         let is_simple = char_count <= 10;
         let is_complex = char_count > 30
-            || content.contains("计划") || content.contains("规划") || content.contains("步骤")
-            || content.contains("安排") || content.contains("攻略") || content.contains("对比")
-            || content.contains("分析") || content.contains("总结");
-        let search_limit = if is_complex { 6 } else if char_count > 15 { 4 } else { 2 };
+            || content.contains("计划")
+            || content.contains("规划")
+            || content.contains("步骤")
+            || content.contains("安排")
+            || content.contains("攻略")
+            || content.contains("对比")
+            || content.contains("分析")
+            || content.contains("总结");
+        let search_limit = if is_complex {
+            6
+        } else if char_count > 15 {
+            4
+        } else {
+            2
+        };
 
         // 🆕 FIX (方案B): 独立预算体系
         // 简单查询：固定档案 300 chars + 动态记忆 400 chars
@@ -1411,18 +1767,26 @@ impl MessageProcessor {
         } else {
             (600, 800)
         };
-        // 🆕 FIX: 当外部注入了大段 skill prompt 等额外 context 时，相应缩减 dynamic memory budget
+        // 🆕 FIX: 当外部注入了大段 skill prompt 等额外 context 时，相应缩减 dynamic
+        // memory budget
         let extra_context_len = skill_match.as_ref().map_or(0, |(_, name, _, prompt)| {
-            let wrapper_len = format!("\n\n[系统提示：你当前正在使用 {} 技能处理此请求。请遵循以下专业指引]\n", name).chars().count();
+            let wrapper_len = format!(
+                "\n\n[系统提示：你当前正在使用 {} 技能处理此请求。请遵循以下专业指引]\n",
+                name
+            )
+            .chars()
+            .count();
             prompt.chars().count() + wrapper_len
         });
         let adjusted_dynamic_budget = dynamic_budget.saturating_sub(extra_context_len).max(150);
 
         // 🆕 FIX: 前缀文本长度预扣，确保各段总长度（含前缀）不超预算
-        let system_prefix = "\n\n[系统提示：以下是该用户的固定档案和AI人格设定，回答时必须始终遵守]\n";
+        let system_prefix =
+            "\n\n[系统提示：以下是该用户的固定档案和AI人格设定，回答时必须始终遵守]\n";
         let dynamic_prefix = "\n\n[系统提示：以下是该用户的历史记忆，回答时必须结合这些信息]\n";
         let system_context_budget = system_budget.saturating_sub(system_prefix.chars().count());
-        let dynamic_context_budget = adjusted_dynamic_budget.saturating_sub(dynamic_prefix.chars().count());
+        let dynamic_context_budget =
+            adjusted_dynamic_budget.saturating_sub(dynamic_prefix.chars().count());
 
         // 🆕 FIX: 预加载 USER.md 和 SOUL.md 作为固定系统上下文
         if let Some(ref memory) = self.memory_system {
@@ -1434,22 +1798,32 @@ impl MessageProcessor {
                 if is_simple {
                     // 🆕 FIX: 极简模式也加载核心用户档案（名字、语言偏好等关键字段）
                     // 先加载 USER.md 的前 2 条有效关键信息
-                    if let Ok(entries) = storage.read_entries(beebotos_agents::memory::MemoryFileType::User, None).await {
+                    if let Ok(entries) = storage
+                        .read_entries(beebotos_agents::memory::MemoryFileType::User, None)
+                        .await
+                    {
                         let mut user_parts = Vec::new();
                         for entry in entries {
                             let trimmed = entry.content.trim();
                             let is_placeholder = trimmed.contains("*To be filled")
                                 || trimmed.starts_with("- Name:") && trimmed.len() < 12
-                                || trimmed.starts_with("- Preferred language:") && trimmed.len() < 25
+                                || trimmed.starts_with("- Preferred language:")
+                                    && trimmed.len() < 25
                                 || trimmed.starts_with("- Timezone:") && trimmed.len() < 15
-                                || trimmed.starts_with("- Communication style:") && trimmed.len() < 26
-                                || trimmed.starts_with("- Notification preferences:") && trimmed.len() < 31
-                                || trimmed.starts_with("- Professional background:") && trimmed.len() < 30
+                                || trimmed.starts_with("- Communication style:")
+                                    && trimmed.len() < 26
+                                || trimmed.starts_with("- Notification preferences:")
+                                    && trimmed.len() < 31
+                                || trimmed.starts_with("- Professional background:")
+                                    && trimmed.len() < 30
                                 || trimmed.starts_with("- Technical skills:") && trimmed.len() < 23
                                 || trimmed.starts_with("- Hobbies:") && trimmed.len() < 14;
                             if !trimmed.is_empty() && !is_placeholder {
                                 user_parts.push(trimmed.to_string());
-                                if user_parts.len() >= 1 { break; }  // 🆕 FIX: 简单模式只取1条最关键档案，给SOUL.md留空间
+                                if user_parts.len() >= 1 {
+                                    break;
+                                } // 🆕 FIX: 简单模式只取1条最关键档案，给SOUL.
+                                  // md留空间
                             }
                         }
                         if !user_parts.is_empty() {
@@ -1458,15 +1832,24 @@ impl MessageProcessor {
                                 system_context.push_str(&part);
                                 system_context.push('\n');
                             }
-                            info!("📄 Simple query mode: loaded USER.md core profile ({} entries)", user_parts.len());
+                            info!(
+                                "📄 Simple query mode: loaded USER.md core profile ({} entries)",
+                                user_parts.len()
+                            );
                         }
                     }
 
                     // 再加载 SOUL.md 的第一句核心人格描述
-                    if let Ok(entries) = storage.read_entries(beebotos_agents::memory::MemoryFileType::Soul, None).await {
+                    if let Ok(entries) = storage
+                        .read_entries(beebotos_agents::memory::MemoryFileType::Soul, None)
+                        .await
+                    {
                         for entry in entries {
                             let trimmed = entry.content.trim();
-                            if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("---") {
+                            if !trimmed.is_empty()
+                                && !trimmed.starts_with('#')
+                                && !trimmed.starts_with("---")
+                            {
                                 let first_line = trimmed.lines().next().unwrap_or(trimmed);
                                 if first_line.len() > 10 {
                                     if !system_context.is_empty() {
@@ -1481,25 +1864,38 @@ impl MessageProcessor {
                         }
                     }
                     if system_context.is_empty() {
-                        system_context = "You are a helpful assistant for BeeBotOS. Answer the user in a friendly and concise manner.\n".to_string();
+                        system_context = "You are a helpful assistant for BeeBotOS. Answer the \
+                                          user in a friendly and concise manner.\n"
+                            .to_string();
                     }
-                    info!("📄 Simple query mode: loaded minimal persona ({} chars)", system_context.chars().count());
+                    info!(
+                        "📄 Simple query mode: loaded minimal persona ({} chars)",
+                        system_context.chars().count()
+                    );
                 } else {
                     // 标准模式：加载 USER.md + SOUL.md
                     // Read USER.md
-                    match storage.read_entries(beebotos_agents::memory::MemoryFileType::User, None).await {
+                    match storage
+                        .read_entries(beebotos_agents::memory::MemoryFileType::User, None)
+                        .await
+                    {
                         Ok(entries) => {
                             let mut user_parts = Vec::new();
                             for entry in entries {
                                 let trimmed = entry.content.trim();
                                 let is_placeholder = trimmed.contains("*To be filled")
                                     || trimmed.starts_with("- Name:") && trimmed.len() < 12
-                                    || trimmed.starts_with("- Preferred language:") && trimmed.len() < 25
+                                    || trimmed.starts_with("- Preferred language:")
+                                        && trimmed.len() < 25
                                     || trimmed.starts_with("- Timezone:") && trimmed.len() < 15
-                                    || trimmed.starts_with("- Communication style:") && trimmed.len() < 26
-                                    || trimmed.starts_with("- Notification preferences:") && trimmed.len() < 31
-                                    || trimmed.starts_with("- Professional background:") && trimmed.len() < 30
-                                    || trimmed.starts_with("- Technical skills:") && trimmed.len() < 23
+                                    || trimmed.starts_with("- Communication style:")
+                                        && trimmed.len() < 26
+                                    || trimmed.starts_with("- Notification preferences:")
+                                        && trimmed.len() < 31
+                                    || trimmed.starts_with("- Professional background:")
+                                        && trimmed.len() < 30
+                                    || trimmed.starts_with("- Technical skills:")
+                                        && trimmed.len() < 23
                                     || trimmed.starts_with("- Hobbies:") && trimmed.len() < 14;
                                 if !trimmed.is_empty() && !is_placeholder {
                                     user_parts.push(trimmed.to_string());
@@ -1523,21 +1919,33 @@ impl MessageProcessor {
                     }
 
                     // Read SOUL.md
-                    match storage.read_entries(beebotos_agents::memory::MemoryFileType::Soul, None).await {
+                    match storage
+                        .read_entries(beebotos_agents::memory::MemoryFileType::Soul, None)
+                        .await
+                    {
                         Ok(entries) => {
                             let mut soul_parts = Vec::new();
                             for entry in entries {
                                 let trimmed = entry.content.trim();
                                 let is_placeholder = trimmed.contains("Helpful and friendly")
                                     && trimmed.len() < 30
-                                    || trimmed.starts_with("- Professional but approachable") && trimmed.len() < 35
-                                    || trimmed.starts_with("- Detail-oriented") && trimmed.len() < 20
-                                    || trimmed.starts_with("- Clear and concise") && trimmed.len() < 22
-                                    || trimmed.starts_with("- Use examples when helpful") && trimmed.len() < 30
-                                    || trimmed.starts_with("- Ask clarifying questions when needed") && trimmed.len() < 42
-                                    || trimmed.starts_with("- Respect user privacy") && trimmed.len() < 25
-                                    || trimmed.starts_with("- Decline harmful requests") && trimmed.len() < 30
-                                    || trimmed.starts_with("- Be honest about limitations") && trimmed.len() < 32;
+                                    || trimmed.starts_with("- Professional but approachable")
+                                        && trimmed.len() < 35
+                                    || trimmed.starts_with("- Detail-oriented")
+                                        && trimmed.len() < 20
+                                    || trimmed.starts_with("- Clear and concise")
+                                        && trimmed.len() < 22
+                                    || trimmed.starts_with("- Use examples when helpful")
+                                        && trimmed.len() < 30
+                                    || trimmed
+                                        .starts_with("- Ask clarifying questions when needed")
+                                        && trimmed.len() < 42
+                                    || trimmed.starts_with("- Respect user privacy")
+                                        && trimmed.len() < 25
+                                    || trimmed.starts_with("- Decline harmful requests")
+                                        && trimmed.len() < 30
+                                    || trimmed.starts_with("- Be honest about limitations")
+                                        && trimmed.len() < 32;
                                 if !trimmed.is_empty() && !is_placeholder {
                                     soul_parts.push(trimmed.to_string());
                                 }
@@ -1567,7 +1975,7 @@ impl MessageProcessor {
                         let suffix = "\n...（档案已精简）\n";
                         let suffix_len = suffix.chars().count();
                         let truncate_limit = system_context_budget.saturating_sub(suffix_len);
-                        
+
                         let mut truncated = String::new();
                         let mut char_count = 0;
                         for ch in system_context.chars() {
@@ -1579,14 +1987,18 @@ impl MessageProcessor {
                         }
                         truncated.push_str(suffix);
                         system_context = truncated;
-                        
+
                         debug_assert!(
                             system_context.chars().count() <= system_context_budget,
                             "System context truncation failed: {} > {}",
                             system_context.chars().count(),
                             system_context_budget
                         );
-                        info!("📄 System context truncated to {} chars (budget={})", system_context.chars().count(), system_budget);
+                        info!(
+                            "📄 System context truncated to {} chars (budget={})",
+                            system_context.chars().count(),
+                            system_budget
+                        );
                     }
                     memory_context.push_str(system_prefix);
                     memory_context.push_str(&system_context);
@@ -1595,18 +2007,29 @@ impl MessageProcessor {
 
             match memory.search(content, search_limit).await {
                 Ok(results) if !results.is_empty() => {
-                    info!("Memory search returned {} results (limit={}) for query '{}'", results.len(), search_limit, content.chars().take(40).collect::<String>());
+                    info!(
+                        "Memory search returned {} results (limit={}) for query '{}'",
+                        results.len(),
+                        search_limit,
+                        content.chars().take(40).collect::<String>()
+                    );
                     let content_lower = content.to_lowercase().trim().to_string();
 
                     // 🟢 P2 FIX: 检查是否有精确问答对可直接返回
                     for r in &results {
                         let mem_lower = r.entry.content.to_lowercase();
                         if mem_lower.contains(&content_lower) {
-                            for marker in &["assistant:", "答：", "a:", "回答：", "助手："] {
+                            for marker in &["assistant:", "答：", "a:", "回答：", "助手："]
+                            {
                                 if let Some(pos) = mem_lower.find(marker) {
-                                    let answer = r.entry.content[pos + marker.len()..].trim().to_string();
+                                    let answer =
+                                        r.entry.content[pos + marker.len()..].trim().to_string();
                                     if answer.chars().count() > 5 && answer.chars().count() < 500 {
-                                        info!("🧠 P2 MEMORY DIRECT HIT: 精确匹配，直接返回答案 ({} chars)", answer.chars().count());
+                                        info!(
+                                            "🧠 P2 MEMORY DIRECT HIT: 精确匹配，直接返回答案 ({} \
+                                             chars)",
+                                            answer.chars().count()
+                                        );
                                         direct_answer = Some(answer);
                                         break;
                                     }
@@ -1618,7 +2041,8 @@ impl MessageProcessor {
                         }
                     }
 
-                    let filtered: Vec<_> = results.iter()
+                    let filtered: Vec<_> = results
+                        .iter()
                         .filter(|r| !r.entry.content.to_lowercase().contains(&content_lower))
                         .take(search_limit)
                         .collect();
@@ -1635,7 +2059,8 @@ impl MessageProcessor {
                                 let mut truncated = String::new();
                                 let mut char_count = 0;
                                 for ch in entry_text.chars() {
-                                    if char_count >= MAX_ENTRY_LEN - 3 { // 留 3 字符给 "..."
+                                    if char_count >= MAX_ENTRY_LEN - 3 {
+                                        // 留 3 字符给 "..."
                                         break;
                                     }
                                     truncated.push(ch);
@@ -1653,32 +2078,42 @@ impl MessageProcessor {
                             memory_context.push_str(&entry);
                             total_chars += entry_chars;
                         }
-                        info!("Injecting memory context ({} chars, system_budget={}, dynamic_budget={}) into LLM prompt", memory_context.chars().count(), system_budget, adjusted_dynamic_budget);
+                        info!(
+                            "Injecting memory context ({} chars, system_budget={}, \
+                             dynamic_budget={}) into LLM prompt",
+                            memory_context.chars().count(),
+                            system_budget,
+                            adjusted_dynamic_budget
+                        );
                     } else {
                         info!("All memory results were self-referential, skipping injection");
                     }
                 }
                 Ok(_) => {
-                    info!("Memory search returned no results for query '{}'", content.chars().take(40).collect::<String>());
+                    info!(
+                        "Memory search returned no results for query '{}'",
+                        content.chars().take(40).collect::<String>()
+                    );
                 }
                 Err(e) => {
                     warn!("Memory search failed: {}", e);
                 }
             }
         }
-        
+
         // 🆕 FIX: 统一注入 skill prompt（无论 memory_system 是否存在）
         if let Some((_, ref skill_name, _, ref skill_prompt)) = skill_match {
             if !skill_prompt.is_empty() {
-                let injection = format!(
-                    "\n\n[{}]\n{}",
-                    skill_name, skill_prompt
-                );
+                let injection = format!("\n\n[{}]\n{}", skill_name, skill_prompt);
                 memory_context.push_str(&injection);
-                info!("🎯 Skill prompt injected ({} chars) for '{}'", skill_prompt.chars().count(), skill_name);
+                info!(
+                    "🎯 Skill prompt injected ({} chars) for '{}'",
+                    skill_prompt.chars().count(),
+                    skill_name
+                );
             }
         }
-        
+
         // 🆕 FIX: 总预算防御性截断
         let total_budget = system_budget + dynamic_budget;
         let current_chars = memory_context.chars().count();
@@ -1687,9 +2122,14 @@ impl MessageProcessor {
             let keep_chars = total_budget.saturating_sub(suffix.chars().count());
             memory_context = Self::truncate_to_chars(&memory_context, keep_chars);
             memory_context.push_str(suffix);
-            warn!("🎯 Total memory context truncated from {} to {} chars (total_budget={})", current_chars, memory_context.chars().count(), total_budget);
+            warn!(
+                "🎯 Total memory context truncated from {} to {} chars (total_budget={})",
+                current_chars,
+                memory_context.chars().count(),
+                total_budget
+            );
         }
-        
+
         (memory_context, direct_answer)
     }
 
@@ -1741,7 +2181,8 @@ impl MessageProcessor {
         // 检查回复中是否包含图片标记
         if response.contains("![") && response.contains("](") {
             // 需要发送图文混合消息
-            self.send_mixed_message(platform, channel_id, original, response).await
+            self.send_mixed_message(platform, channel_id, original, response)
+                .await
         } else {
             // 纯文本回复
             let reply = Message {
@@ -1754,8 +2195,16 @@ impl MessageProcessor {
                 timestamp: chrono::Utc::now(),
             };
 
-            if let Some(channel) = self.channel_registry.get_channel_by_platform(platform).await {
-                channel.read().await.send(channel_id, &reply).await
+            if let Some(channel) = self
+                .channel_registry
+                .get_channel_by_platform(platform)
+                .await
+            {
+                channel
+                    .read()
+                    .await
+                    .send(channel_id, &reply)
+                    .await
                     .map_err(|e| GatewayError::Internal {
                         message: format!("Failed to send reply: {}", e),
                         correlation_id: Uuid::new_v4().to_string(),
@@ -1792,7 +2241,11 @@ impl MessageProcessor {
                         timestamp: chrono::Utc::now(),
                     };
 
-                    if let Some(channel) = self.channel_registry.get_channel_by_platform(platform).await {
+                    if let Some(channel) = self
+                        .channel_registry
+                        .get_channel_by_platform(platform)
+                        .await
+                    {
                         if let Err(e) = channel.read().await.send(channel_id, &reply).await {
                             error!("发送文本消息失败: {}", e);
                         }
@@ -1800,7 +2253,8 @@ impl MessageProcessor {
                 }
                 MessagePart::Image { data, mime_type } => {
                     // 发送图片
-                    self.send_image(platform, channel_id, original, &data, &mime_type).await?;
+                    self.send_image(platform, channel_id, original, &data, &mime_type)
+                        .await?;
                 }
             }
         }
@@ -1887,9 +2341,11 @@ impl MessageProcessor {
         mime_type: &str,
     ) -> Result<(), GatewayError> {
         // 解码 base64
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
 
-        let data = STANDARD.decode(image_data)
+        let data = STANDARD
+            .decode(image_data)
             .map_err(|e| GatewayError::Internal {
                 message: format!("Failed to decode image: {}", e),
                 correlation_id: Uuid::new_v4().to_string(),
@@ -1910,8 +2366,16 @@ impl MessageProcessor {
             timestamp: chrono::Utc::now(),
         };
 
-        if let Some(channel) = self.channel_registry.get_channel_by_platform(platform).await {
-            channel.read().await.send(channel_id, &reply).await
+        if let Some(channel) = self
+            .channel_registry
+            .get_channel_by_platform(platform)
+            .await
+        {
+            channel
+                .read()
+                .await
+                .send(channel_id, &reply)
+                .await
                 .map_err(|e| GatewayError::Internal {
                     message: format!("Failed to send image: {}", e),
                     correlation_id: Uuid::new_v4().to_string(),
@@ -1937,29 +2401,29 @@ impl MessageProcessor {
         result
     }
 
-    /// 🆕 FIX: Fetch real-time weather data from wttr.in (free, no API key required)
+    /// 🆕 FIX: Fetch real-time weather data from wttr.in (free, no API key
+    /// required)
     async fn fetch_weather_data(city: &str) -> Option<String> {
         let url = format!("https://wttr.in/{}?format=%C|%t|%h|%w|%p", city);
         match reqwest::get(&url).await {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.text().await {
-                    Ok(text) => {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() && !trimmed.contains("Unknown location") {
-                            info!("🌤️ Weather data fetched for {}: {}", city, trimmed);
-                            return Some(trimmed.to_string());
-                        }
+            Ok(resp) if resp.status().is_success() => match resp.text().await {
+                Ok(text) => {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() && !trimmed.contains("Unknown location") {
+                        info!("🌤️ Weather data fetched for {}: {}", city, trimmed);
+                        return Some(trimmed.to_string());
                     }
-                    Err(e) => warn!("Failed to read weather response: {}", e),
                 }
-            }
+                Err(e) => warn!("Failed to read weather response: {}", e),
+            },
             Ok(resp) => warn!("Weather API returned status: {}", resp.status()),
             Err(e) => warn!("Weather API request failed: {}", e),
         }
         None
     }
 
-    /// 🆕 FIX: Extract city name from a weather query (e.g. "深圳天气怎么样" -> "深圳")
+    /// 🆕 FIX: Extract city name from a weather query (e.g. "深圳天气怎么样" ->
+    /// "深圳")
     fn extract_city_from_weather_query(query: &str) -> Option<String> {
         // Match patterns like "XX市天气", "XX天气", "今天XX天气"
         let re = Regex::new(r"今天?的?(.*?)(?:市)?(?:的)?天气").ok()?;
@@ -1973,11 +2437,56 @@ impl MessageProcessor {
         }
         // Fallback: try to find city names from a common list
         let common_cities = [
-            "北京", "上海", "广州", "深圳", "杭州", "南京", "成都", "重庆", "武汉", "西安",
-            "天津", "苏州", "长沙", "郑州", "沈阳", "青岛", "宁波", "东莞", "无锡", "佛山",
-            "合肥", "大连", "福州", "厦门", "哈尔滨", "济南", "温州", "南宁", "长春", "泉州",
-            "石家庄", "贵阳", "南昌", "金华", "常州", "嘉兴", "珠海", "惠州", "中山", "江门",
-            "兰州", "海口", "三亚", "乌鲁木齐", "呼和浩特", "银川", "西宁", "拉萨", "昆明", "太原",
+            "北京",
+            "上海",
+            "广州",
+            "深圳",
+            "杭州",
+            "南京",
+            "成都",
+            "重庆",
+            "武汉",
+            "西安",
+            "天津",
+            "苏州",
+            "长沙",
+            "郑州",
+            "沈阳",
+            "青岛",
+            "宁波",
+            "东莞",
+            "无锡",
+            "佛山",
+            "合肥",
+            "大连",
+            "福州",
+            "厦门",
+            "哈尔滨",
+            "济南",
+            "温州",
+            "南宁",
+            "长春",
+            "泉州",
+            "石家庄",
+            "贵阳",
+            "南昌",
+            "金华",
+            "常州",
+            "嘉兴",
+            "珠海",
+            "惠州",
+            "中山",
+            "江门",
+            "兰州",
+            "海口",
+            "三亚",
+            "乌鲁木齐",
+            "呼和浩特",
+            "银川",
+            "西宁",
+            "拉萨",
+            "昆明",
+            "太原",
         ];
         for city in &common_cities {
             if query.contains(city) {
@@ -1990,9 +2499,14 @@ impl MessageProcessor {
     /// 🆕 FIX: 评估查询复杂度
     fn estimate_query_complexity(query: &str) -> QueryComplexity {
         let len = query.chars().count();
-        let complex_keywords = ["计划", "规划", "分析", "对比", "步骤", "方案", "周", "预算", "攻略", "安排", "行程"];
-        let keyword_score = complex_keywords.iter().filter(|k| query.contains(**k)).count();
-        
+        let complex_keywords = [
+            "计划", "规划", "分析", "对比", "步骤", "方案", "周", "预算", "攻略", "安排", "行程",
+        ];
+        let keyword_score = complex_keywords
+            .iter()
+            .filter(|k| query.contains(**k))
+            .count();
+
         if len > 15 || keyword_score >= 2 {
             QueryComplexity::High
         } else if len > 8 || keyword_score >= 1 {

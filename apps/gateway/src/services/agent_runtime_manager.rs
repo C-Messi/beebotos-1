@@ -46,7 +46,9 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
             if idx == 0 {
                 // 第一条消息通常是 agent persona，放入 system
                 system_parts.push(content.to_string());
-            } else if content.starts_with("[系统提示") || content.starts_with("以下是与当前对话相关的历史记忆") {
+            } else if content.starts_with("[系统提示")
+                || content.starts_with("以下是与当前对话相关的历史记忆")
+            {
                 system_parts.push(content.to_string());
             } else if let Some(rest) = content.strip_prefix("用户:") {
                 llm_messages.push(LLMMessage::user(rest.trim().to_string()));
@@ -72,17 +74,15 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
             llm_messages
         };
 
-        // 🆕 FIX: Pass max_tokens override from Agent extra_params to control output length
+        // 🆕 FIX: Pass max_tokens override from Agent extra_params to control output
+        // length
         let max_tokens_override = _context
             .as_ref()
             .and_then(|c| c.get("max_tokens"))
             .and_then(|t| t.parse::<u32>().ok());
 
         // 🆕 FIX: Support model override for fast/cheap tasks (e.g. skill ranking)
-        let model_override = _context
-            .as_ref()
-            .and_then(|c| c.get("model"))
-            .cloned();
+        let model_override = _context.as_ref().and_then(|c| c.get("model")).cloned();
 
         // 🆕 FIX: Support native function calling via tools_json in extra_params
         // Agent sends Vec<communication::ToolDefinition>, convert to llm::Tool here.
@@ -90,7 +90,10 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
             .as_ref()
             .and_then(|c| c.get("tools_json"))
             .and_then(|json_str| {
-                serde_json::from_str::<Vec<beebotos_agents::communication::ToolDefinition>>(json_str).ok()
+                serde_json::from_str::<Vec<beebotos_agents::communication::ToolDefinition>>(
+                    json_str,
+                )
+                .ok()
             })
             .map(|defs| {
                 defs.into_iter()
@@ -110,9 +113,18 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
             .and_then(|c| c.get("tool_choice"))
             .cloned();
 
-        self.llm_service.chat(final_messages, max_tokens_override, tools, tool_choice, model_override).await.map_err(|e| {
-            beebotos_agents::error::AgentError::Execution(format!("LLM call failed: {}", e))
-        })
+        self.llm_service
+            .chat(
+                final_messages,
+                max_tokens_override,
+                tools,
+                tool_choice,
+                model_override,
+            )
+            .await
+            .map_err(|e| {
+                beebotos_agents::error::AgentError::Execution(format!("LLM call failed: {}", e))
+            })
     }
 
     async fn call_llm_stream(
@@ -128,7 +140,7 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
 
 /// Agent instance holder that wraps beebotos_agents::Agent
 /// and provides lifecycle management.
-/// 
+///
 /// 🔒 P0 FIX: This struct is now stored in AgentStateManager's metadata
 /// instead of a separate HashMap, ensuring single source of truth.
 pub struct AgentInstance {
@@ -265,7 +277,8 @@ impl AgentInstance {
     }
 }
 
-/// Manages agent runtimes using unified state manager as single source of truth.
+/// Manages agent runtimes using unified state manager as single source of
+/// truth.
 ///
 /// 🔒 P0 FIX: Now fully integrated with AgentStateManager. The agent instances
 /// are stored in the state manager's metadata, eliminating duplicate state.
@@ -285,7 +298,8 @@ pub struct AgentRuntimeManager {
 }
 
 impl AgentRuntimeManager {
-    /// Create a new runtime manager with the given kernel, state manager and LLM service
+    /// Create a new runtime manager with the given kernel, state manager and
+    /// LLM service
     pub fn new(
         kernel: Option<Arc<beebotos_kernel::Kernel>>,
         state_manager: beebotos_agents::StateManagerHandle,
@@ -304,7 +318,8 @@ impl AgentRuntimeManager {
         }
     }
 
-    /// Create a new runtime manager with a default state manager and shared LLM service
+    /// Create a new runtime manager with a default state manager and shared LLM
+    /// service
     pub async fn new_with_default_state_manager(
         kernel: Option<Arc<beebotos_kernel::Kernel>>,
         config: BeeBotOSConfig,
@@ -313,9 +328,16 @@ impl AgentRuntimeManager {
         skill_registry: Option<Arc<beebotos_agents::skills::SkillRegistry>>,
     ) -> Result<Self, crate::error::AppError> {
         let state_manager = Arc::new(beebotos_agents::AgentStateManager::new(None));
-        Ok(Self::new(kernel, state_manager, config, llm_service, memory_system, skill_registry))
+        Ok(Self::new(
+            kernel,
+            state_manager,
+            config,
+            llm_service,
+            memory_system,
+            skill_registry,
+        ))
     }
-    
+
     /// Get the LLM service
     pub fn llm_service(&self) -> Arc<crate::services::llm_service::LlmService> {
         self.llm_service.clone()
@@ -367,17 +389,25 @@ impl AgentRuntimeManager {
             .map_err(|e| AppError::Internal(format!("State transition failed: {}", e)))?;
 
         // Create and initialize agent instance
-        let instance = AgentInstance::new(agent_id, db_agent, &self.config, self.kernel.clone(), self.llm_service.clone(), self.memory_system.clone(), self.skill_registry.clone())
-            .await
-            .map_err(|e| {
-                let _ = self.state_manager.transition(
-                    agent_id,
-                    beebotos_agents::StateTransition::Error {
-                        message: e.to_string(),
-                    },
-                );
-                AppError::Internal(format!("Agent initialization failed: {}", e))
-            })?;
+        let instance = AgentInstance::new(
+            agent_id,
+            db_agent,
+            &self.config,
+            self.kernel.clone(),
+            self.llm_service.clone(),
+            self.memory_system.clone(),
+            self.skill_registry.clone(),
+        )
+        .await
+        .map_err(|e| {
+            let _ = self.state_manager.transition(
+                agent_id,
+                beebotos_agents::StateTransition::Error {
+                    message: e.to_string(),
+                },
+            );
+            AppError::Internal(format!("Agent initialization failed: {}", e))
+        })?;
 
         // Store instance in state manager metadata
         // Note: Since AgentInstance is not Send, we use a separate storage
@@ -385,7 +415,7 @@ impl AgentRuntimeManager {
         // instance registry with Arc<Mutex<AgentInstance>>
         let _instance_key = format!("instance:{}", agent_id);
         let instance_arc = Arc::new(tokio::sync::Mutex::new(instance));
-        
+
         // Store in a global instance registry
         INSTANCE_REGISTRY
             .lock()
@@ -503,7 +533,7 @@ impl AgentRuntimeManager {
         let mut registry = INSTANCE_REGISTRY.lock().await;
         if let Some(instance_arc) = registry.remove(agent_id) {
             drop(registry); // Release lock before async operation
-            
+
             let mut instance = instance_arc.lock().await;
             if let Err(e) = instance.shutdown().await {
                 warn!("Error shutting down agent {}: {}", agent_id, e);
@@ -592,18 +622,21 @@ impl AgentRuntimeManager {
 }
 
 use std::collections::HashMap as StdHashMap;
+
 use tokio::sync::Mutex;
 
 /// Global instance registry for agent instances
-/// 
+///
 /// 🔒 P0 FIX: This replaces the per-Manager HashMap, ensuring all instances
 /// are managed in one place and can be accessed across the application.
-static INSTANCE_REGISTRY: once_cell::sync::Lazy<Mutex<StdHashMap<String, Arc<Mutex<AgentInstance>>>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(StdHashMap::new()));
+static INSTANCE_REGISTRY: once_cell::sync::Lazy<
+    Mutex<StdHashMap<String, Arc<Mutex<AgentInstance>>>>,
+> = once_cell::sync::Lazy::new(|| Mutex::new(StdHashMap::new()));
 
 /// Get a global instance of the runtime manager
 #[allow(dead_code)]
-pub async fn get_global_instance_registry() -> &'static Mutex<StdHashMap<String, Arc<Mutex<AgentInstance>>>> {
+pub async fn get_global_instance_registry(
+) -> &'static Mutex<StdHashMap<String, Arc<Mutex<AgentInstance>>>> {
     &INSTANCE_REGISTRY
 }
 

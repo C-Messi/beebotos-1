@@ -58,7 +58,6 @@
 
 use std::collections::HashMap;
 
-
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -70,7 +69,6 @@ use uuid::Uuid;
 use crate::agent_runtime::{AgentConfig, AgentId, AgentState, TaskId};
 // 🟢 P1 FIX: Import unified error types alongside GatewayError
 use crate::error::{GatewayError, Result};
-
 
 /// State event - immutable record of state changes
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,10 +126,7 @@ pub enum StateCommand {
         reason: Option<String>,
     },
     /// Assign task to agent
-    AssignTask {
-        agent_id: AgentId,
-        task_id: TaskId,
-    },
+    AssignTask { agent_id: AgentId, task_id: TaskId },
     /// Complete task
     CompleteTask {
         agent_id: AgentId,
@@ -150,9 +145,7 @@ pub enum StateCommand {
         metadata: HashMap<String, String>,
     },
     /// Archive agent
-    ArchiveAgent {
-        agent_id: AgentId,
-    },
+    ArchiveAgent { agent_id: AgentId },
 }
 
 /// State query - read operations
@@ -185,9 +178,7 @@ pub enum StateQuery {
         limit: usize,
     },
     /// Get a single workflow instance
-    GetWorkflowInstance {
-        instance_id: String,
-    },
+    GetWorkflowInstance { instance_id: String },
 }
 
 /// Filter for listing agents
@@ -250,9 +241,7 @@ pub enum QueryResult {
         total: usize,
     },
     /// Single workflow instance
-    WorkflowInstance {
-        instance: Option<serde_json::Value>,
-    },
+    WorkflowInstance { instance: Option<serde_json::Value> },
 }
 
 /// Agent info struct
@@ -406,7 +395,8 @@ impl StateStore {
 
     /// Load initial state from database
     async fn load_initial_state(&self) -> Result<()> {
-        // Load latest state for all agents (SQLite compatible - uses GROUP BY instead of DISTINCT ON)
+        // Load latest state for all agents (SQLite compatible - uses GROUP BY instead
+        // of DISTINCT ON)
         let rows = sqlx::query_as::<_, (String, String, serde_json::Value, i64)>(
             r#"
             SELECT
@@ -448,7 +438,9 @@ impl StateStore {
         self.validate_command(&command).await?;
 
         // Generate event
-        let event = self.command_to_event(&command, &correlation_id, timestamp).await?;
+        let event = self
+            .command_to_event(&command, &correlation_id, timestamp)
+            .await?;
 
         // Persist event
         if self.config.event_sourcing {
@@ -480,17 +472,29 @@ impl StateStore {
         let result = match &query {
             StateQuery::GetState { agent_id } => self.query_state(agent_id).await?,
             StateQuery::GetAgentInfo { agent_id } => self.query_agent_info(agent_id).await?,
-            StateQuery::ListAgents { filter, limit, offset } => {
-                self.query_list_agents(filter.as_ref(), *limit, *offset).await?
+            StateQuery::ListAgents {
+                filter,
+                limit,
+                offset,
+            } => {
+                self.query_list_agents(filter.as_ref(), *limit, *offset)
+                    .await?
             }
-            StateQuery::GetEventHistory { agent_id, from_sequence, limit } => {
-                self.query_event_history(agent_id, *from_sequence, *limit).await?
+            StateQuery::GetEventHistory {
+                agent_id,
+                from_sequence,
+                limit,
+            } => {
+                self.query_event_history(agent_id, *from_sequence, *limit)
+                    .await?
             }
-            StateQuery::GetStateAt { agent_id, timestamp } => {
-                self.query_state_at(agent_id, *timestamp).await?
-            }
+            StateQuery::GetStateAt {
+                agent_id,
+                timestamp,
+            } => self.query_state_at(agent_id, *timestamp).await?,
             StateQuery::ListWorkflowInstances { status, limit } => {
-                self.query_list_workflow_instances(status.as_deref(), *limit).await?
+                self.query_list_workflow_instances(status.as_deref(), *limit)
+                    .await?
             }
             StateQuery::GetWorkflowInstance { instance_id } => {
                 self.query_workflow_instance(instance_id).await?
@@ -526,10 +530,7 @@ impl StateStore {
                         )));
                     }
                 } else {
-                    return Err(GatewayError::state(format!(
-                        "Agent {} not found",
-                        agent_id
-                    )));
+                    return Err(GatewayError::state(format!("Agent {} not found", agent_id)));
                 }
             }
             StateCommand::AssignTask { agent_id, .. } => {
@@ -541,10 +542,7 @@ impl StateStore {
                         )));
                     }
                 } else {
-                    return Err(GatewayError::state(format!(
-                        "Agent {} not found",
-                        agent_id
-                    )));
+                    return Err(GatewayError::state(format!("Agent {} not found", agent_id)));
                 }
             }
             _ => {} // Other commands don't need special validation
@@ -692,9 +690,11 @@ impl StateStore {
             }
             StateTransitioned => {
                 if let Some(mut cached) = self.cache.get_mut(&event.agent_id) {
-                    if let Some(to) = event.payload.get("to").and_then(|v| {
-                        serde_json::from_value::<AgentState>(v.clone()).ok()
-                    }) {
+                    if let Some(to) = event
+                        .payload
+                        .get("to")
+                        .and_then(|v| serde_json::from_value::<AgentState>(v.clone()).ok())
+                    {
                         cached.info.current_state = to;
                         cached.info.updated_at = event.timestamp;
                         cached.sequence = event.sequence;
@@ -890,13 +890,13 @@ impl StateStore {
                 FROM agent_state_events
                 WHERE agent_id = ?1 AND sequence > ?2
                 ORDER BY sequence ASC LIMIT ?3
-                "#
+                "#,
             )
-                .bind(agent_id)
-                .bind(seq as i64)
-                .bind(limit as i64)
-                .fetch_all(&self.db)
-                .await
+            .bind(agent_id)
+            .bind(seq as i64)
+            .bind(limit as i64)
+            .fetch_all(&self.db)
+            .await
         } else {
             sqlx::query_as::<_, StateEventRow>(
                 r#"
@@ -904,12 +904,12 @@ impl StateStore {
                 FROM agent_state_events
                 WHERE agent_id = ?1
                 ORDER BY sequence ASC LIMIT ?2
-                "#
+                "#,
             )
-                .bind(agent_id)
-                .bind(limit as i64)
-                .fetch_all(&self.db)
-                .await
+            .bind(agent_id)
+            .bind(limit as i64)
+            .fetch_all(&self.db)
+            .await
         }
         .map_err(|e| GatewayError::state(format!("Database error: {}", e)))?;
 
@@ -960,7 +960,10 @@ impl StateStore {
             }
         }
 
-        Err(GatewayError::not_found("agent state at time", format!("{}@{}", agent_id, timestamp)))
+        Err(GatewayError::not_found(
+            "agent state at time",
+            format!("{}@{}", agent_id, timestamp),
+        ))
     }
 
     /// Query workflow instances
@@ -977,7 +980,7 @@ impl StateStore {
                 WHERE status = ?1
                 ORDER BY started_at DESC
                 LIMIT ?2
-                "#
+                "#,
             )
             .bind(s)
             .bind(limit as i64)
@@ -991,7 +994,7 @@ impl StateStore {
                 FROM workflow_instances
                 ORDER BY started_at DESC
                 LIMIT ?1
-                "#
+                "#,
             )
             .bind(limit as i64)
             .fetch_all(&self.db)
@@ -1013,7 +1016,10 @@ impl StateStore {
             })
         }).collect();
 
-        Ok(QueryResult::WorkflowInstanceList { instances, total: total as usize })
+        Ok(QueryResult::WorkflowInstanceList {
+            instances,
+            total: total as usize,
+        })
     }
 
     /// Query a single workflow instance
@@ -1121,7 +1127,9 @@ impl TryFrom<StateEventRow> for StateEvent {
 
         let payload: serde_json::Value = serde_json::from_str(&row.payload)
             .map_err(|e| format!("Failed to parse payload: {}", e))?;
-        let timestamp: DateTime<Utc> = row.timestamp.parse()
+        let timestamp: DateTime<Utc> = row
+            .timestamp
+            .parse()
             .map_err(|e: chrono::ParseError| format!("Failed to parse timestamp: {}", e))?;
 
         Ok(StateEvent {

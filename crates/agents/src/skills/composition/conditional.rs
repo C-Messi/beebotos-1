@@ -67,7 +67,8 @@ impl SkillConditional {
 }
 
 impl Condition {
-    /// Evaluate condition against skill output (sync fallback, LlmJudge returns false)
+    /// Evaluate condition against skill output (sync fallback, LlmJudge returns
+    /// false)
     pub fn evaluate(&self, output: &str) -> bool {
         match self {
             Condition::OutputContains(substr) => output.contains(substr),
@@ -98,7 +99,8 @@ impl Condition {
             }
             Condition::LlmJudge { prompt } => {
                 tracing::warn!(
-                    "LlmJudge condition requires LLM context to evaluate; returning false. Prompt: {}",
+                    "LlmJudge condition requires LLM context to evaluate; returning false. \
+                     Prompt: {}",
                     prompt
                 );
                 false
@@ -109,18 +111,16 @@ impl Condition {
     /// Evaluate condition with Agent context (supports LlmJudge via LLM)
     pub async fn evaluate_async(&self, output: &str, agent: &Agent) -> bool {
         match self {
-            Condition::LlmJudge { prompt } => {
-                match agent.judge_condition(prompt, output).await {
-                    Ok(result) => {
-                        tracing::info!("LlmJudge evaluated to {} for prompt: {}", result, prompt);
-                        result
-                    }
-                    Err(e) => {
-                        tracing::warn!("LlmJudge evaluation failed: {}, defaulting to false", e);
-                        false
-                    }
+            Condition::LlmJudge { prompt } => match agent.judge_condition(prompt, output).await {
+                Ok(result) => {
+                    tracing::info!("LlmJudge evaluated to {} for prompt: {}", result, prompt);
+                    result
                 }
-            }
+                Err(e) => {
+                    tracing::warn!("LlmJudge evaluation failed: {}, defaulting to false", e);
+                    false
+                }
+            },
             _ => self.evaluate(output),
         }
     }
@@ -145,8 +145,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_nested_then_branch() {
-        let then_node = MockNode { output: "then_result".to_string() };
-        let else_node = MockNode { output: "else_result".to_string() };
+        let then_node = MockNode {
+            output: "then_result".to_string(),
+        };
+        let else_node = MockNode {
+            output: "else_result".to_string(),
+        };
         let conditional = SkillConditional::new(
             Condition::OutputContains("trigger".to_string()),
             Box::new(then_node),
@@ -159,8 +163,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_conditional_nested_else_branch() {
-        let then_node = MockNode { output: "then_result".to_string() };
-        let else_node = MockNode { output: "else_result".to_string() };
+        let then_node = MockNode {
+            output: "then_result".to_string(),
+        };
+        let else_node = MockNode {
+            output: "else_result".to_string(),
+        };
         let conditional = SkillConditional::new(
             Condition::OutputContains("trigger".to_string()),
             Box::new(then_node),

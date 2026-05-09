@@ -1,7 +1,8 @@
 //! MCP Context
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 /// MCP context for tool execution
 #[derive(Debug, Clone, Serialize, Deserialize)]

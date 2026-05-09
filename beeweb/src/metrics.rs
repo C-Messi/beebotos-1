@@ -1,9 +1,10 @@
 //! Prometheus metrics for BeeWeb Update Server
 
+use std::sync::Arc;
+
 use prometheus::{
     Counter, GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, Registry,
 };
-use std::sync::Arc;
 
 /// Update metrics collection
 #[derive(Debug, Clone)]
@@ -48,10 +49,8 @@ impl UpdateMetrics {
         )?;
         registry.register(Box::new(update_available_total.clone()))?;
 
-        let update_download_bytes_total = Counter::new(
-            "update_download_bytes_total",
-            "Total bytes downloaded",
-        )?;
+        let update_download_bytes_total =
+            Counter::new("update_download_bytes_total", "Total bytes downloaded")?;
         registry.register(Box::new(update_download_bytes_total.clone()))?;
 
         let update_download_duration_seconds = Histogram::with_opts(HistogramOpts::new(
@@ -66,10 +65,8 @@ impl UpdateMetrics {
         ))?;
         registry.register(Box::new(update_install_duration_seconds.clone()))?;
 
-        let update_success_total = IntCounter::new(
-            "update_success_total",
-            "Total number of successful updates",
-        )?;
+        let update_success_total =
+            IntCounter::new("update_success_total", "Total number of successful updates")?;
         registry.register(Box::new(update_success_total.clone()))?;
 
         let update_failure_total = IntCounterVec::new(
@@ -78,10 +75,8 @@ impl UpdateMetrics {
         )?;
         registry.register(Box::new(update_failure_total.clone()))?;
 
-        let update_rollback_total = IntCounter::new(
-            "update_rollback_total",
-            "Total number of rollbacks",
-        )?;
+        let update_rollback_total =
+            IntCounter::new("update_rollback_total", "Total number of rollbacks")?;
         registry.register(Box::new(update_rollback_total.clone()))?;
 
         let update_current_version = GaugeVec::new(

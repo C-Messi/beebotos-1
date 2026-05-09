@@ -17,11 +17,9 @@ use crate::queue::dag_scheduler::{
     WorkflowConfig,
 };
 use crate::task::{TaskResult, TaskType};
-use crate::workflow::{
-    definition::WorkflowDefinition,
-    state::{StepState, StepStatus, WorkflowInstance, WorkflowStatus},
-    template::{resolve_value_templates, TemplateContext},
-};
+use crate::workflow::definition::WorkflowDefinition;
+use crate::workflow::state::{StepState, StepStatus, WorkflowInstance, WorkflowStatus};
+use crate::workflow::template::{resolve_value_templates, TemplateContext};
 
 /// Executor that runs workflow steps via the Agent's skill execution,
 /// resolving templates using upstream task results from the DagScheduler.
@@ -53,7 +51,11 @@ impl WorkflowDagExecutor {
                     ctx.add_step_output(task_id, output);
                     ctx.add_step_status(
                         task_id,
-                        if result.success { "completed" } else { "failed" },
+                        if result.success {
+                            "completed"
+                        } else {
+                            "failed"
+                        },
                     );
                 }
             }
@@ -83,10 +85,7 @@ impl TaskExecutor for WorkflowDagExecutor {
             .unwrap_or(task_id)
             .to_string();
 
-        let condition = task
-            .parameters
-            .get("_condition")
-            .and_then(|v| v.as_str());
+        let condition = task.parameters.get("_condition").and_then(|v| v.as_str());
 
         let trigger_context = task
             .parameters
@@ -95,12 +94,15 @@ impl TaskExecutor for WorkflowDagExecutor {
             .unwrap_or(Value::Null);
 
         // Build template context from upstream results
-        let template_ctx = self.build_template_context(instance_id, trigger_context).await;
+        let template_ctx = self
+            .build_template_context(instance_id, trigger_context)
+            .await;
 
         // Evaluate condition (if present)
         if let Some(condition_str) = condition {
-            let resolved = crate::workflow::template::resolve_template(condition_str, &template_ctx)
-                .unwrap_or_else(|_| "false".to_string());
+            let resolved =
+                crate::workflow::template::resolve_template(condition_str, &template_ctx)
+                    .unwrap_or_else(|_| "false".to_string());
             if resolved.trim() != "true" {
                 info!(
                     "Task '{}' condition not met ('{}' != 'true'), skipping",
@@ -119,8 +121,7 @@ impl TaskExecutor for WorkflowDagExecutor {
 
         // Resolve templates in parameters (excluding metadata keys)
         let mut resolved_params = Value::Object(
-            task
-                .parameters
+            task.parameters
                 .iter()
                 .filter(|(k, _)| !k.starts_with('_'))
                 .map(|(k, v)| (k.clone(), v.clone()))
@@ -187,7 +188,11 @@ pub fn to_dag_workflow(
         .config(WorkflowConfig {
             max_concurrency: 5,
             task_timeout_sec: definition.config.timeout_sec.unwrap_or(300),
-            workflow_timeout_sec: definition.config.timeout_sec.unwrap_or(300).saturating_mul(2),
+            workflow_timeout_sec: definition
+                .config
+                .timeout_sec
+                .unwrap_or(300)
+                .saturating_mul(2),
             retry_policy: crate::queue::dag_scheduler::TaskRetryPolicy {
                 max_retries: definition.config.max_retries.unwrap_or(0),
                 ..Default::default()
@@ -261,7 +266,8 @@ pub async fn poll_scheduler_workflow(
     let workflow_timeout_sec = 300u64;
     let mut poll_interval_ms = 100u64;
     let max_poll_interval_ms = 2000u64;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(workflow_timeout_sec);
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(workflow_timeout_sec);
 
     loop {
         if tokio::time::Instant::now() >= deadline {
@@ -272,13 +278,23 @@ pub async fn poll_scheduler_workflow(
             // Mirror task states into step states
             for (task_id, task_state) in &scheduler_instance.task_states {
                 let step_status = match task_state.status {
-                    crate::queue::dag_scheduler::TaskExecutionStatus::Pending => StepStatus::Pending,
+                    crate::queue::dag_scheduler::TaskExecutionStatus::Pending => {
+                        StepStatus::Pending
+                    }
                     crate::queue::dag_scheduler::TaskExecutionStatus::Ready => StepStatus::Ready,
-                    crate::queue::dag_scheduler::TaskExecutionStatus::Running => StepStatus::Running,
-                    crate::queue::dag_scheduler::TaskExecutionStatus::Completed => StepStatus::Completed,
+                    crate::queue::dag_scheduler::TaskExecutionStatus::Running => {
+                        StepStatus::Running
+                    }
+                    crate::queue::dag_scheduler::TaskExecutionStatus::Completed => {
+                        StepStatus::Completed
+                    }
                     crate::queue::dag_scheduler::TaskExecutionStatus::Failed => StepStatus::Failed,
-                    crate::queue::dag_scheduler::TaskExecutionStatus::Cancelled => StepStatus::Cancelled,
-                    crate::queue::dag_scheduler::TaskExecutionStatus::WaitingRetry => StepStatus::Ready,
+                    crate::queue::dag_scheduler::TaskExecutionStatus::Cancelled => {
+                        StepStatus::Cancelled
+                    }
+                    crate::queue::dag_scheduler::TaskExecutionStatus::WaitingRetry => {
+                        StepStatus::Ready
+                    }
                 };
 
                 let mut step_state = instance
@@ -334,7 +350,10 @@ pub async fn poll_scheduler_workflow(
         workflow_id, scheduler_instance_id, workflow_timeout_sec
     );
     instance.mark_failed();
-    instance.add_error(None, format!("Workflow timed out after {}s", workflow_timeout_sec));
+    instance.add_error(
+        None,
+        format!("Workflow timed out after {}s", workflow_timeout_sec),
+    );
     Ok(instance)
 }
 
@@ -358,7 +377,9 @@ fn extract_input_and_params(params: &Value) -> (String, HashMap<String, String>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::definition::{TriggerDefinition, TriggerType, WorkflowGlobalConfig, WorkflowStep};
+    use crate::workflow::definition::{
+        TriggerDefinition, TriggerType, WorkflowGlobalConfig, WorkflowStep,
+    };
 
     fn sample_workflow() -> WorkflowDefinition {
         WorkflowDefinition {
@@ -432,7 +453,7 @@ mod tests {
     fn test_workflow_dag_executor_identity() {
         let agent = Arc::new(crate::AgentBuilder::new("test").build());
         let (scheduler, _rx) = crate::queue::dag_scheduler::DagScheduler::new(
-            crate::queue::dag_scheduler::SchedulerConfig::default()
+            crate::queue::dag_scheduler::SchedulerConfig::default(),
         );
         let executor = WorkflowDagExecutor::new(agent, Arc::new(scheduler));
         assert_eq!(executor.executor_id(), "workflow_dag_executor");
@@ -442,7 +463,7 @@ mod tests {
     fn test_workflow_dag_executor_can_execute() {
         let agent = Arc::new(crate::AgentBuilder::new("test").build());
         let (scheduler, _rx) = crate::queue::dag_scheduler::DagScheduler::new(
-            crate::queue::dag_scheduler::SchedulerConfig::default()
+            crate::queue::dag_scheduler::SchedulerConfig::default(),
         );
         let executor = WorkflowDagExecutor::new(agent, Arc::new(scheduler));
 

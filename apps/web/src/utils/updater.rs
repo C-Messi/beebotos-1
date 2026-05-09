@@ -2,14 +2,13 @@
 //!
 //! Checks for new versions on page load and notifies users.
 
+use beebotos_update_client::models::{UpdateCheckRequest, UpdateCheckResponse, VersionInfo};
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::view;
 use wasm_bindgen::JsCast;
 use web_sys::window;
-
-use beebotos_update_client::models::{UpdateCheckRequest, UpdateCheckResponse, VersionInfo};
 
 /// Web application update manager
 pub struct WebUpdater {
@@ -26,12 +25,10 @@ impl WebUpdater {
         let registration = {
             let sw = navigator.service_worker();
             match sw.ready() {
-                Ok(promise) => {
-                    wasm_bindgen_futures::JsFuture::from(promise)
-                        .await
-                        .ok()
-                        .and_then(|r| r.dyn_into::<web_sys::ServiceWorkerRegistration>().ok())
-                }
+                Ok(promise) => wasm_bindgen_futures::JsFuture::from(promise)
+                    .await
+                    .ok()
+                    .and_then(|r| r.dyn_into::<web_sys::ServiceWorkerRegistration>().ok()),
                 Err(_) => None,
             }
         };
@@ -116,9 +113,11 @@ impl WebUpdater {
     pub async fn precache_update(&self, info: &VersionInfo) -> Result<(), String> {
         if let Some(reg) = &self.registration {
             if let Some(sw) = reg.active() {
-                let msg = js_sys::JSON::stringify(&wasm_bindgen::JsValue::from_str(
-                    &format!("{{\"action\":\"precache\",\"version\":\"{}\"}}", info.version)
-                )).unwrap_or_default();
+                let msg = js_sys::JSON::stringify(&wasm_bindgen::JsValue::from_str(&format!(
+                    "{{\"action\":\"precache\",\"version\":\"{}\"}}",
+                    info.version
+                )))
+                .unwrap_or_default();
                 let _ = sw.post_message(&msg);
             }
         }
@@ -147,7 +146,9 @@ pub async fn init_updater(server_url: String) {
             } else {
                 // Optional update: pre-cache in background and let UI component handle display
                 let _ = updater.precache_update(&info).await;
-                web_sys::console::log_1(&format!("Optional update available: {}", info.version).into());
+                web_sys::console::log_1(
+                    &format!("Optional update available: {}", info.version).into(),
+                );
             }
         }
         Ok(None) => {}

@@ -9,11 +9,23 @@ use crate::memory::MemoryEntry;
 #[derive(Debug, Clone)]
 pub enum SkillLevelDesc {
     /// L1: ~30 tokens — name + one-liner
-    L1 { id: String, name: String, one_liner: String },
+    L1 {
+        id: String,
+        name: String,
+        one_liner: String,
+    },
     /// L2: ~200 tokens — summary with key concepts
-    L2 { id: String, name: String, summary: String },
+    L2 {
+        id: String,
+        name: String,
+        summary: String,
+    },
     /// L3: ~2000 tokens — full SKILL.md content
-    L3 { id: String, name: String, full_doc: String },
+    L3 {
+        id: String,
+        name: String,
+        full_doc: String,
+    },
 }
 
 impl SkillLevelDesc {
@@ -27,7 +39,9 @@ impl SkillLevelDesc {
 
     pub fn to_prompt_text(&self) -> String {
         match self {
-            SkillLevelDesc::L1 { name, one_liner, .. } => {
+            SkillLevelDesc::L1 {
+                name, one_liner, ..
+            } => {
                 format!("- {}: {}", name, one_liner)
             }
             SkillLevelDesc::L2 { name, summary, .. } => {
@@ -181,7 +195,8 @@ impl PromptBuilder {
         // 6. Tool usage guide (on-demand)
         if !matches!(intent, UserIntent::DirectAnswer | UserIntent::MetaQuestion) {
             if !c.tools.is_empty() {
-                let tools_text = c.tools
+                let tools_text = c
+                    .tools
                     .iter()
                     .map(|t| format!("- {}: {}", t.name, t.description))
                     .collect::<Vec<_>>()
@@ -202,17 +217,20 @@ impl PromptBuilder {
     pub fn build_with_reasoning(self, intent: &UserIntent) -> String {
         let mut prompt = self.build(intent);
         if matches!(intent, UserIntent::MultiStepPlanning) {
-            prompt.push_str("\n\n[推理指南]\n这是一个复杂任务，请按以下步骤思考并在回复中包含 <REASONING_SCRATCHPAD> 标签：\n\
-                1. 分析用户目标\n\
-                2. 确定需要调用的工具及顺序\n\
-                3. 验证每一步的依赖关系\n\
-                输出格式：<REASONING_SCRATCHPAD>你的思考过程</REASONING_SCRATCHPAD>\n\
-                然后输出实际回答或工具调用。");
+            prompt.push_str(
+                "\n\n[推理指南]\n这是一个复杂任务，请按以下步骤思考并在回复中包含 \
+                 <REASONING_SCRATCHPAD> 标签：\n1. 分析用户目标\n2. 确定需要调用的工具及顺序\n3. \
+                 验证每一步的依赖关系\n输出格式：<REASONING_SCRATCHPAD>你的思考过程</\
+                 REASONING_SCRATCHPAD>\n然后输出实际回答或工具调用。",
+            );
         }
         prompt
     }
 
-    fn filter_memories_by_intent<'a>(memories: &'a [MemoryEntry], _intent: &UserIntent) -> Vec<&'a MemoryEntry> {
+    fn filter_memories_by_intent<'a>(
+        memories: &'a [MemoryEntry],
+        _intent: &UserIntent,
+    ) -> Vec<&'a MemoryEntry> {
         // 🆕 SKILL MATCHING V2: Removed hardcoded intent keyword filtering.
         // Memory relevance is now handled by the memory system's own retrieval logic.
         // This function simply returns the top 3 most recent/relevant memories.
@@ -283,24 +301,20 @@ impl Default for PromptBuilder {
 pub mod model_presets {
     /// Kimi k2.6 specific optimizations
     pub fn kimi_k26() -> &'static str {
-        "You are a BeeBotOS AI assistant using Kimi k2.6. \
-        Prefer detailed tool parameter descriptions. \
-        Use native function calling format. \
-        Be concise in reasoning but thorough in tool usage."
+        "You are a BeeBotOS AI assistant using Kimi k2.6. Prefer detailed tool parameter \
+         descriptions. Use native function calling format. Be concise in reasoning but thorough in \
+         tool usage."
     }
 
     /// GPT-4 specific optimizations
     pub fn gpt4o() -> &'static str {
-        "You are a BeeBotOS AI assistant using GPT-4o. \
-        Prefer concise tool descriptions. \
-        Use native function calling format. \
-        Focus on direct answers."
+        "You are a BeeBotOS AI assistant using GPT-4o. Prefer concise tool descriptions. Use \
+         native function calling format. Focus on direct answers."
     }
 
     /// Claude 3 specific optimizations
     pub fn claude3() -> &'static str {
-        "You are a BeeBotOS AI assistant using Claude 3. \
-        Use XML tags for structured output when helpful. \
-        Be thorough but avoid over-explaining."
+        "You are a BeeBotOS AI assistant using Claude 3. Use XML tags for structured output when \
+         helpful. Be thorough but avoid over-explaining."
     }
 }

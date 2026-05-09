@@ -141,7 +141,11 @@ impl SkillDiscovery {
         let skill_yaml = path.join("skill.yaml");
         let skill_wasm = path.join("skill.wasm");
 
-        if tokio::fs::metadata(&skill_md).await.map(|m| m.is_file()).unwrap_or(false) {
+        if tokio::fs::metadata(&skill_md)
+            .await
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
             let content = tokio::fs::read_to_string(&skill_md).await.ok()?;
             let (front_matter, body) = parse_front_matter(&content);
 
@@ -149,7 +153,10 @@ impl SkillDiscovery {
                 .get("name")
                 .cloned()
                 .unwrap_or_else(|| path.file_name().unwrap().to_string_lossy().to_string());
-            let name = front_matter.get("name").cloned().unwrap_or_else(|| id.clone());
+            let name = front_matter
+                .get("name")
+                .cloned()
+                .unwrap_or_else(|| id.clone());
             let description = front_matter
                 .get("description")
                 .cloned()
@@ -158,7 +165,11 @@ impl SkillDiscovery {
             let tags = parse_tags(front_matter.get("tags"));
             let version = parse_version(front_matter.get("version"));
 
-            let kind = if tokio::fs::metadata(&skill_wasm).await.map(|m| m.is_file()).unwrap_or(false) {
+            let kind = if tokio::fs::metadata(&skill_wasm)
+                .await
+                .map(|m| m.is_file())
+                .unwrap_or(false)
+            {
                 SkillKind::Wasm
             } else if has_executable_scripts(path).await {
                 SkillKind::Code
@@ -186,8 +197,14 @@ impl SkillDiscovery {
             });
         }
 
-        if tokio::fs::metadata(&skill_yaml).await.map(|m| m.is_file()).unwrap_or(false)
-            && tokio::fs::metadata(&skill_wasm).await.map(|m| m.is_file()).unwrap_or(false)
+        if tokio::fs::metadata(&skill_yaml)
+            .await
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+            && tokio::fs::metadata(&skill_wasm)
+                .await
+                .map(|m| m.is_file())
+                .unwrap_or(false)
         {
             // WASM skill without SKILL.md — fall back to legacy loader
             let content = tokio::fs::read_to_string(&skill_yaml).await.ok()?;
@@ -248,7 +265,11 @@ impl SkillDiscovery {
     /// 🆕 OPTIMIZATION: Read SKILL.index.md (L1: one-liner)
     async fn read_index_md(path: &Path) -> Option<String> {
         let index_path = path.join("SKILL.index.md");
-        if tokio::fs::metadata(&index_path).await.map(|m| m.is_file()).unwrap_or(false) {
+        if tokio::fs::metadata(&index_path)
+            .await
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
             tokio::fs::read_to_string(&index_path).await.ok()
         } else {
             None
@@ -258,7 +279,11 @@ impl SkillDiscovery {
     /// 🆕 OPTIMIZATION: Read SKILL.summary.md (L2: ~200 token summary)
     async fn read_summary_md(path: &Path) -> Option<String> {
         let summary_path = path.join("SKILL.summary.md");
-        if tokio::fs::metadata(&summary_path).await.map(|m| m.is_file()).unwrap_or(false) {
+        if tokio::fs::metadata(&summary_path)
+            .await
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
             tokio::fs::read_to_string(&summary_path).await.ok()
         } else {
             None
@@ -310,7 +335,8 @@ fn parse_front_matter(content: &str) -> (HashMap<String, String>, String) {
         let yaml_part = after_first[..end_idx].trim();
         let body = after_first[end_idx + 3..].trim_start().to_string();
 
-        // Use serde_yaml for proper parsing (supports quoted strings, lists, nested objects)
+        // Use serde_yaml for proper parsing (supports quoted strings, lists, nested
+        // objects)
         if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(yaml_part) {
             if let serde_yaml::Value::Mapping(m) = value {
                 for (k, v) in m {

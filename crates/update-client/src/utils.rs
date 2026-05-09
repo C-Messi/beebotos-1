@@ -1,9 +1,7 @@
 //! Utility functions for update client
 
-use crate::{
-    error::UpdateError,
-    models::PackageInfo,
-};
+use crate::error::UpdateError;
+use crate::models::PackageInfo;
 
 /// Select the best package for current platform from a list
 pub fn select_package(packages: &[PackageInfo]) -> Result<PackageInfo, UpdateError> {
@@ -20,9 +18,7 @@ pub fn matches_platform(package: &PackageInfo, platform: &str) -> bool {
     match package.platform {
         crate::models::Platform::Linux => platform.contains("linux"),
         crate::models::Platform::Windows => platform.contains("windows"),
-        crate::models::Platform::MacOS => {
-            platform.contains("macos") || platform.contains("darwin")
-        }
+        crate::models::Platform::MacOS => platform.contains("macos") || platform.contains("darwin"),
         crate::models::Platform::Wasm => platform.contains("wasm"),
     }
 }
@@ -30,7 +26,7 @@ pub fn matches_platform(package: &PackageInfo, platform: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Platform, PackageType};
+    use crate::models::{PackageType, Platform};
 
     fn make_package(platform: Platform) -> PackageInfo {
         PackageInfo {

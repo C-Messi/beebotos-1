@@ -116,7 +116,8 @@ impl RiskLevel {
             RiskLevel::High
         } else if lower.contains("place_") && lower.contains("_order") {
             RiskLevel::Critical
-        } else if lower.contains("send") || lower.contains("transfer") || lower.contains("withdraw") {
+        } else if lower.contains("send") || lower.contains("transfer") || lower.contains("withdraw")
+        {
             RiskLevel::Critical
         } else if lower.contains("update") || lower.contains("modify") {
             RiskLevel::Medium
@@ -185,7 +186,9 @@ impl ApprovalGate {
             ApprovalMode::Disabled => false,
             _ => {
                 let lower = skill_id.to_lowercase();
-                self.requires_approval.iter().any(|pattern| lower.contains(pattern))
+                self.requires_approval
+                    .iter()
+                    .any(|pattern| lower.contains(pattern))
             }
         }
     }
@@ -226,11 +229,9 @@ impl ApprovalGate {
                     reason: "No auto-approval rule matched".to_string(),
                 }
             }
-            ApprovalMode::AdminSignature => {
-                ApprovalResult::Rejected {
-                    reason: "Admin signature required".to_string(),
-                }
-            }
+            ApprovalMode::AdminSignature => ApprovalResult::Rejected {
+                reason: "Admin signature required".to_string(),
+            },
         }
     }
 
@@ -253,11 +254,7 @@ impl ApprovalGate {
     }
 
     /// Build an approval request
-    pub fn build_request(
-        &self,
-        skill_id: &str,
-        params: &serde_json::Value,
-    ) -> ApprovalRequest {
+    pub fn build_request(&self, skill_id: &str, params: &serde_json::Value) -> ApprovalRequest {
         ApprovalRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
             skill_id: skill_id.to_string(),
@@ -281,7 +278,10 @@ mod tests {
 
     #[test]
     fn test_risk_level() {
-        assert_eq!(RiskLevel::from_skill_id("place_crypto_order"), RiskLevel::Critical);
+        assert_eq!(
+            RiskLevel::from_skill_id("place_crypto_order"),
+            RiskLevel::Critical
+        );
         assert_eq!(RiskLevel::from_skill_id("delete_item"), RiskLevel::High);
         assert_eq!(RiskLevel::from_skill_id("get_weather"), RiskLevel::Low);
     }

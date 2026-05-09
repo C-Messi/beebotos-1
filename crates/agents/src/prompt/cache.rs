@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
 use tokio::sync::RwLock;
 
 use super::PromptComponents;
@@ -74,7 +75,7 @@ impl PromptCache {
             // Evict oldest entries if over limit
             if cache.len() > self.config.max_entries {
                 let mut entries: Vec<_> = cache.drain().collect();
-                entries.sort_by(|a, b| b.1.1.cmp(&a.1.1)); // newest first
+                entries.sort_by(|a, b| b.1 .1.cmp(&a.1 .1)); // newest first
                 let keep = self.config.max_entries / 2;
                 for (k, v) in entries.into_iter().take(keep) {
                     cache.insert(k, v);
@@ -102,7 +103,11 @@ impl PromptCache {
         // Hash memory count and first few chars
         components.memories.len().hash(&mut hasher);
         for m in components.memories.iter().take(3) {
-            m.content.chars().take(50).collect::<String>().hash(&mut hasher);
+            m.content
+                .chars()
+                .take(50)
+                .collect::<String>()
+                .hash(&mut hasher);
         }
 
         format!("{:x}", hasher.finish())

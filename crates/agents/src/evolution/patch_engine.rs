@@ -1,7 +1,8 @@
 //! Patch Engine — Diff-Based Skill Updates with Safety Guarantees
 //!
 //! Applies updates to existing skills through structured diffs.
-//! Safety features: rollback preparation, validation pre-checks, atomic application.
+//! Safety features: rollback preparation, validation pre-checks, atomic
+//! application.
 
 use crate::error::{AgentError, Result};
 
@@ -13,7 +14,11 @@ pub enum PatchOp {
     /// Delete lines at position
     Delete { at_line: usize, count: usize },
     /// Replace a line range
-    Replace { at_line: usize, count: usize, lines: Vec<String> },
+    Replace {
+        at_line: usize,
+        count: usize,
+        lines: Vec<String>,
+    },
     /// Rename a section header
     RenameSection { old_name: String, new_name: String },
     /// Update frontmatter key
@@ -56,7 +61,10 @@ pub enum Precondition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchResult {
     /// Patch applied successfully, new content returned
-    Applied { new_content: String, new_version: String },
+    Applied {
+        new_content: String,
+        new_version: String,
+    },
     /// Patch was already present (idempotent)
     AlreadyApplied,
     /// Preconditions failed, patch not applied
@@ -139,7 +147,10 @@ impl PatchEngine {
         // Apply operations in order
         for op in &patch.operations {
             match op {
-                PatchOp::Insert { at_line, lines: insert_lines } => {
+                PatchOp::Insert {
+                    at_line,
+                    lines: insert_lines,
+                } => {
                     let pos = at_line.saturating_sub(1);
                     for (i, line) in insert_lines.iter().enumerate() {
                         if pos + i > lines.len() {
@@ -155,18 +166,24 @@ impl PatchEngine {
                     if start >= lines.len() {
                         return Err(AgentError::Execution(format!(
                             "Delete at line {} out of range (file has {} lines)",
-                            at_line, lines.len()
+                            at_line,
+                            lines.len()
                         )));
                     }
                     lines.drain(start..end);
                 }
-                PatchOp::Replace { at_line, count, lines: replace_lines } => {
+                PatchOp::Replace {
+                    at_line,
+                    count,
+                    lines: replace_lines,
+                } => {
                     let start = at_line.saturating_sub(1);
                     let end = (start + count).min(lines.len());
                     if start >= lines.len() {
                         return Err(AgentError::Execution(format!(
                             "Replace at line {} out of range (file has {} lines)",
-                            at_line, lines.len()
+                            at_line,
+                            lines.len()
                         )));
                     }
                     lines.splice(start..end, replace_lines.iter().cloned());
@@ -200,7 +217,10 @@ impl PatchEngine {
         let new_content = lines.join("\n");
         let new_version = Self::bump_version(patch.target_version.clone());
 
-        Ok(PatchResult::Applied { new_content, new_version })
+        Ok(PatchResult::Applied {
+            new_content,
+            new_version,
+        })
     }
 
     /// Create a patch that reverts a skill to a previous version
@@ -215,12 +235,15 @@ impl PatchEngine {
         let diff = Self::compute_diff(current_content, target_content);
 
         SkillPatch {
-            patch_id: format!("rollback-{}-{}-{}", skill_id, current_version, target_version),
+            patch_id: format!(
+                "rollback-{}-{}-{}",
+                skill_id, current_version, target_version
+            ),
             target_skill_id: skill_id.to_string(),
             target_version: current_version.to_string(),
-            preconditions: vec![
-                Precondition::VersionMustBe { version: current_version.to_string() },
-            ],
+            preconditions: vec![Precondition::VersionMustBe {
+                version: current_version.to_string(),
+            }],
             operations: diff,
             description: format!("Rollback from {} to {}", current_version, target_version),
             auto_generated: true,
@@ -240,7 +263,9 @@ impl PatchEngine {
             if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
                 i += 1;
                 j += 1;
-            } else if j < new_lines.len() && (i >= old_lines.len() || !old_lines.contains(&new_lines[j])) {
+            } else if j < new_lines.len()
+                && (i >= old_lines.len() || !old_lines.contains(&new_lines[j]))
+            {
                 ops.push(PatchOp::Insert {
                     at_line: i + 1,
                     lines: vec![new_lines[j].to_string()],
@@ -310,7 +335,10 @@ mod tests {
             target_skill_id: "s1".to_string(),
             target_version: "1.0.0".to_string(),
             preconditions: vec![],
-            operations: vec![PatchOp::Insert { at_line: 2, lines: vec!["NEW LINE".to_string()] }],
+            operations: vec![PatchOp::Insert {
+                at_line: 2,
+                lines: vec!["NEW LINE".to_string()],
+            }],
             description: "Insert test".to_string(),
             auto_generated: false,
         };
@@ -331,7 +359,10 @@ mod tests {
             target_skill_id: "s1".to_string(),
             target_version: "1.0.0".to_string(),
             preconditions: vec![],
-            operations: vec![PatchOp::Delete { at_line: 2, count: 1 }],
+            operations: vec![PatchOp::Delete {
+                at_line: 2,
+                count: 1,
+            }],
             description: "Delete test".to_string(),
             auto_generated: false,
         };
@@ -353,7 +384,9 @@ mod tests {
             patch_id: "p1".to_string(),
             target_skill_id: "s1".to_string(),
             target_version: "2.0.0".to_string(),
-            preconditions: vec![Precondition::VersionMustBe { version: "1.0.0".to_string() }],
+            preconditions: vec![Precondition::VersionMustBe {
+                version: "1.0.0".to_string(),
+            }],
             operations: vec![],
             description: "test".to_string(),
             auto_generated: false,

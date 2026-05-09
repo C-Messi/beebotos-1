@@ -1,7 +1,8 @@
 //! Skill Selector (V2)
 //!
 //! Pure LLM-driven skill selection with zero hardcoded rules.
-//! Architecture: Recall (Top-K) → LLM Ranking (0-10 scores) → Selection or Rejection
+//! Architecture: Recall (Top-K) → LLM Ranking (0-10 scores) → Selection or
+//! Rejection
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,10 +18,10 @@ use crate::skills::registry::{RegisteredSkill, SkillRegistry};
 pub struct SkillScore {
     pub skill_id: String,
     pub skill_name: String,
-    pub relevance: f32,       // 0-10: how well skill aligns with query
-    pub specificity: f32,     // 0-10: is this the MOST specific skill?
+    pub relevance: f32,        // 0-10: how well skill aligns with query
+    pub specificity: f32,      // 0-10: is this the MOST specific skill?
     pub capability_match: f32, // 0-10: does skill have needed capabilities?
-    pub overall_score: f32,   // 0-10: composite
+    pub overall_score: f32,    // 0-10: composite
     pub reason: String,
 }
 
@@ -60,10 +61,7 @@ pub struct SkillSelector {
 }
 
 impl SkillSelector {
-    pub fn new(
-        llm: Arc<dyn LLMCallInterface>,
-        registry: Arc<SkillRegistry>,
-    ) -> Self {
+    pub fn new(llm: Arc<dyn LLMCallInterface>, registry: Arc<SkillRegistry>) -> Self {
         Self {
             llm,
             registry,
@@ -100,7 +98,8 @@ impl SkillSelector {
         let query_preview = Self::truncate(query, 100);
         tracing::info!(
             "🔍 SkillSelector::select() START | query_summary='{}' | query_preview='{}'",
-            query_summary, query_preview
+            query_summary,
+            query_preview
         );
 
         // 1. Check cache first
@@ -125,12 +124,17 @@ impl SkillSelector {
         tracing::info!(
             "📋 SkillSelector::recall_candidates() | count={} | names={:?} | took={:?}",
             candidates.len(),
-            candidates.iter().map(|c| c.skill.name.as_str()).collect::<Vec<_>>(),
+            candidates
+                .iter()
+                .map(|c| c.skill.name.as_str())
+                .collect::<Vec<_>>(),
             recall_start.elapsed()
         );
 
         if candidates.is_empty() {
-            tracing::warn!("⚠️ SkillSelector::select() — no candidates recalled, returning empty selection");
+            tracing::warn!(
+                "⚠️ SkillSelector::select() — no candidates recalled, returning empty selection"
+            );
             return Ok(SkillSelection {
                 selected_skill: None,
                 selected_skill_name: None,
@@ -143,14 +147,18 @@ impl SkillSelector {
         }
 
         // Step 2: LLM Ranking
-        let (ranked, llm_needs_planning) = self.rank_candidates(query, query_summary, &candidates).await?;
+        let (ranked, llm_needs_planning) = self
+            .rank_candidates(query, query_summary, &candidates)
+            .await?;
 
         // Step 3: Selection
         let selection_start = Instant::now();
         let selection = self.make_selection(&ranked, llm_needs_planning).await?;
         tracing::info!(
             "🎯 SkillSelector::make_selection() | selected={:?} | confidence={:.2} | took={:?}",
-            selection.selected_skill_name, selection.confidence, selection_start.elapsed()
+            selection.selected_skill_name,
+            selection.confidence,
+            selection_start.elapsed()
         );
 
         // 2. Store in cache
@@ -187,8 +195,9 @@ impl SkillSelector {
     ) -> Result<Vec<RegisteredSkill>, SkillSelectError> {
         let mut candidates = self.registry.search(query_summary).await;
 
-        // 🆕 FIX: If search returns empty (e.g. English query_summary vs Chinese descriptions),
-        // fallback to enabled skills sorted by popularity so ranking still has candidates.
+        // 🆕 FIX: If search returns empty (e.g. English query_summary vs Chinese
+        // descriptions), fallback to enabled skills sorted by popularity so
+        // ranking still has candidates.
         if candidates.is_empty() {
             candidates = self.registry.list_enabled().await;
         }
@@ -208,7 +217,8 @@ impl SkillSelector {
         Ok(candidates)
     }
 
-    /// Step 2: LLM Ranking — let LLM score each candidate on multiple dimensions
+    /// Step 2: LLM Ranking — let LLM score each candidate on multiple
+    /// dimensions
     async fn rank_candidates(
         &self,
         query: &str,
@@ -221,8 +231,12 @@ impl SkillSelector {
         let prompt_tokens_est = prompt_len / 4; // rough estimate: 1 token ≈ 4 chars
 
         tracing::info!(
-            "🤖 SkillSelector::rank_candidates() | prompt_len={} (~{} tokens) | candidates={} | timeout={}s",
-            prompt_len, prompt_tokens_est, candidates.len(), self.timeout.as_secs()
+            "🤖 SkillSelector::rank_candidates() | prompt_len={} (~{} tokens) | candidates={} | \
+             timeout={}s",
+            prompt_len,
+            prompt_tokens_est,
+            candidates.len(),
+            self.timeout.as_secs()
         );
         tracing::debug!("📝 SkillSelector ranking prompt:\n{}", prompt);
 
@@ -232,31 +246,36 @@ impl SkillSelector {
             prompt,
         )];
 
-        // 🆕 FIX: Limit max_tokens to 256 — ranking output for ~3 candidates is ~50-100 tokens.
-        // This prevents Kimi k2.6 from generating excessive reasoning and reduces latency.
+        // 🆕 FIX: Limit max_tokens to 256 — ranking output for ~3 candidates is ~50-100
+        // tokens. This prevents Kimi k2.6 from generating excessive reasoning
+        // and reduces latency.
         let mut context = std::collections::HashMap::new();
         context.insert("max_tokens".to_string(), "256".to_string());
 
         let llm_start = Instant::now();
-        let response = tokio::time::timeout(
-            self.timeout,
-            self.llm.call_llm(messages, Some(context)),
-        )
-        .await
-        .map_err(|_| {
-            tracing::error!(
-                "⏱️ SkillSelector::rank_candidates() TIMEOUT after {:?} | prompt_len={} | candidates={}",
-                self.timeout, prompt_len, candidates.len()
-            );
-            SkillSelectError::Timeout(self.timeout.as_secs())
-        })?
-        .map_err(|e| SkillSelectError::LLMError(e.to_string()))?;
+        let response =
+            tokio::time::timeout(self.timeout, self.llm.call_llm(messages, Some(context)))
+                .await
+                .map_err(|_| {
+                    tracing::error!(
+                        "⏱️ SkillSelector::rank_candidates() TIMEOUT after {:?} | prompt_len={} | \
+                         candidates={}",
+                        self.timeout,
+                        prompt_len,
+                        candidates.len()
+                    );
+                    SkillSelectError::Timeout(self.timeout.as_secs())
+                })?
+                .map_err(|e| SkillSelectError::LLMError(e.to_string()))?;
 
         let llm_latency = llm_start.elapsed();
         let response_len = response.len();
         tracing::info!(
-            "📥 SkillSelector::rank_candidates() | LLM latency={:?} | response_len={} | total_rank={:?}",
-            llm_latency, response_len, rank_start.elapsed()
+            "📥 SkillSelector::rank_candidates() | LLM latency={:?} | response_len={} | \
+             total_rank={:?}",
+            llm_latency,
+            response_len,
+            rank_start.elapsed()
         );
         tracing::debug!("📄 SkillSelector ranking response:\n{}", response);
 
@@ -311,7 +330,12 @@ impl SkillSelector {
                     best_score.skill_name,
                     best_score.overall_score
                 );
-                (None, None, reason, crate::skills::registry::SkillDisclosureLevel::L0)
+                (
+                    None,
+                    None,
+                    reason,
+                    crate::skills::registry::SkillDisclosureLevel::L0,
+                )
             }
             None => (
                 None,
@@ -338,9 +362,10 @@ impl SkillSelector {
     }
 
     /// Build the ranking prompt — pure semantic evaluation, zero keyword rules
-    /// 🆕 FIX: Truncate all fields to keep prompt concise and reduce LLM latency.
-    /// Build the ranking prompt — pure semantic evaluation, zero keyword rules
-    /// 🆕 FIX: Ultra-lightweight output format to minimize LLM generation latency.
+    /// 🆕 FIX: Truncate all fields to keep prompt concise and reduce LLM
+    /// latency. Build the ranking prompt — pure semantic evaluation, zero
+    /// keyword rules 🆕 FIX: Ultra-lightweight output format to minimize
+    /// LLM generation latency.
     fn build_ranking_prompt(
         &self,
         query: &str,
@@ -457,7 +482,11 @@ impl SkillSelector {
             scores
                 .iter()
                 .filter(|s| s.overall_score >= SkillSelection::SELECTION_THRESHOLD)
-                .max_by(|a, b| a.overall_score.partial_cmp(&b.overall_score).unwrap_or(std::cmp::Ordering::Equal))
+                .max_by(|a, b| {
+                    a.overall_score
+                        .partial_cmp(&b.overall_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .map(|s| s.skill_id.clone())
         };
 

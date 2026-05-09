@@ -3,14 +3,13 @@
 //! Manage scheduled cron jobs: create, edit, enable/disable, run manually,
 //! and view execution history.
 
-use crate::api::cron_jobs::{
-    ContextMode, CronJob, CronJobRequest, ScheduleType,
-};
-use crate::components::Modal;
-use crate::state::use_app_state;
 use leptos::either::Either;
 use leptos::prelude::*;
 use leptos_meta::*;
+
+use crate::api::cron_jobs::{ContextMode, CronJob, CronJobRequest, ScheduleType};
+use crate::components::Modal;
+use crate::state::use_app_state;
 
 const POLL_INTERVAL_MS: u32 = 10_000;
 
@@ -313,31 +312,48 @@ fn JobForm(
     let is_edit = job.is_some();
 
     let name = RwSignal::new(job.as_ref().map(|j| j.name.clone()).unwrap_or_default());
-    let description = RwSignal::new(job.as_ref().map(|j| j.description.clone()).unwrap_or_default());
+    let description = RwSignal::new(
+        job.as_ref()
+            .map(|j| j.description.clone())
+            .unwrap_or_default(),
+    );
     let schedule_type = RwSignal::new(
-        job.as_ref().map(|j| j.schedule_type.clone()).unwrap_or(ScheduleType::Cron),
+        job.as_ref()
+            .map(|j| j.schedule_type.clone())
+            .unwrap_or(ScheduleType::Cron),
     );
     let schedule_expr = RwSignal::new(
-        job.as_ref().map(|j| j.schedule_expr.clone()).unwrap_or_default(),
+        job.as_ref()
+            .map(|j| j.schedule_expr.clone())
+            .unwrap_or_default(),
     );
     let timezone = RwSignal::new(
-        job.as_ref().map(|j| j.timezone.clone()).unwrap_or_else(|| "UTC".to_string()),
+        job.as_ref()
+            .map(|j| j.timezone.clone())
+            .unwrap_or_else(|| "UTC".to_string()),
     );
-    let prompt = RwSignal::new(
-        job.as_ref().map(|j| j.prompt.clone()).unwrap_or_default(),
-    );
+    let prompt = RwSignal::new(job.as_ref().map(|j| j.prompt.clone()).unwrap_or_default());
     let enabled = RwSignal::new(job.as_ref().map(|j| j.enabled).unwrap_or(true));
     let context_mode = RwSignal::new(
-        job.as_ref().map(|j| j.context_mode.clone()).unwrap_or(ContextMode::Isolated),
+        job.as_ref()
+            .map(|j| j.context_mode.clone())
+            .unwrap_or(ContextMode::Isolated),
     );
     let max_runs = RwSignal::new(
-        job.as_ref().and_then(|j| j.max_runs).map(|v| v.to_string()).unwrap_or_default(),
+        job.as_ref()
+            .and_then(|j| j.max_runs)
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
     );
     let delivery_channel = RwSignal::new(
-        job.as_ref().map(|j| j.delivery_channel.clone()).unwrap_or_default(),
+        job.as_ref()
+            .map(|j| j.delivery_channel.clone())
+            .unwrap_or_default(),
     );
     let delivery_target = RwSignal::new(
-        job.as_ref().map(|j| j.delivery_target.clone()).unwrap_or_default(),
+        job.as_ref()
+            .map(|j| j.delivery_target.clone())
+            .unwrap_or_default(),
     );
 
     let saving = RwSignal::new(false);
@@ -384,9 +400,17 @@ fn JobForm(
     };
 
     let type_options = vec![
-        (ScheduleType::Cron, "Cron 表达式", "标准 5 字段 cron，如 */5 * * * *"),
+        (
+            ScheduleType::Cron,
+            "Cron 表达式",
+            "标准 5 字段 cron，如 */5 * * * *",
+        ),
         (ScheduleType::Every, "固定间隔", "如 30m, 1h, 4h, 1d"),
-        (ScheduleType::At, "定时一次", "ISO 8601 格式，如 2026-05-06T09:00:00Z"),
+        (
+            ScheduleType::At,
+            "定时一次",
+            "ISO 8601 格式，如 2026-05-06T09:00:00Z",
+        ),
     ];
 
     view! {

@@ -2,10 +2,12 @@
 //!
 //! Uses Ed25519 for digital signature verification.
 
-use crate::models::{SignatureData, UpdateError};
+use std::path::Path;
+
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+
+use crate::models::{SignatureData, UpdateError};
 
 /// Signature verifier for update packages
 #[derive(Debug, Clone)]
@@ -54,8 +56,9 @@ impl SignatureVerifier {
         let file_hash = sha256_file(package_path).await?;
 
         // Decode signature
-        let signature_bytes = base64_decode(&signature_data.signature)
-            .map_err(|e| UpdateError::InvalidSignature(format!("Invalid signature base64: {}", e)))?;
+        let signature_bytes = base64_decode(&signature_data.signature).map_err(|e| {
+            UpdateError::InvalidSignature(format!("Invalid signature base64: {}", e))
+        })?;
         let signature = Signature::from_slice(&signature_bytes).map_err(|e| {
             UpdateError::InvalidSignature(format!("Invalid signature format: {}", e))
         })?;
@@ -76,8 +79,9 @@ impl SignatureVerifier {
             .ok_or_else(|| UpdateError::InvalidSignature("No public key configured".to_string()))?;
 
         let hash = sha256(data);
-        let signature_bytes = base64_decode(signature_b64)
-            .map_err(|e| UpdateError::InvalidSignature(format!("Invalid signature base64: {}", e)))?;
+        let signature_bytes = base64_decode(signature_b64).map_err(|e| {
+            UpdateError::InvalidSignature(format!("Invalid signature base64: {}", e))
+        })?;
         let signature = Signature::from_slice(&signature_bytes).map_err(|e| {
             UpdateError::InvalidSignature(format!("Invalid signature format: {}", e))
         })?;

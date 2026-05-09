@@ -57,12 +57,22 @@ impl SkillParallel {
             .branches
             .iter()
             .map(|branch| {
-                let branch_input = branch.input_override.as_deref().unwrap_or(input).to_string();
+                let branch_input = branch
+                    .input_override
+                    .as_deref()
+                    .unwrap_or(input)
+                    .to_string();
                 let branch_id = branch.branch_id.clone();
                 let skill_id = branch.skill_id.clone();
                 async move {
-                    info!("Parallel branch {}: executing skill={}", branch_id, skill_id);
-                    match agent.execute_skill_by_id(&skill_id, &branch_input, None).await {
+                    info!(
+                        "Parallel branch {}: executing skill={}",
+                        branch_id, skill_id
+                    );
+                    match agent
+                        .execute_skill_by_id(&skill_id, &branch_input, None)
+                        .await
+                    {
                         Ok(result) => (branch_id, result.output),
                         Err(e) => {
                             warn!(
@@ -123,12 +133,22 @@ impl MergeStrategy {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let prompt = format!(
-                    "{}\n\nPlease summarize and consolidate the results from the following parallel branches:\n\n{}",
+                    "{}\n\nPlease summarize and consolidate the results from the following \
+                     parallel branches:\n\n{}",
                     prompt_template, combined
                 );
-                match agent.call_llm_prompt(&prompt, Some::<String>(
-                    "You are a result-summarization assistant. Your task is to merge outputs from multiple parallel execution branches into a coherent, concise summary.".into()
-                )).await {
+                match agent
+                    .call_llm_prompt(
+                        &prompt,
+                        Some::<String>(
+                            "You are a result-summarization assistant. Your task is to merge \
+                             outputs from multiple parallel execution branches into a coherent, \
+                             concise summary."
+                                .into(),
+                        ),
+                    )
+                    .await
+                {
                     Ok(summary) => Ok(summary),
                     Err(e) => {
                         warn!("LlmSummarize failed, falling back to concatenation: {}", e);

@@ -7,19 +7,17 @@
 //!
 //! 🔒 P0 FIX: Chain module integration for Gateway.
 
-use axum::extract::{Path, State};
-use axum::Json;
-use serde::Deserialize;
-use serde_json::json;
 use std::sync::Arc;
 
-use gateway::{
-    error::GatewayError,
-    middleware::{require_any_role, AuthUser},
-};
+use axum::extract::{Path, State};
+use axum::Json;
+use gateway::error::GatewayError;
+use gateway::middleware::{require_any_role, AuthUser};
+use serde::Deserialize;
+use serde_json::json;
 
-use crate::AppState;
 use crate::handlers::common::check_ownership;
+use crate::AppState;
 
 /// Register agent on-chain identity
 pub async fn register_agent_identity(
@@ -160,9 +158,7 @@ pub async fn cast_vote(
         _ => return Err(GatewayError::bad_request("Invalid vote type")),
     };
 
-    let tx_hash = chain_service
-        .cast_vote(proposal_id, vote_type)
-        .await?;
+    let tx_hash = chain_service.cast_vote(proposal_id, vote_type).await?;
 
     Ok(Json(json!({
         "proposal_id": proposal_id,
@@ -177,9 +173,14 @@ pub async fn get_proposal(
     State(state): State<Arc<AppState>>,
     Path(proposal_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    let proposal = state.chain()?.get_proposal(
-        proposal_id.parse::<u64>().map_err(|_| GatewayError::bad_request("Invalid proposal ID"))?
-    ).await?;
+    let proposal = state
+        .chain()?
+        .get_proposal(
+            proposal_id
+                .parse::<u64>()
+                .map_err(|_| GatewayError::bad_request("Invalid proposal ID"))?,
+        )
+        .await?;
 
     let status_str = format!("{:?}", proposal.status).to_lowercase();
     let votes_for = proposal.votes_for.parse::<u64>().unwrap_or(0);

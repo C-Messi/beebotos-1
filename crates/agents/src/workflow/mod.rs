@@ -15,18 +15,18 @@ pub mod state;
 pub mod template;
 pub mod trigger;
 
-pub use definition::{
-    ErrorHandler, FallbackAction, StepErrorHandler,
-    TriggerDefinition, TriggerType, WorkflowDefinition, WorkflowGlobalConfig, WorkflowStep,
-};
 pub use dag_bridge::{to_dag_workflow, WorkflowDagExecutor};
+pub use definition::{
+    ErrorHandler, FallbackAction, StepErrorHandler, TriggerDefinition, TriggerType,
+    WorkflowDefinition, WorkflowGlobalConfig, WorkflowStep,
+};
 pub use engine::{SkillStepResult, StepExecutor, StepProgressReporter, WorkflowEngine};
 pub use state::{
-    StepState, StepStatus, WorkflowError, WorkflowId, WorkflowInstance, WorkflowInstanceId, WorkflowStatus,
+    StepState, StepStatus, WorkflowError, WorkflowId, WorkflowInstance, WorkflowInstanceId,
+    WorkflowStatus,
 };
 pub use template::{resolve_template, TemplateContext, TemplateError};
 pub use trigger::{TriggerEngine, TriggerMatch};
-
 
 /// Registry of loaded workflow definitions
 #[derive(Debug, Clone, Default)]
@@ -61,7 +61,10 @@ impl WorkflowRegistry {
     }
 
     /// Load all YAML/JSON workflow files from a directory
-    pub async fn load_from_dir(&mut self, dir: &std::path::Path) -> Result<(), WorkflowRegistryError> {
+    pub async fn load_from_dir(
+        &mut self,
+        dir: &std::path::Path,
+    ) -> Result<(), WorkflowRegistryError> {
         let mut entries = match tokio::fs::read_dir(dir).await {
             Ok(e) => e,
             Err(e) => {
@@ -73,9 +76,7 @@ impl WorkflowRegistry {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             let ext = path.extension().and_then(|e| e.to_str());
-            let is_workflow_file = ext == Some("yaml")
-                || ext == Some("yml")
-                || ext == Some("json");
+            let is_workflow_file = ext == Some("yaml") || ext == Some("yml") || ext == Some("json");
 
             if is_workflow_file {
                 match tokio::fs::read_to_string(&path).await {
@@ -112,7 +113,12 @@ impl WorkflowRegistry {
                                 if def.name.is_empty() {
                                     def.name = def.id.clone();
                                 }
-                                tracing::info!("Loaded workflow: {} ({}) from {:?}", def.name, def.id, path);
+                                tracing::info!(
+                                    "Loaded workflow: {} ({}) from {:?}",
+                                    def.name,
+                                    def.id,
+                                    path
+                                );
                                 self.register(def);
                             }
                             Err(e) => {

@@ -3,13 +3,14 @@
 //! Allows users to select and configure the active LLM model provider,
 //! choose model versions (e.g. kimi-k2.6 thinking/fast), and hot-reload config.
 
-use crate::api::{LlmGlobalConfig, UpdateLlmConfigRequest};
-use crate::components::InlineLoading;
-use crate::state::use_app_state;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::view;
 use leptos_meta::*;
+
+use crate::api::{LlmGlobalConfig, UpdateLlmConfigRequest};
+use crate::components::InlineLoading;
+use crate::state::use_app_state;
 
 /// Predefined model options for Kimi provider.
 /// Note: kimi-k2.6 (reasoning model) only supports temperature=1.0.
@@ -67,8 +68,8 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                 provider.temperature
                             };
                             selected_temperature.set(temp);
-                            let label = find_kimi_label(&provider.model, temp)
-                                .unwrap_or(&provider.model);
+                            let label =
+                                find_kimi_label(&provider.model, temp).unwrap_or(&provider.model);
                             selected_variant_label.set(label.to_string());
                         } else {
                             selected_variant_label.set(provider.model.clone());

@@ -8,16 +8,17 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+
 use tokio::sync::RwLock;
 use tracing::warn;
 
 use crate::error::AgentError;
-use crate::planning::ToolTrail;
-use crate::evolution::skill_distiller::{SkillDistiller, DistillerConfig};
-use crate::evolution::skill_lineage::SkillLifecycleManager;
-use crate::evolution::capo::{CapoEngine, CapoConfig};
-use crate::evolution::atropos::{AtroposFramework, AtroposConfig, InMemoryTrailStorage};
+use crate::evolution::atropos::{AtroposConfig, AtroposFramework, InMemoryTrailStorage};
+use crate::evolution::capo::{CapoConfig, CapoEngine};
 use crate::evolution::sandbox::EvolutionSandbox;
+use crate::evolution::skill_distiller::{DistillerConfig, SkillDistiller};
+use crate::evolution::skill_lineage::SkillLifecycleManager;
+use crate::planning::ToolTrail;
 
 /// Evolution layer trigger frequencies
 #[derive(Debug, Clone)]
@@ -87,11 +88,20 @@ impl std::fmt::Debug for EvolutionScheduler {
             .field("schedule", &self.schedule)
             .field("turn_counter", &self.turn_counter.load(Ordering::SeqCst))
             .field("task_counter", &self.task_counter.load(Ordering::SeqCst))
-            .field("trajectory_counter", &self.trajectory_counter.load(Ordering::SeqCst))
-            .field("memory_enabled", &self.memory_enabled.load(Ordering::SeqCst))
+            .field(
+                "trajectory_counter",
+                &self.trajectory_counter.load(Ordering::SeqCst),
+            )
+            .field(
+                "memory_enabled",
+                &self.memory_enabled.load(Ordering::SeqCst),
+            )
             .field("skill_enabled", &self.skill_enabled.load(Ordering::SeqCst))
             .field("capo_enabled", &self.capo_enabled.load(Ordering::SeqCst))
-            .field("atropos_enabled", &self.atropos_enabled.load(Ordering::SeqCst))
+            .field(
+                "atropos_enabled",
+                &self.atropos_enabled.load(Ordering::SeqCst),
+            )
             .field("total_tasks", &self.total_tasks.load(Ordering::SeqCst))
             .finish()
     }
@@ -130,7 +140,8 @@ impl EvolutionScheduler {
     /// Increment turn counter, return true if memory nudge should trigger
     pub fn on_user_turn(&self) -> bool {
         let turns = self.turn_counter.fetch_add(1, Ordering::SeqCst) + 1;
-        self.memory_enabled.load(Ordering::SeqCst) && turns % self.schedule.memory_turn_threshold == 0
+        self.memory_enabled.load(Ordering::SeqCst)
+            && turns % self.schedule.memory_turn_threshold == 0
     }
 
     /// Post-task hook: orchestrate all evolution layers
@@ -175,14 +186,16 @@ impl EvolutionScheduler {
 
         // Track overhead
         let elapsed_ms = start.elapsed().as_millis() as usize;
-        self.cumulative_overhead_ms.fetch_add(elapsed_ms, Ordering::SeqCst);
+        self.cumulative_overhead_ms
+            .fetch_add(elapsed_ms, Ordering::SeqCst);
         self.total_tasks.fetch_add(1, Ordering::SeqCst);
         summary.overhead_ms = elapsed_ms as u64;
 
         Ok(summary)
     }
 
-    /// Check if evolution overhead is within budget (< 5% of average task latency)
+    /// Check if evolution overhead is within budget (< 5% of average task
+    /// latency)
     pub fn overhead_ratio(&self) -> f32 {
         let total = self.total_tasks.load(Ordering::SeqCst).max(1);
         let overhead = self.cumulative_overhead_ms.load(Ordering::SeqCst) as f32;
@@ -200,7 +213,10 @@ impl EvolutionScheduler {
     pub async fn adaptive_throttle(&self) {
         let ratio = self.overhead_ratio();
         if ratio > 0.8 {
-            warn!("Evolution overhead at {:.0}% of budget, throttling CAPO", ratio * 100.0);
+            warn!(
+                "Evolution overhead at {:.0}% of budget, throttling CAPO",
+                ratio * 100.0
+            );
             self.capo_enabled.store(false, Ordering::SeqCst);
         } else if ratio < 0.3 {
             self.capo_enabled.store(true, Ordering::SeqCst);
@@ -234,7 +250,9 @@ impl Clone for EvolutionScheduler {
             lifecycle_manager: self.lifecycle_manager.clone(),
             capo_engine: self.capo_engine.clone(),
             atropos: self.atropos.clone(),
-            cumulative_overhead_ms: AtomicUsize::new(self.cumulative_overhead_ms.load(Ordering::SeqCst)),
+            cumulative_overhead_ms: AtomicUsize::new(
+                self.cumulative_overhead_ms.load(Ordering::SeqCst),
+            ),
             total_tasks: AtomicUsize::new(self.total_tasks.load(Ordering::SeqCst)),
         }
     }
@@ -261,10 +279,10 @@ mod tests {
         });
         assert!(!sched.on_user_turn()); // 1
         assert!(!sched.on_user_turn()); // 2
-        assert!(sched.on_user_turn());  // 3
+        assert!(sched.on_user_turn()); // 3
         assert!(!sched.on_user_turn()); // 4
         assert!(!sched.on_user_turn()); // 5
-        assert!(sched.on_user_turn());  // 6
+        assert!(sched.on_user_turn()); // 6
     }
 
     #[tokio::test]
@@ -285,9 +303,13 @@ mod tests {
         // Simulate some overhead
         sched.total_tasks.store(100, Ordering::SeqCst);
         sched.cumulative_overhead_ms.store(5000, Ordering::SeqCst); // 5s overhead on 100 tasks
-        // budget = 100 * 2000 * 0.05 = 10000ms
-        // ratio = 5000 / 10000 = 0.5
+                                                                    // budget = 100 * 2000 * 0.05 = 10000ms
+                                                                    // ratio = 5000 / 10000 = 0.5
         let ratio = sched.overhead_ratio();
-        assert!(ratio > 0.4 && ratio < 0.6, "ratio should be ~0.5, got {}", ratio);
+        assert!(
+            ratio > 0.4 && ratio < 0.6,
+            "ratio should be ~0.5, got {}",
+            ratio
+        );
     }
 }

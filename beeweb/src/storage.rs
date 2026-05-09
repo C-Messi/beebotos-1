@@ -2,11 +2,13 @@
 //!
 //! Supports both in-memory and SQLite persistent storage.
 
-use crate::models::{ReleaseRecord, SemVer, UpdateMetricRecord, UpdateStatus, VersionInfo};
+use std::sync::Arc;
+
 use chrono::Utc;
 use dashmap::DashMap;
 use serde::Serialize;
-use std::sync::Arc;
+
+use crate::models::{ReleaseRecord, SemVer, UpdateMetricRecord, UpdateStatus, VersionInfo};
 
 /// Storage backend for releases and metrics
 #[derive(Debug, Clone)]
@@ -35,18 +37,16 @@ impl Storage {
 
     /// Seed with sample data for testing
     pub async fn seed_sample_data(&self) {
-        use crate::models::{PackageInfo, PackageType, Platform, UpdateMetadata, UpdatePriority};
         use std::collections::HashMap;
+
+        use crate::models::{PackageInfo, PackageType, Platform, UpdateMetadata, UpdatePriority};
 
         let mut release_notes = HashMap::new();
         release_notes.insert(
             "en".to_string(),
             "Bug fixes and performance improvements".to_string(),
         );
-        release_notes.insert(
-            "zh".to_string(),
-            "修复漏洞并提升性能".to_string(),
-        );
+        release_notes.insert("zh".to_string(), "修复漏洞并提升性能".to_string());
 
         // Gateway release
         let gateway_v110 = VersionInfo {
@@ -74,7 +74,8 @@ impl Storage {
                     platform: Platform::Linux,
                     package_type: PackageType::Full,
                     download_url: "/api/v1/updates/download/gateway-1.1.0-linux-amd64".to_string(),
-                    hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+                    hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .to_string(),
                     size: 15_728_640,
                     signature: "dummy_signature_for_demo".to_string(),
                     base_version: None,
@@ -83,8 +84,10 @@ impl Storage {
                     id: "gateway-1.1.0-windows-amd64".to_string(),
                     platform: Platform::Windows,
                     package_type: PackageType::Full,
-                    download_url: "/api/v1/updates/download/gateway-1.1.0-windows-amd64".to_string(),
-                    hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+                    download_url: "/api/v1/updates/download/gateway-1.1.0-windows-amd64"
+                        .to_string(),
+                    hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .to_string(),
                     size: 16_384_000,
                     signature: "dummy_signature_for_demo".to_string(),
                     base_version: None,
@@ -135,7 +138,8 @@ impl Storage {
                     platform: Platform::Linux,
                     package_type: PackageType::Full,
                     download_url: "/api/v1/updates/download/cli-1.1.0-linux-amd64".to_string(),
-                    hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+                    hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .to_string(),
                     size: 8_192_000,
                     signature: "dummy_signature_for_demo".to_string(),
                     base_version: None,
@@ -145,7 +149,8 @@ impl Storage {
                     platform: Platform::MacOS,
                     package_type: PackageType::Full,
                     download_url: "/api/v1/updates/download/cli-1.1.0-macos-amd64".to_string(),
-                    hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+                    hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .to_string(),
                     size: 8_388_608,
                     signature: "dummy_signature_for_demo".to_string(),
                     base_version: None,
@@ -194,7 +199,8 @@ impl Storage {
                 platform: Platform::Wasm,
                 package_type: PackageType::Full,
                 download_url: "/api/v1/updates/download/web-1.1.0-wasm".to_string(),
-                hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+                hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .to_string(),
                 size: 4_194_304,
                 signature: "dummy_signature_for_demo".to_string(),
                 base_version: None,
@@ -226,7 +232,11 @@ impl Storage {
     ) -> Option<ReleaseRecord> {
         // Prefer database if available
         if let Some(ref db) = self.db {
-            return db.find_latest_release(app_name, channel).await.ok().flatten();
+            return db
+                .find_latest_release(app_name, channel)
+                .await
+                .ok()
+                .flatten();
         }
         self.releases
             .get(app_name)?
@@ -237,13 +247,21 @@ impl Storage {
     }
 
     /// Find a specific package by ID across all releases
-    pub async fn find_package(&self, package_id: &str) -> Option<(ReleaseRecord, crate::models::PackageInfo)> {
+    pub async fn find_package(
+        &self,
+        package_id: &str,
+    ) -> Option<(ReleaseRecord, crate::models::PackageInfo)> {
         if let Some(ref db) = self.db {
             return db.find_package(package_id).await.ok().flatten();
         }
         for entry in self.releases.iter() {
             for release in entry.value() {
-                if let Some(pkg) = release.version_info.packages.iter().find(|p| p.id == package_id) {
+                if let Some(pkg) = release
+                    .version_info
+                    .packages
+                    .iter()
+                    .find(|p| p.id == package_id)
+                {
                     return Some((release.clone(), pkg.clone()));
                 }
             }
@@ -264,10 +282,7 @@ impl Storage {
         if let Some(ref db) = self.db {
             return db.get_metrics().await.unwrap_or_default();
         }
-        self.metrics
-            .iter()
-            .map(|e| e.value().clone())
-            .collect()
+        self.metrics.iter().map(|e| e.value().clone()).collect()
     }
 
     /// Get metrics summary by status

@@ -1,0 +1,619 @@
+//! Unified ReAct Executor
+//!
+//! A JSON-format ReAct loop where the LLM autonomously decides each step.
+//! The LLM outputs structured JSON with `thought`, `action`, `tool_name`,
+//! and `arguments` — or a `final_answer`.
+//!
+//! This executor is used for:
+//! - Investment decision analysis (crypto market data gathering + analysis)
+//! - Transaction form submission (multi-turn parameter collection)
+//! - Order confirmation flows
+//! - Any multi-step task that requires autonomous planning
+//!
+//! Max rounds: 10 (hard cap). The LLM decides when to terminate via
+//! `final_answer`.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+
+use tracing::{debug, info, warn};
+
+use crate::communication::{LLMCallInterface, Message as CommMessage, PlatformType};
+use crate::error::AgentError;
+use crate::skills::tool_set::SkillTool;
+
+/// Configuration for the Unified ReAct Executor
+#[derive(Debug, Clone)]
+pub struct UnifiedReActConfig {
+    /// Maximum number of rounds (hard cap). Default: 10.
+    pub max_rounds: usize,
+    /// Timeout per LLM call in seconds. Default: 30.
+    pub round_timeout_sec: u64,
+    /// Whether to enable self-reflection on each step. Default: true.
+    pub enable_reflection: bool,
+    /// Whether the final answer must be valid JSON. Default: true.
+    pub require_structured_output: bool,
+}
+
+impl Default for UnifiedReActConfig {
+    fn default() -> Self {
+        Self {
+            max_rounds: 10,
+            round_timeout_sec: 30,
+            enable_reflection: true,
+            require_structured_output: true,
+        }
+    }
+}
+
+/// A single round in the ReAct loop
+#[derive(Debug, Clone)]
+pub struct ReActRound {
+    pub round_number: usize,
+    pub llm_thought: String,
+    pub action: ReActAction,
+    pub observation: Option<String>,
+    pub timestamp: Instant,
+}
+
+/// Action taken by the LLM in a round
+#[derive(Debug, Clone)]
+pub enum ReActAction {
+    /// Call a tool to gather data
+    CallTool {
+        tool_name: String,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        reasoning: String,
+    },
+    /// Output the final answer (terminates the loop)
+    FinalAnswer { content: String },
+}
+
+/// Parsed LLM response
+#[derive(Debug, Clone)]
+pub struct ParsedReActResponse {
+    pub thought: String,
+    pub action: ReActAction,
+}
+
+/// Unified ReAct executor — LLM-driven autonomous planning and execution
+pub struct UnifiedReActExecutor {
+    llm: Arc<dyn LLMCallInterface>,
+    config: UnifiedReActConfig,
+}
+
+impl UnifiedReActExecutor {
+    pub fn new(llm: Arc<dyn LLMCallInterface>) -> Self {
+        Self {
+            llm,
+            config: UnifiedReActConfig::default(),
+        }
+    }
+
+    pub fn with_config(mut self, config: UnifiedReActConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Execute the ReAct loop.
+    ///
+    /// # Arguments
+    /// * `system_prompt` — The full System Prompt (role + tools + rules + user
+    ///   context)
+    /// * `user_request` — The user's original input
+    /// * `available_tools` — Tools the LLM can call during the loop
+    ///
+    /// # Returns
+    /// The `final_answer.content` string (typically JSON)
+    pub async fn execute(
+        &self,
+        system_prompt: &str,
+        user_request: &str,
+        available_tools: &HashMap<String, Box<dyn SkillTool>>,
+    ) -> Result<String, AgentError> {
+        let mut rounds: Vec<ReActRound> = Vec::new();
+        let mut messages = Vec::new();
+
+        // Round 0: inject system prompt as the first message
+        messages.push(CommMessage::new(
+            uuid::Uuid::new_v4(),
+            PlatformType::Custom,
+            system_prompt.to_string(),
+        ));
+
+        info!(
+            "Starting Unified ReAct loop: max_rounds={}, tools={}",
+            self.config.max_rounds,
+            available_tools.len()
+        );
+
+        for round in 1..=self.config.max_rounds {
+            // Build the round prompt (includes history of all previous rounds)
+            let round_prompt = self.build_round_prompt(&rounds, user_request);
+            messages.push(CommMessage::new(
+                uuid::Uuid::new_v4(),
+                PlatformType::Custom,
+                round_prompt,
+            ));
+
+            debug!(
+                "ReAct round {}/{}: sending {} messages",
+                round,
+                self.config.max_rounds,
+                messages.len()
+            );
+
+            // Call LLM
+            let llm_response = match self.llm.call_llm(messages.clone(), None).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    return Err(AgentError::Execution(format!(
+                        "Round {} LLM call failed: {}",
+                        round, e
+                    )));
+                }
+            };
+
+            debug!(
+                "Round {} LLM raw response: {} chars",
+                round,
+                llm_response.len()
+            );
+
+            // Parse LLM output
+            let parsed = match parse_react_response(&llm_response) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(
+                        "Round {}: Failed to parse LLM response: {}. Response: {}",
+                        round,
+                        e,
+                        &llm_response[..llm_response.len().min(200)]
+                    );
+                    // Guide LLM to retry with correct format
+                    messages.push(CommMessage::new(
+                        uuid::Uuid::new_v4(),
+                        PlatformType::Custom,
+                        format!(
+                            "[System] 输出格式错误: {}。请严格使用 JSON 格式输出，包含 thought, \
+                             action, tool_name/arguments 或 final_answer。",
+                            e
+                        ),
+                    ));
+                    continue;
+                }
+            };
+
+            match parsed.action {
+                ReActAction::CallTool {
+                    tool_name,
+                    arguments,
+                    reasoning,
+                } => {
+                    info!(
+                        "Round {}/{}: LLM calls tool '{}' ({})",
+                        round, self.config.max_rounds, tool_name, reasoning
+                    );
+
+                    // Check for duplicate tool calls with identical arguments
+                    let is_duplicate = rounds.iter().any(|r| {
+                        if let ReActAction::CallTool {
+                            tool_name: prev_name,
+                            arguments: prev_args,
+                            ..
+                        } = &r.action
+                        {
+                            prev_name == &tool_name && prev_args == &arguments
+                        } else {
+                            false
+                        }
+                    });
+
+                    let observation = if is_duplicate {
+                        warn!(
+                            "Duplicate tool call detected: {} with same args. Skipping.",
+                            tool_name
+                        );
+                        format!(
+                            "[System Notice] \
+                             该工具已在之前的轮次中使用过相同的参数调用过。请避免重复调用，\
+                             尝试使用不同的参数或调用其他工具。"
+                        )
+                    } else {
+                        // Execute the tool
+                        match available_tools.get(&tool_name) {
+                            Some(tool) => {
+                                let params = serde_json::Value::Object(arguments.clone());
+                                match tool.execute(&params).await {
+                                    Ok(result) => {
+                                        if result.len() > 4000 {
+                                            format!(
+                                                "{}...[truncated {} chars]",
+                                                &result[..4000],
+                                                result.len() - 4000
+                                            )
+                                        } else {
+                                            result
+                                        }
+                                    }
+                                    Err(e) => {
+                                        format!("[Error] Tool execution failed: {}", e)
+                                    }
+                                }
+                            }
+                            None => {
+                                let available: Vec<_> = available_tools.keys().cloned().collect();
+                                format!(
+                                    "[Error] Tool '{}' not found. Available tools: {:?}",
+                                    tool_name, available
+                                )
+                            }
+                        }
+                    };
+
+                    // Record this round
+                    rounds.push(ReActRound {
+                        round_number: round,
+                        llm_thought: parsed.thought.clone(),
+                        action: ReActAction::CallTool {
+                            tool_name: tool_name.clone(),
+                            arguments: arguments.clone(),
+                            reasoning: reasoning.clone(),
+                        },
+                        observation: Some(observation.clone()),
+                        timestamp: Instant::now(),
+                    });
+
+                    // Append to messages for next round context
+                    messages.push(CommMessage::new(
+                        uuid::Uuid::new_v4(),
+                        PlatformType::Custom,
+                        format!(
+                            "```json\n{}\n```",
+                            serde_json::to_string(&serde_json::json!({
+                                "thought": parsed.thought,
+                                "action": "call_tool",
+                                "tool_name": tool_name,
+                                "arguments": arguments,
+                                "reasoning": reasoning,
+                            }))
+                            .unwrap_or_default()
+                        ),
+                    ));
+                    messages.push(CommMessage::new(
+                        uuid::Uuid::new_v4(),
+                        PlatformType::Custom,
+                        format!(
+                            "[Observation] 工具执行结果:\n{}\n\n请基于以上结果，决定下一步操作。",
+                            observation
+                        ),
+                    ));
+
+                    // Optional: reflection step
+                    if self.config.enable_reflection && round > 1 {
+                        let reflection = format!(
+                            "[Reflection] 第 {} 轮已完成。已调用工具: \
+                             {}。请回顾：数据是否足够？是否需要调整分析方向？",
+                            round,
+                            rounds
+                                .iter()
+                                .filter_map(|r| match &r.action {
+                                    ReActAction::CallTool { tool_name, .. } =>
+                                        Some(tool_name.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        messages.push(CommMessage::new(
+                            uuid::Uuid::new_v4(),
+                            PlatformType::Custom,
+                            reflection,
+                        ));
+                    }
+
+                    continue;
+                }
+
+                ReActAction::FinalAnswer { content } => {
+                    info!(
+                        "ReAct loop terminated by LLM at round {}/{}, total_rounds: {}",
+                        round,
+                        self.config.max_rounds,
+                        rounds.len()
+                    );
+
+                    rounds.push(ReActRound {
+                        round_number: round,
+                        llm_thought: parsed.thought,
+                        action: ReActAction::FinalAnswer {
+                            content: content.clone(),
+                        },
+                        observation: None,
+                        timestamp: Instant::now(),
+                    });
+
+                    return Ok(content);
+                }
+            }
+        }
+
+        // Max rounds reached without termination — force final answer
+        warn!(
+            "ReAct reached max_rounds ({}), forcing final_answer",
+            self.config.max_rounds
+        );
+
+        messages.push(CommMessage::new(
+            uuid::Uuid::new_v4(),
+            PlatformType::Custom,
+            "[System] 已达到最大思考轮数（10轮）。请基于已收集的所有数据，\
+             立即输出最终分析结论（final_answer），不允许再调用工具。"
+                .to_string(),
+        ));
+
+        let forced_response = self
+            .llm
+            .call_llm(messages, None)
+            .await
+            .map_err(|e| AgentError::Execution(format!("Forced final_answer failed: {}", e)))?;
+
+        // Try to parse as final_answer
+        match parse_react_response(&forced_response) {
+            Ok(parsed) => {
+                if let ReActAction::FinalAnswer { content } = parsed.action {
+                    return Ok(content);
+                }
+            }
+            Err(_) => {}
+        }
+
+        // If parsing fails, return the raw response
+        Ok(forced_response)
+    }
+
+    /// Build the prompt for a specific round, including history
+    fn build_round_prompt(&self, rounds: &[ReActRound], _user_request: &str) -> String {
+        if rounds.is_empty() {
+            return "请输出你的思考过程和下一步行动（call_tool 或 final_answer）。".to_string();
+        }
+
+        let mut history = String::new();
+        history.push_str("## 已执行的工具调用历史\n\n");
+
+        for round in rounds {
+            history.push_str(&format!("### 第 {} 轮\n", round.round_number));
+            history.push_str(&format!("Thought: {}\n", round.llm_thought));
+
+            match &round.action {
+                ReActAction::CallTool {
+                    tool_name,
+                    arguments,
+                    reasoning,
+                } => {
+                    history.push_str(&format!(
+                        "Action: call_tool({})\nReasoning: {}\nArguments: {}\n",
+                        tool_name,
+                        reasoning,
+                        serde_json::to_string(arguments).unwrap_or_default()
+                    ));
+                }
+                ReActAction::FinalAnswer { .. } => {
+                    history.push_str("Action: final_answer\n");
+                }
+            }
+
+            if let Some(obs) = &round.observation {
+                let display = if obs.len() > 2000 {
+                    format!("{}...[truncated]", &obs[..2000])
+                } else {
+                    obs.clone()
+                };
+                history.push_str(&format!("Observation: {}\n", display));
+            }
+            history.push('\n');
+        }
+
+        history.push_str("## 当前状态\n");
+        history.push_str("基于以上已执行的工具调用和返回结果，请决定下一步：\n");
+        history.push_str("- 如果还需要更多数据：调用一个工具（call_tool）\n");
+        history.push_str("- 如果数据已足够：输出最终分析（final_answer）\n");
+        history.push_str("- 如果已达最大轮数限制：必须输出 final_answer\n\n");
+        history.push_str("请输出 JSON 格式。");
+
+        history
+    }
+}
+
+/// Parse the LLM's JSON response into a structured ReAct action
+pub fn parse_react_response(response: &str) -> Result<ParsedReActResponse, String> {
+    // Strategy 1: Extract JSON from markdown code block
+    let json_str = extract_json_from_response(response);
+
+    // Strategy 2: Parse as JSON
+    let value: serde_json::Value = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            // Strategy 3: Try to find any JSON object in the text
+            if let Some(extracted) = find_json_object(response) {
+                match serde_json::from_str(&extracted) {
+                    Ok(v) => v,
+                    Err(_) => return Err(format!("JSON parse error: {}", e)),
+                }
+            } else {
+                return Err(format!("JSON parse error: {}", e));
+            }
+        }
+    };
+
+    let thought = value
+        .get("thought")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let action = value
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'action' field")?;
+
+    match action {
+        "call_tool" => {
+            let tool_name = value
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing 'tool_name' field")?
+                .to_string();
+            let arguments = value
+                .get("arguments")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            let reasoning = value
+                .get("reasoning")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            Ok(ParsedReActResponse {
+                thought,
+                action: ReActAction::CallTool {
+                    tool_name,
+                    arguments,
+                    reasoning,
+                },
+            })
+        }
+        "final_answer" => {
+            let content = match value.get("content") {
+                Some(v) => v.to_string(),
+                None => return Err("Missing 'content' field in final_answer".to_string()),
+            };
+
+            Ok(ParsedReActResponse {
+                thought,
+                action: ReActAction::FinalAnswer { content },
+            })
+        }
+        _ => Err(format!("Unknown action: '{}'", action)),
+    }
+}
+
+/// Extract JSON from markdown code block or plain text
+fn extract_json_from_response(response: &str) -> String {
+    // Try ```json ... ```
+    if let Some(start) = response.find("```json") {
+        let after_start = &response[start + 7..];
+        if let Some(end) = after_start.find("```") {
+            return after_start[..end].trim().to_string();
+        }
+    }
+    // Try ``` ... ```
+    if let Some(start) = response.find("```") {
+        let after_start = &response[start + 3..];
+        if let Some(end) = after_start.find("```") {
+            let extracted = after_start[..end].trim();
+            if extracted.starts_with('{') || extracted.starts_with('[') {
+                return extracted.to_string();
+            }
+        }
+    }
+    response.trim().to_string()
+}
+
+/// Find the first JSON object in a text block
+fn find_json_object(text: &str) -> Option<String> {
+    if let Some(start) = text.find('{') {
+        let mut depth = 0;
+        let mut in_string = false;
+        let mut escape = false;
+        let bytes = text.as_bytes();
+
+        for (i, &b) in bytes.iter().enumerate().skip(start) {
+            if in_string {
+                if escape {
+                    escape = false;
+                    continue;
+                }
+                if b == b'\\' {
+                    escape = true;
+                    continue;
+                }
+                if b == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            if b == b'"' {
+                in_string = true;
+                continue;
+            }
+
+            if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[start..=i].to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_call_tool() {
+        let json = r#"{"thought": "I need price data", "action": "call_tool", "tool_name": "crypto_price", "arguments": {"symbol": "BTC"}, "reasoning": "Get current price"}"#;
+        let parsed = parse_react_response(json).unwrap();
+        assert_eq!(parsed.thought, "I need price data");
+        match parsed.action {
+            ReActAction::CallTool { tool_name, .. } => {
+                assert_eq!(tool_name, "crypto_price");
+            }
+            _ => panic!("Expected CallTool"),
+        }
+    }
+
+    #[test]
+    fn test_parse_final_answer() {
+        let json =
+            r#"{"thought": "Done", "action": "final_answer", "content": {"verdict": "hold"}}"#;
+        let parsed = parse_react_response(json).unwrap();
+        match parsed.action {
+            ReActAction::FinalAnswer { content } => {
+                assert!(content.contains("verdict"));
+            }
+            _ => panic!("Expected FinalAnswer"),
+        }
+    }
+
+    #[test]
+    fn test_extract_from_codeblock() {
+        let text = r#"Some text
+```json
+{"thought": "test", "action": "final_answer", "content": "result"}
+```
+More text"#;
+        let parsed = parse_react_response(text).unwrap();
+        match parsed.action {
+            ReActAction::FinalAnswer { content } => {
+                assert_eq!(content, "\"result\"");
+            }
+            _ => panic!("Expected FinalAnswer"),
+        }
+    }
+
+    #[test]
+    fn test_find_json_object() {
+        let text = r#"Some intro {"key": "value", "nested": {"a": 1}} trailing text"#;
+        let found = find_json_object(text).unwrap();
+        assert!(found.contains("nested"));
+    }
+}

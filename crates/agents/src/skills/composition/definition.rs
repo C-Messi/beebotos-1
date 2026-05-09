@@ -3,8 +3,8 @@
 //! Serializable configuration structures for declarative skill composition.
 //! Used for persistence (YAML/JSON) and HTTP API exchange.
 //!
-//! At runtime, these definitions are converted into executable composition nodes
-//! (SkillPipeline, SkillParallel, SkillConditional, SkillLoop).
+//! At runtime, these definitions are converted into executable composition
+//! nodes (SkillPipeline, SkillParallel, SkillConditional, SkillLoop).
 
 use serde::{Deserialize, Serialize};
 
@@ -324,17 +324,13 @@ impl ConditionDef {
                     expected: expected.clone(),
                 }
             }
-            ConditionDef::ExitCode { code } => {
-                super::conditional::Condition::ExitCode(*code)
-            }
+            ConditionDef::ExitCode { code } => super::conditional::Condition::ExitCode(*code),
             ConditionDef::Expression { expr } => {
                 super::conditional::Condition::Expression(expr.clone())
             }
-            ConditionDef::LlmJudge { prompt } => {
-                super::conditional::Condition::LlmJudge {
-                    prompt: prompt.clone(),
-                }
-            }
+            ConditionDef::LlmJudge { prompt } => super::conditional::Condition::LlmJudge {
+                prompt: prompt.clone(),
+            },
         }
     }
 }
@@ -348,20 +344,16 @@ impl LoopConditionDef {
             LoopConditionDef::OutputEquals { value } => {
                 super::r#loop::LoopCondition::OutputEquals(value.clone())
             }
-            LoopConditionDef::ExitCode { code } => {
-                super::r#loop::LoopCondition::ExitCode(*code)
-            }
+            LoopConditionDef::ExitCode { code } => super::r#loop::LoopCondition::ExitCode(*code),
             LoopConditionDef::JsonFieldEquals { path, expected } => {
                 super::r#loop::LoopCondition::JsonFieldEquals {
                     path: path.clone(),
                     expected: expected.clone(),
                 }
             }
-            LoopConditionDef::LlmJudge { prompt } => {
-                super::r#loop::LoopCondition::LlmJudge {
-                    prompt: prompt.clone(),
-                }
-            }
+            LoopConditionDef::LlmJudge { prompt } => super::r#loop::LoopCondition::LlmJudge {
+                prompt: prompt.clone(),
+            },
             LoopConditionDef::MaxAttempts { max } => {
                 super::r#loop::LoopCondition::MaxAttempts(*max)
             }
@@ -408,7 +400,10 @@ mod tests {
             CompositionConfig::Pipeline { steps } => {
                 assert_eq!(steps.len(), 2);
                 assert_eq!(steps[0].skill_id, "skill_a");
-                assert!(matches!(steps[0].input_mapping, InputMappingDef::PassThrough));
+                assert!(matches!(
+                    steps[0].input_mapping,
+                    InputMappingDef::PassThrough
+                ));
                 assert_eq!(steps[1].skill_id, "skill_b");
             }
             _ => panic!("Expected Pipeline variant"),

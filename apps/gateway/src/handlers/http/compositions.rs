@@ -2,10 +2,11 @@
 //!
 //! REST API for declarative skill composition management.
 
+use std::sync::Arc;
+
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::error::GatewayError;
@@ -97,8 +98,11 @@ pub async fn list_compositions(
 ) -> Result<Json<Vec<CompositionResponse>>, GatewayError> {
     let registry = state.composition_registry()?;
     let reg = registry.read().await;
-    let compositions: Vec<CompositionResponse> =
-        reg.list_all().into_iter().map(to_composition_response).collect();
+    let compositions: Vec<CompositionResponse> = reg
+        .list_all()
+        .into_iter()
+        .map(to_composition_response)
+        .collect();
 
     Ok(Json(compositions))
 }
@@ -168,19 +172,14 @@ pub async fn execute_composition(
         .with_skill_registry(skill_registry)
         .with_llm_interface(llm_interface);
 
-    let runtime_node = def
-        .to_runtime(&agent)
-        .map_err(|e| GatewayError::Internal {
-            message: format!("Failed to build composition runtime: {}", e),
-            correlation_id: uuid::Uuid::new_v4().to_string(),
-        })?;
+    let runtime_node = def.to_runtime(&agent).map_err(|e| GatewayError::Internal {
+        message: format!("Failed to build composition runtime: {}", e),
+        correlation_id: uuid::Uuid::new_v4().to_string(),
+    })?;
 
     match runtime_node.execute(&req.input, &agent).await {
         Ok(output) => {
-            info!(
-                "Composition '{}' executed successfully",
-                id
-            );
+            info!("Composition '{}' executed successfully", id);
             Ok(Json(CompositionExecutionResponse {
                 composition_id: id,
                 status: "completed".to_string(),
@@ -208,7 +207,9 @@ fn to_composition_response(
     let composition_type = match &def.config {
         beebotos_agents::skills::composition::CompositionConfig::Pipeline { .. } => "pipeline",
         beebotos_agents::skills::composition::CompositionConfig::Parallel { .. } => "parallel",
-        beebotos_agents::skills::composition::CompositionConfig::Conditional { .. } => "conditional",
+        beebotos_agents::skills::composition::CompositionConfig::Conditional { .. } => {
+            "conditional"
+        }
         beebotos_agents::skills::composition::CompositionConfig::Loop { .. } => "loop",
     }
     .to_string();

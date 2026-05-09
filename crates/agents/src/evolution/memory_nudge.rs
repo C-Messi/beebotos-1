@@ -13,10 +13,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::error::{AgentError, Result};
-use crate::planning::{ToolTrail, TrailStatus};
 use super::memory_quality::MemoryQualityEvaluator;
+use crate::error::{AgentError, Result};
 use crate::memory::search::{MemorySearch, SearchResult};
+use crate::planning::{ToolTrail, TrailStatus};
 
 /// Trigger conditions for Nudge Engine
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,9 +105,11 @@ impl MemoryWriter {
         // TODO: implement Patch-based write (add/replace/remove by substring matching)
         // For now, write atomically
         let temp = path.with_extension("tmp");
-        tokio::fs::write(&temp, content).await
+        tokio::fs::write(&temp, content)
+            .await
             .map_err(|e| AgentError::storage(format!("Failed to write L1 temp: {}", e)))?;
-        tokio::fs::rename(&temp, &path).await
+        tokio::fs::rename(&temp, &path)
+            .await
             .map_err(|e| AgentError::storage(format!("Failed to rename L1: {}", e)))?;
         Ok(())
     }
@@ -116,9 +118,11 @@ impl MemoryWriter {
     pub async fn write_l2(&self, content: &str) -> Result<()> {
         let path = self.base_path.join("USER.md");
         let temp = path.with_extension("tmp");
-        tokio::fs::write(&temp, content).await
+        tokio::fs::write(&temp, content)
+            .await
             .map_err(|e| AgentError::storage(format!("Failed to write L2 temp: {}", e)))?;
-        tokio::fs::rename(&temp, &path).await
+        tokio::fs::rename(&temp, &path)
+            .await
             .map_err(|e| AgentError::storage(format!("Failed to rename L2: {}", e)))?;
         Ok(())
     }
@@ -164,7 +168,8 @@ impl NudgeEngine {
         }
     }
 
-    /// Increment user turn counter. Returns true if a Memory Nudge should trigger.
+    /// Increment user turn counter. Returns true if a Memory Nudge should
+    /// trigger.
     pub fn increment_turn(&self) -> bool {
         let count = self.turn_counter.fetch_add(1, Ordering::Relaxed) + 1;
         count >= self.config.memory_nudge_interval
@@ -184,9 +189,7 @@ impl NudgeEngine {
     /// Check if a trigger condition is met
     pub fn should_nudge(&self, trigger: &NudgeTrigger) -> bool {
         match trigger {
-            NudgeTrigger::Periodic { .. } => {
-                self.increment_turn()
-            }
+            NudgeTrigger::Periodic { .. } => self.increment_turn(),
             NudgeTrigger::TaskComplexity { tool_call_count } => {
                 *tool_call_count >= self.config.min_tool_calls_for_memory
             }
@@ -226,15 +229,21 @@ impl NudgeEngine {
                 match candidate.category.as_str() {
                     "user_preference" | "communication_style" => {
                         // L2: user profile
-                        self.writer.write_l3(memory_system, &candidate.content, metadata).await?;
+                        self.writer
+                            .write_l3(memory_system, &candidate.content, metadata)
+                            .await?;
                     }
                     "project_fact" | "pitfall" | "workflow" | "environment" => {
                         // L1: project memory
-                        self.writer.write_l3(memory_system, &candidate.content, metadata).await?;
+                        self.writer
+                            .write_l3(memory_system, &candidate.content, metadata)
+                            .await?;
                     }
                     _ => {
                         // L3: full history
-                        self.writer.write_l3(memory_system, &candidate.content, metadata).await?;
+                        self.writer
+                            .write_l3(memory_system, &candidate.content, metadata)
+                            .await?;
                     }
                 }
 
@@ -257,18 +266,24 @@ impl NudgeEngine {
         }
 
         // Count tool calls
-        let tool_call_count: usize = trail.steps.iter()
-            .map(|s| s.tool_calls.len())
-            .sum();
+        let tool_call_count: usize = trail.steps.iter().map(|s| s.tool_calls.len()).sum();
 
         if tool_call_count < self.config.min_tool_calls_for_memory {
             return candidates;
         }
 
         // Extract key tool calls as workflow memory
-        let workflow_desc: Vec<String> = trail.steps.iter()
+        let workflow_desc: Vec<String> = trail
+            .steps
+            .iter()
             .flat_map(|s| s.tool_calls.iter())
-            .map(|tc| format!("{}: {}", tc.tool_name, tc.result_summary.chars().take(60).collect::<String>()))
+            .map(|tc| {
+                format!(
+                    "{}: {}",
+                    tc.tool_name,
+                    tc.result_summary.chars().take(60).collect::<String>()
+                )
+            })
             .collect();
 
         if !workflow_desc.is_empty() {
@@ -317,18 +332,24 @@ mod tests {
     #[test]
     fn test_turn_counter() {
         let engine = NudgeEngine::new(
-            NudgeConfig { memory_nudge_interval: 3, ..Default::default() },
+            NudgeConfig {
+                memory_nudge_interval: 3,
+                ..Default::default()
+            },
             MemoryWriter::new("/tmp"),
         );
         assert!(!engine.increment_turn()); // 1
         assert!(!engine.increment_turn()); // 2
-        assert!(engine.increment_turn());  // 3 >= interval
+        assert!(engine.increment_turn()); // 3 >= interval
     }
 
     #[test]
     fn test_should_nudge_complexity() {
         let engine = NudgeEngine::new(
-            NudgeConfig { min_tool_calls_for_memory: 5, ..Default::default() },
+            NudgeConfig {
+                min_tool_calls_for_memory: 5,
+                ..Default::default()
+            },
             MemoryWriter::new("/tmp"),
         );
         assert!(engine.should_nudge(&NudgeTrigger::TaskComplexity { tool_call_count: 5 }));
@@ -338,7 +359,10 @@ mod tests {
     #[test]
     fn test_reset_counter() {
         let engine = NudgeEngine::new(
-            NudgeConfig { memory_nudge_interval: 2, ..Default::default() },
+            NudgeConfig {
+                memory_nudge_interval: 2,
+                ..Default::default()
+            },
             MemoryWriter::new("/tmp"),
         );
         engine.increment_turn(); // 1

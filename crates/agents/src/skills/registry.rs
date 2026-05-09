@@ -5,10 +5,11 @@
 //! Thread-safe with RwLock for concurrent access.
 
 use std::collections::HashMap;
+
 use tokio::sync::RwLock;
 
-use crate::skills::loader::LoadedSkill;
 use crate::evolution::skill_lineage::SkillLineage;
+use crate::skills::loader::LoadedSkill;
 
 /// Skill registry
 pub struct SkillRegistry {
@@ -185,7 +186,8 @@ impl SkillRegistry {
 
     /// Find skills by category
     pub async fn by_category(&self, category: &str) -> Vec<RegisteredSkill> {
-        // Lock order: categories first, then skills (both read locks, so order is less critical)
+        // Lock order: categories first, then skills (both read locks, so order is less
+        // critical)
         let categories = self.categories.read().await;
         let skills = self.skills.read().await;
 
@@ -211,26 +213,37 @@ impl SkillRegistry {
     }
 
     /// 🆕 OPTIMIZATION: Get skill description at specified disclosure level
-    pub async fn get_skill_description(&self, skill_id: &str, level: SkillDisclosureLevel) -> Option<String> {
+    pub async fn get_skill_description(
+        &self,
+        skill_id: &str,
+        level: SkillDisclosureLevel,
+    ) -> Option<String> {
         let skills = self.skills.read().await;
         let skill = skills.get(skill_id)?;
-        
+
         match level {
-            SkillDisclosureLevel::L0 => {
-                Some(skill.skill.name.clone())
-            }
-            SkillDisclosureLevel::L1 => {
-                skill.l1_index.clone()
-                    .or_else(|| Some(format!("{}: {}", skill.skill.name, skill.skill.manifest.description.chars().take(50).collect::<String>())))
-            }
-            SkillDisclosureLevel::L2 => {
-                skill.l2_summary.clone()
-                    .or_else(|| Some(skill.skill.manifest.description.clone()))
-            }
-            SkillDisclosureLevel::L3 => {
-                skill.l3_full_doc.clone()
-                    .or_else(|| Some(skill.skill.manifest.prompt_template.clone()))
-            }
+            SkillDisclosureLevel::L0 => Some(skill.skill.name.clone()),
+            SkillDisclosureLevel::L1 => skill.l1_index.clone().or_else(|| {
+                Some(format!(
+                    "{}: {}",
+                    skill.skill.name,
+                    skill
+                        .skill
+                        .manifest
+                        .description
+                        .chars()
+                        .take(50)
+                        .collect::<String>()
+                ))
+            }),
+            SkillDisclosureLevel::L2 => skill
+                .l2_summary
+                .clone()
+                .or_else(|| Some(skill.skill.manifest.description.clone())),
+            SkillDisclosureLevel::L3 => skill
+                .l3_full_doc
+                .clone()
+                .or_else(|| Some(skill.skill.manifest.prompt_template.clone())),
         }
     }
 
@@ -277,8 +290,9 @@ impl SkillRegistry {
         }
     }
 
-    /// Search skills by name or description with semantic keyword overlap scoring.
-    /// 🆕 FIX: Uses keyword overlap instead of simple substring match for better relevance.
+    /// Search skills by name or description with semantic keyword overlap
+    /// scoring. 🆕 FIX: Uses keyword overlap instead of simple substring
+    /// match for better relevance.
     pub async fn search(&self, query: &str) -> Vec<RegisteredSkill> {
         let skills = self.skills.read().await;
         let query_lower = query.to_lowercase();
@@ -287,19 +301,19 @@ impl SkillRegistry {
             .filter(|w| w.len() >= 3)
             .map(|w| w.to_string())
             .collect();
-        
+
         let mut scored: Vec<(usize, RegisteredSkill)> = skills
             .values()
             .filter_map(|s| {
                 let name_lower = s.skill.name.to_lowercase();
                 let desc_lower = s.skill.manifest.description.to_lowercase();
                 let caps_lower = s.skill.manifest.capabilities.join(" ").to_lowercase();
-                
+
                 // Direct substring match gets highest priority
                 if name_lower.contains(&query_lower) || desc_lower.contains(&query_lower) {
                     return Some((100, s.clone()));
                 }
-                
+
                 // Keyword overlap scoring
                 let text = format!("{} {} {}", name_lower, desc_lower, caps_lower);
                 let text_words: std::collections::HashSet<String> = text
@@ -307,7 +321,7 @@ impl SkillRegistry {
                     .filter(|w| w.len() >= 3)
                     .map(|w| w.to_string())
                     .collect();
-                
+
                 let overlap = query_words.intersection(&text_words).count();
                 if overlap > 0 {
                     Some((overlap, s.clone()))
@@ -316,7 +330,7 @@ impl SkillRegistry {
                 }
             })
             .collect();
-        
+
         // Sort by score descending
         scored.sort_by(|a, b| b.0.cmp(&a.0));
         scored.into_iter().map(|(_, s)| s).collect()
@@ -331,11 +345,7 @@ impl SkillRegistry {
     /// List only enabled skills
     pub async fn list_enabled(&self) -> Vec<RegisteredSkill> {
         let skills = self.skills.read().await;
-        skills
-            .values()
-            .filter(|s| s.enabled)
-            .cloned()
-            .collect()
+        skills.values().filter(|s| s.enabled).cloned().collect()
     }
 
     /// Increment usage count
@@ -404,8 +414,9 @@ impl SkillRegistry {
     /// Creates a rollback lineage node to preserve immutable history,
     /// then updates current_version to the target.
     pub async fn rollback(&self, skill_id: &str, target_version: &str) -> Result<(), String> {
-        use crate::evolution::skill_lineage::{LineageNode, LineageSource};
         use chrono::Utc;
+
+        use crate::evolution::skill_lineage::{LineageNode, LineageSource};
 
         let mut skills = self.skills.write().await;
         let skill = skills.get_mut(skill_id).ok_or("Skill not found")?;
@@ -437,7 +448,11 @@ impl SkillRegistry {
     }
 
     /// 🆕 PHASE 5: Update skill lineage with a new version node
-    pub async fn update_lineage(&self, skill_id: &str, lineage: SkillLineage) -> Result<(), String> {
+    pub async fn update_lineage(
+        &self,
+        skill_id: &str,
+        lineage: SkillLineage,
+    ) -> Result<(), String> {
         let mut skills = self.skills.write().await;
         let skill = skills.get_mut(skill_id).ok_or("Skill not found")?;
         skill.lineage = Some(lineage);

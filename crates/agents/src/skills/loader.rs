@@ -20,7 +20,8 @@ pub struct LoadedSkill {
     pub name: String,
     pub version: Version,
     pub wasm_path: PathBuf,
-    /// Path to the skill source directory or file (for lazy loading and script resolution)
+    /// Path to the skill source directory or file (for lazy loading and script
+    /// resolution)
     pub source_path: PathBuf,
     pub manifest: SkillManifest,
 }
@@ -80,7 +81,8 @@ pub struct SkillManifest {
     /// 🆕 SKILL MATCHING V2: Positive examples that should activate this skill
     #[serde(default)]
     pub activation_examples: Vec<String>,
-    /// 🆕 SKILL MATCHING V2: Negative examples that should NOT activate this skill
+    /// 🆕 SKILL MATCHING V2: Negative examples that should NOT activate this
+    /// skill
     #[serde(default)]
     pub activation_negative_examples: Vec<String>,
     /// 🆕 SKILL MATCHING V2: Skill dependencies

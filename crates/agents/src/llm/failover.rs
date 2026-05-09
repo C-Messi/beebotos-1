@@ -1,15 +1,16 @@
 //! LLM Provider Failover Module
 //!
-//! ARCHITECTURE FIX: Implements provider failover with automatic chain-based fallback.
-//! When the primary provider fails, requests are automatically routed to secondary providers.
+//! ARCHITECTURE FIX: Implements provider failover with automatic chain-based
+//! fallback. When the primary provider fails, requests are automatically routed
+//! to secondary providers.
 
-use super::{
-    traits::{LLMProvider, ProviderCapabilities},
-    types::{LLMError, LLMRequest, LLMResponse, LLMResult},
-};
 use std::sync::Arc;
+
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
+
+use super::traits::{LLMProvider, ProviderCapabilities};
+use super::types::{LLMError, LLMRequest, LLMResponse, LLMResult};
 
 /// Provider with health status
 #[derive(Clone)]
@@ -137,9 +138,10 @@ impl FailoverProvider {
         }
     }
 
-    /// 🆕 FIX: Determine if an error is transient (provider-side) or non-transient (client-side).
-    /// Transient errors: network issues, timeouts, server errors (5xx), rate limits (429).
-    /// Non-transient errors: auth failures (401), not found (404), bad requests (400), etc.
+    /// 🆕 FIX: Determine if an error is transient (provider-side) or
+    /// non-transient (client-side). Transient errors: network issues,
+    /// timeouts, server errors (5xx), rate limits (429). Non-transient
+    /// errors: auth failures (401), not found (404), bad requests (400), etc.
     fn is_transient_error(error: &LLMError) -> bool {
         match error {
             LLMError::Network(_) | LLMError::Timeout => true,
@@ -192,9 +194,13 @@ impl FailoverProvider {
                         warn!("Provider {} failed (transient): {}", provider_name, e);
                         self.update_provider_health(index, false).await;
                     } else {
-                        warn!("Provider {} returned client error (non-transient): {}", provider_name, e);
-                        // Do NOT mark unhealthy for client errors — provider is fine,
-                        // but the request was invalid (e.g. wrong model name).
+                        warn!(
+                            "Provider {} returned client error (non-transient): {}",
+                            provider_name, e
+                        );
+                        // Do NOT mark unhealthy for client errors — provider is
+                        // fine, but the request was
+                        // invalid (e.g. wrong model name).
                     }
                 }
                 Err(_) => {
@@ -229,9 +235,9 @@ impl LLMProvider for FailoverProvider {
         // Note: This is a simplified implementation that tries providers sequentially.
         // Full streaming failover with mid-stream switching is more complex and
         // would require a streaming aggregation layer.
-        
+
         let provider_count = self.providers.read().await.len();
-        
+
         for index in 0..provider_count {
             // Get provider info
             let (provider, provider_name) = {
@@ -246,13 +252,16 @@ impl LLMProvider for FailoverProvider {
                 }
                 (entry.provider.clone(), entry.name.clone())
             };
-            
+
             // Try streaming with this provider
             match provider.complete_stream(request.clone()).await {
                 Ok(receiver) => {
                     // Success - mark provider healthy
                     self.update_provider_health(index, true).await;
-                    info!("Streaming request succeeded with provider {}", provider_name);
+                    info!(
+                        "Streaming request succeeded with provider {}",
+                        provider_name
+                    );
                     return Ok(receiver);
                 }
                 Err(e) => {
@@ -261,12 +270,12 @@ impl LLMProvider for FailoverProvider {
                     self.update_provider_health(index, false).await;
                 }
             }
-            
+
             if index < provider_count - 1 {
                 info!("Failing over streaming to next provider");
             }
         }
-        
+
         Err(LLMError::Provider(
             "All providers failed for streaming request".to_string(),
         ))
@@ -300,7 +309,9 @@ impl LLMProvider for FailoverProvider {
         if any_healthy {
             Ok(())
         } else {
-            Err(LLMError::Provider("No healthy providers available".to_string()))
+            Err(LLMError::Provider(
+                "No healthy providers available".to_string(),
+            ))
         }
     }
 
@@ -312,13 +323,13 @@ impl LLMProvider for FailoverProvider {
         // Aggregate models from all providers
         let providers = self.providers.read().await;
         let mut all_models = Vec::new();
-        
+
         for entry in providers.iter() {
             if let Ok(models) = entry.provider.list_models().await {
                 all_models.extend(models);
             }
         }
-        
+
         Ok(all_models)
     }
 }
@@ -366,9 +377,9 @@ impl FailoverProviderBuilder {
 
     /// Build the provider
     pub fn build(self) -> LLMResult<FailoverProvider> {
-        let primary = self.primary.ok_or_else(|| {
-            LLMError::InvalidRequest("Primary provider required".to_string())
-        })?;
+        let primary = self
+            .primary
+            .ok_or_else(|| LLMError::InvalidRequest("Primary provider required".to_string()))?;
 
         Ok(FailoverProvider::new(primary, self.fallbacks).with_config(self.config))
     }

@@ -55,7 +55,10 @@ impl SkillPipeline {
                 step.skill_id
             );
 
-            match agent.execute_skill_by_id(&step.skill_id, &step_input, None).await {
+            match agent
+                .execute_skill_by_id(&step.skill_id, &step_input, None)
+                .await
+            {
                 Ok(result) => {
                     current_output = result.output;
                 }
@@ -82,11 +85,13 @@ impl InputMapping {
         match self {
             InputMapping::PassThrough => Ok(previous_output.to_string()),
             InputMapping::JsonField(path) => {
-                let value: serde_json::Value = serde_json::from_str(previous_output)
-                    .map_err(|e| AgentError::Execution(format!("Invalid JSON for field extraction: {}", e)))?;
-                let result = value
-                    .pointer(path)
-                    .ok_or_else(|| AgentError::Execution(format!("JSON path not found: {}", path)))?;
+                let value: serde_json::Value =
+                    serde_json::from_str(previous_output).map_err(|e| {
+                        AgentError::Execution(format!("Invalid JSON for field extraction: {}", e))
+                    })?;
+                let result = value.pointer(path).ok_or_else(|| {
+                    AgentError::Execution(format!("JSON path not found: {}", path))
+                })?;
                 Ok(result.to_string())
             }
             InputMapping::Format(template) => Ok(template.replace("{input}", previous_output)),
@@ -114,13 +119,19 @@ mod tests {
         let pass = InputMapping::PassThrough.apply(json).unwrap();
         assert_eq!(pass, json);
 
-        let field = InputMapping::JsonField("/result/summary".to_string()).apply(json).unwrap();
+        let field = InputMapping::JsonField("/result/summary".to_string())
+            .apply(json)
+            .unwrap();
         assert_eq!(field, "\"Hello World\"");
 
-        let fmt = InputMapping::Format("Summary: {input}".to_string()).apply(json).unwrap();
+        let fmt = InputMapping::Format("Summary: {input}".to_string())
+            .apply(json)
+            .unwrap();
         assert!(fmt.contains("Summary:"));
 
-        let st = InputMapping::Static("fixed".to_string()).apply(json).unwrap();
+        let st = InputMapping::Static("fixed".to_string())
+            .apply(json)
+            .unwrap();
         assert_eq!(st, "fixed");
     }
 }

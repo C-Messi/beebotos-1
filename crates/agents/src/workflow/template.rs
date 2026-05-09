@@ -4,9 +4,10 @@
 //! `{{now}}`, `{{env.VAR_NAME}}`, and `${ENV_VAR}` placeholders
 //! within workflow step parameters.
 
+use std::collections::HashMap;
+
 use regex::Regex;
 use serde_json::Value;
-use std::collections::HashMap;
 
 /// Context for template variable resolution
 #[derive(Debug, Clone, Default)]
@@ -53,7 +54,8 @@ impl TemplateContext {
 
     /// Add a step's status to the context
     pub fn add_step_status(&mut self, step_id: &str, status: &str) {
-        self.step_statuses.insert(step_id.to_string(), status.to_string());
+        self.step_statuses
+            .insert(step_id.to_string(), status.to_string());
     }
 }
 
@@ -80,7 +82,10 @@ impl std::fmt::Display for TemplateError {
 impl std::error::Error for TemplateError {}
 
 /// Resolve all template variables in a string
-pub fn resolve_template(template: &str, context: &TemplateContext) -> Result<String, TemplateError> {
+pub fn resolve_template(
+    template: &str,
+    context: &TemplateContext,
+) -> Result<String, TemplateError> {
     // Match {{ ... }} with optional whitespace
     let re = Regex::new(r"\{\{\s*([^}]+)\s*\}\}").unwrap();
     let mut result = template.to_string();
@@ -109,7 +114,10 @@ pub fn resolve_template(template: &str, context: &TemplateContext) -> Result<Str
 }
 
 /// Recursively resolve templates inside a JSON Value
-pub fn resolve_value_templates(value: &mut Value, context: &TemplateContext) -> Result<(), TemplateError> {
+pub fn resolve_value_templates(
+    value: &mut Value,
+    context: &TemplateContext,
+) -> Result<(), TemplateError> {
     match value {
         Value::String(s) => {
             let resolved = resolve_template(s, context)?;
@@ -150,10 +158,9 @@ fn resolve_variable(path: &str, context: &TemplateContext) -> Result<String, Tem
 
             match field {
                 "output" => {
-                    let output = context
-                        .step_outputs
-                        .get(step_id)
-                        .ok_or_else(|| TemplateError::UnknownVariable(format!("steps.{}.output", step_id)))?;
+                    let output = context.step_outputs.get(step_id).ok_or_else(|| {
+                        TemplateError::UnknownVariable(format!("steps.{}.output", step_id))
+                    })?;
 
                     // If there's a deeper path like steps.x.output.summary
                     if parts.len() > 3 {
@@ -167,10 +174,9 @@ fn resolve_variable(path: &str, context: &TemplateContext) -> Result<String, Tem
                     }
                 }
                 "status" => {
-                    let status = context
-                        .step_statuses
-                        .get(step_id)
-                        .ok_or_else(|| TemplateError::UnknownVariable(format!("steps.{}.status", step_id)))?;
+                    let status = context.step_statuses.get(step_id).ok_or_else(|| {
+                        TemplateError::UnknownVariable(format!("steps.{}.status", step_id))
+                    })?;
                     Ok(status.clone())
                 }
                 other => Err(TemplateError::UnknownVariable(format!(
@@ -203,19 +209,16 @@ fn resolve_variable(path: &str, context: &TemplateContext) -> Result<String, Tem
             }
         }
         // OpenClaw compatibility: {{ now }} → current ISO 8601 timestamp
-        "now" => {
-            Ok(chrono::Utc::now().to_rfc3339())
-        }
+        "now" => Ok(chrono::Utc::now().to_rfc3339()),
         // OpenClaw compatibility: {{ env.VAR_NAME }} → environment variable
         "env" => {
             if parts.len() < 2 {
                 return Err(TemplateError::InvalidSyntax(
-                    "env variable must have form env.VAR_NAME".to_string()
+                    "env variable must have form env.VAR_NAME".to_string(),
                 ));
             }
             let var_name = parts[1];
-            std::env::var(var_name)
-                .map_err(|_| TemplateError::EnvVarNotFound(var_name.to_string()))
+            std::env::var(var_name).map_err(|_| TemplateError::EnvVarNotFound(var_name.to_string()))
         }
         other => Err(TemplateError::UnknownVariable(other.to_string())),
     }
@@ -230,7 +233,10 @@ fn resolve_json_path(value: &Value, path: &str) -> Result<String, TemplateError>
 }
 
 /// Internal JSON path resolver (pub(crate) for trigger event filtering)
-pub(crate) fn resolve_json_path_internal(value: &Value, path: &str) -> Result<String, TemplateError> {
+pub(crate) fn resolve_json_path_internal(
+    value: &Value,
+    path: &str,
+) -> Result<String, TemplateError> {
     let parts: Vec<String> = if path.starts_with('/') {
         // JSON Pointer: split by '/', skip empty leading segment
         path.split('/').skip(1).map(decode_json_pointer).collect()
@@ -291,7 +297,8 @@ mod tests {
             serde_json::json!({"articles": [{"title": "Hello"}]}),
         );
 
-        let result = resolve_template("{{steps.fetch_news.output.articles.0.title}}", &ctx).unwrap();
+        let result =
+            resolve_template("{{steps.fetch_news.output.articles.0.title}}", &ctx).unwrap();
         assert_eq!(result, "Hello");
     }
 
@@ -334,10 +341,7 @@ mod tests {
     #[test]
     fn test_resolve_json_pointer_with_dots() {
         let mut ctx = TemplateContext::new();
-        ctx.add_step_output(
-            "fetch_news",
-            serde_json::json!({"foo.bar": {"baz": "qux"}}),
-        );
+        ctx.add_step_output("fetch_news", serde_json::json!({"foo.bar": {"baz": "qux"}}));
 
         // JSON Pointer syntax to access key containing dot
         let result = resolve_template("{{steps.fetch_news.output./foo.bar/baz}}", &ctx).unwrap();

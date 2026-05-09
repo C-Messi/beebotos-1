@@ -4,7 +4,6 @@
 //! DeepSeek provides high-performance models at competitive pricing.
 
 use async_trait::async_trait;
-
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace};
 
@@ -43,9 +42,9 @@ impl DeepSeekConfig {
     /// Create from environment variables
     pub fn from_env() -> Result<Self, String> {
         use std::env;
-        
-        let api_key = env::var("DEEPSEEK_API_KEY")
-            .map_err(|_| "DEEPSEEK_API_KEY not set".to_string())?;
+
+        let api_key =
+            env::var("DEEPSEEK_API_KEY").map_err(|_| "DEEPSEEK_API_KEY not set".to_string())?;
 
         let base_url = env::var("DEEPSEEK_BASE_URL")
             .unwrap_or_else(|_| "https://api.deepseek.com".to_string());
@@ -113,7 +112,10 @@ impl DeepSeekProvider {
             max_output_tokens: 8_192,
         };
 
-        info!("DeepSeek provider initialized with model: {}", config.default_model);
+        info!(
+            "DeepSeek provider initialized with model: {}",
+            config.default_model
+        );
 
         Ok(Self {
             config,
@@ -125,8 +127,7 @@ impl DeepSeekProvider {
 
     /// Create from environment
     pub fn from_env() -> Result<Self, LLMError> {
-        let config = DeepSeekConfig::from_env()
-            .map_err(|e| LLMError::InvalidRequest(e))?;
+        let config = DeepSeekConfig::from_env().map_err(|e| LLMError::InvalidRequest(e))?;
         Self::new(config)
     }
 }
@@ -145,12 +146,11 @@ impl LLMProvider for DeepSeekProvider {
         debug!("Sending completion request to DeepSeek");
 
         let body = self.request_builder.build_body(request);
-        let response = self.http_client.execute_with_retry(
-            &self.config,
-            "/chat/completions",
-            body
-        ).await?;
-        
+        let response = self
+            .http_client
+            .execute_with_retry(&self.config, "/chat/completions", body)
+            .await?;
+
         let llm_response: LLMResponse = response
             .json()
             .await
@@ -158,7 +158,11 @@ impl LLMProvider for DeepSeekProvider {
 
         debug!(
             "Received response from DeepSeek: {} tokens used",
-            llm_response.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)
+            llm_response
+                .usage
+                .as_ref()
+                .map(|u| u.total_tokens)
+                .unwrap_or(0)
         );
 
         Ok(llm_response)
@@ -173,12 +177,11 @@ impl LLMProvider for DeepSeekProvider {
         request.config.stream = Some(true);
 
         let body = self.request_builder.build_body(request);
-        let response = self.http_client.stream_with_retry(
-            &self.config,
-            "/chat/completions",
-            body
-        ).await?;
-        
+        let response = self
+            .http_client
+            .stream_with_retry(&self.config, "/chat/completions", body)
+            .await?;
+
         let mut stream = response.bytes_stream();
 
         tokio::spawn(async move {
@@ -186,11 +189,11 @@ impl LLMProvider for DeepSeekProvider {
                 match chunk_result {
                     Ok(bytes) => {
                         let text = String::from_utf8_lossy(&bytes);
-                        
+
                         for line in text.lines() {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
-                                
+
                                 if data == "[DONE]" {
                                     break;
                                 }

@@ -26,10 +26,7 @@ impl Default for ReActConfig {
     fn default() -> Self {
         Self {
             max_steps: 10,
-            stop_phrases: vec![
-                "FINAL ANSWER:".to_string(),
-                "Task completed".to_string(),
-            ],
+            stop_phrases: vec!["FINAL ANSWER:".to_string(), "Task completed".to_string()],
             max_history_chars: 8000,
         }
     }
@@ -51,15 +48,12 @@ pub struct ReActExecutor {
 }
 
 impl ReActExecutor {
-    pub fn new(
-        llm: Arc<dyn LLMCallInterface>,
-        tools: HashMap<String, Box<dyn SkillTool>>,
-    ) -> Self {
+    pub fn new(llm: Arc<dyn LLMCallInterface>, tools: HashMap<String, Box<dyn SkillTool>>) -> Self {
         // Matches:
         // ACTION: tool_name
         // PARAMETERS: {"key": "value"}
         let re = Regex::new(
-            r"(?i)ACTION:\s*(?P<name>[a-zA-Z0-9_]+)\s*\nPARAMETERS:\s*(?P<params>\{.*?\})"
+            r"(?i)ACTION:\s*(?P<name>[a-zA-Z0-9_]+)\s*\nPARAMETERS:\s*(?P<params>\{.*?\})",
         )
         .unwrap();
 
@@ -76,7 +70,8 @@ impl ReActExecutor {
         self
     }
 
-    /// Run the ReAct loop until the LLM produces a final answer or max_steps is reached.
+    /// Run the ReAct loop until the LLM produces a final answer or max_steps is
+    /// reached.
     pub async fn execute(
         &self,
         system_prompt: &str,
@@ -90,21 +85,17 @@ impl ReActExecutor {
         // Fallback: pure-text ReAct prompt
         let tools_desc = self.render_tools_description();
         let react_instructions = format!(
-            "{system_prompt}\n\n\
-            {tools_desc}\n\n\
-            When you need to use a tool, respond **exactly** in this format:\n\
-            ACTION: <tool_name>\n\
-            PARAMETERS: <JSON object>\n\n\
-            After the tool result is provided, continue reasoning or provide your final answer.\n\
-            To finish, provide a clear final answer without the ACTION header.\n\n\
-            FORBIDDEN: Do NOT introduce yourself, describe your capabilities, or say what you are. \
-            Do NOT output text like 'I am the ... skill' or 'I can help you with ...'. \
-            If you are unsure what to do, call the most relevant tool with your best guess."
+            "{system_prompt}\n\n{tools_desc}\n\nWhen you need to use a tool, respond **exactly** \
+             in this format:\nACTION: <tool_name>\nPARAMETERS: <JSON object>\n\nAfter the tool \
+             result is provided, continue reasoning or provide your final answer.\nTo finish, \
+             provide a clear final answer without the ACTION header.\n\nFORBIDDEN: Do NOT \
+             introduce yourself, describe your capabilities, or say what you are. Do NOT output \
+             text like 'I am the ... skill' or 'I can help you with ...'. If you are unsure what \
+             to do, call the most relevant tool with your best guess."
         );
 
-        let mut history = format!(
-            "[System]: {react_instructions}\n\n[User]: {user_input}\n\n[Assistant]: "
-        );
+        let mut history =
+            format!("[System]: {react_instructions}\n\n[User]: {user_input}\n\n[Assistant]: ");
 
         for step in 0..self.config.max_steps {
             let messages = vec![CommMessage::new(
@@ -113,7 +104,12 @@ impl ReActExecutor {
                 history.clone(),
             )];
 
-            debug!("ReAct step {}/{}, sending prompt ({} chars)", step + 1, self.config.max_steps, history.len());
+            debug!(
+                "ReAct step {}/{}, sending prompt ({} chars)",
+                step + 1,
+                self.config.max_steps,
+                history.len()
+            );
 
             let response = self
                 .llm
@@ -126,18 +122,23 @@ impl ReActExecutor {
             // 🆕 FIX: Detect self-introduction responses and treat them as "no tool call"
             // instead of final answers, giving the LLM a chance to retry.
             let looks_like_intro = Self::is_self_introduction(&response);
-            let has_stop_phrase = self.config.stop_phrases.iter().any(|p| response.to_uppercase().contains(&p.to_uppercase()));
+            let has_stop_phrase = self
+                .config
+                .stop_phrases
+                .iter()
+                .any(|p| response.to_uppercase().contains(&p.to_uppercase()));
             let has_tool_call = self.tool_call_re.is_match(&response);
 
             if !has_tool_call && looks_like_intro && !has_stop_phrase {
-                info!("ReAct step {}: LLM output self-introduction, guiding to retry with tool call", step + 1);
+                info!(
+                    "ReAct step {}: LLM output self-introduction, guiding to retry with tool call",
+                    step + 1
+                );
                 history.push_str(&response);
                 history.push_str(
-                    "\n\n[System]: Self-introduction is NOT allowed. \
-                    You MUST call a tool to fulfill the user's request. \
-                    Respond exactly with:\n\
-                    ACTION: <tool_name>\n\
-                    PARAMETERS: <JSON object>\n\n[Assistant]: "
+                    "\n\n[System]: Self-introduction is NOT allowed. You MUST call a tool to \
+                     fulfill the user's request. Respond exactly with:\nACTION: \
+                     <tool_name>\nPARAMETERS: <JSON object>\n\n[Assistant]: ",
                 );
                 continue;
             }
@@ -172,7 +173,8 @@ impl ReActExecutor {
                     observation
                 ));
 
-                // Truncate history if it grows beyond the limit to avoid exceeding LLM context windows
+                // Truncate history if it grows beyond the limit to avoid exceeding LLM context
+                // windows
                 if history.len() > self.config.max_history_chars {
                     let excess = history.len() - self.config.max_history_chars;
                     let split_at = history.find('\n').unwrap_or(0).max(excess);
@@ -181,23 +183,31 @@ impl ReActExecutor {
                 }
             } else {
                 // No tool call detected — ask LLM to retry with correct format
-                info!("No tool call detected at step {}, guiding LLM to retry", step + 1);
+                info!(
+                    "No tool call detected at step {}, guiding LLM to retry",
+                    step + 1
+                );
                 history.push_str(&response);
                 history.push_str(
-                    "\n\n[System]: No tool call detected. \
-                    If you need a tool, respond exactly with:\n\
-                    ACTION: <tool_name>\n\
-                    PARAMETERS: <JSON object>\n\
-                    Otherwise provide your final answer directly.\n\n[Assistant]: "
+                    "\n\n[System]: No tool call detected. If you need a tool, respond exactly \
+                     with:\nACTION: <tool_name>\nPARAMETERS: <JSON object>\nOtherwise provide \
+                     your final answer directly.\n\n[Assistant]: ",
                 );
             }
         }
 
-        warn!("ReAct loop reached max_steps ({}) without final answer", self.config.max_steps);
-        Ok("I reached the maximum number of reasoning steps without a definitive answer.".to_string())
+        warn!(
+            "ReAct loop reached max_steps ({}) without final answer",
+            self.config.max_steps
+        );
+        Ok(
+            "I reached the maximum number of reasoning steps without a definitive answer."
+                .to_string(),
+        )
     }
 
-    /// Execute using native function calling API (more reliable than text parsing)
+    /// Execute using native function calling API (more reliable than text
+    /// parsing)
     async fn execute_native_tools(
         &self,
         system_prompt: &str,
@@ -232,10 +242,13 @@ impl ReActExecutor {
             self.config.max_steps
         );
 
-        // For native tools, the LLMCallInterface::call_llm_with_tools handles the loop internally.
-        // We cap max rounds via context parameter.
+        // For native tools, the LLMCallInterface::call_llm_with_tools handles the loop
+        // internally. We cap max rounds via context parameter.
         let mut context = std::collections::HashMap::new();
-        context.insert("max_tool_rounds".to_string(), self.config.max_steps.to_string());
+        context.insert(
+            "max_tool_rounds".to_string(),
+            self.config.max_steps.to_string(),
+        );
 
         self.llm
             .call_llm_with_tools(messages, tool_defs, Some(context))
@@ -246,11 +259,7 @@ impl ReActExecutor {
     fn render_tools_description(&self) -> String {
         let mut lines = vec!["You have access to the following tools:".to_string()];
         for (_, tool) in &self.tools {
-            lines.push(format!(
-                "- {}: {}",
-                tool.name(),
-                tool.description()
-            ));
+            lines.push(format!("- {}: {}", tool.name(), tool.description()));
         }
         lines.join("\n")
     }
@@ -262,7 +271,10 @@ impl ReActExecutor {
     /// direct answer).
     fn is_final_answer(&self, text: &str) -> bool {
         let upper = text.to_uppercase();
-        self.config.stop_phrases.iter().any(|p| upper.contains(&p.to_uppercase()))
+        self.config
+            .stop_phrases
+            .iter()
+            .any(|p| upper.contains(&p.to_uppercase()))
             || !self.tool_call_re.is_match(text)
     }
 
@@ -270,12 +282,20 @@ impl ReActExecutor {
     fn is_self_introduction(text: &str) -> bool {
         let lower = text.to_lowercase();
         let intro_markers = [
-            "i am the ", "i'm the ", "i am a ", "i'm a ",
-            "i can help you", "i can assist you",
-            "i am ready to help", "i'm ready to help",
-            "skill executor", "web search skill",
-            "my name is", "you can call me",
-            "i am an ai", "i'm an ai",
+            "i am the ",
+            "i'm the ",
+            "i am a ",
+            "i'm a ",
+            "i can help you",
+            "i can assist you",
+            "i am ready to help",
+            "i'm ready to help",
+            "skill executor",
+            "web search skill",
+            "my name is",
+            "you can call me",
+            "i am an ai",
+            "i'm an ai",
         ];
         intro_markers.iter().any(|m| lower.contains(m))
     }
@@ -297,5 +317,3 @@ impl ReActExecutor {
         Some(ParsedToolCall { name, arguments })
     }
 }
-
-

@@ -42,7 +42,10 @@ impl ApiKeyRecord {
 ///
 /// Uses HMAC-SHA256 for timing-safe key comparison to prevent timing attacks.
 #[allow(dead_code)]
-pub async fn validate_api_key(db: &sqlx::SqlitePool, key: &str) -> Result<ApiKeyAuth, GatewayError> {
+pub async fn validate_api_key(
+    db: &sqlx::SqlitePool,
+    key: &str,
+) -> Result<ApiKeyAuth, GatewayError> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -51,11 +54,10 @@ pub async fn validate_api_key(db: &sqlx::SqlitePool, key: &str) -> Result<ApiKey
 
     // Get the HMAC key from environment (must be set at startup)
     // SEC-001 FIX: Removed hardcoded default, require explicit configuration
-    let hmac_key = std::env::var("API_KEY_HMAC_SECRET")
-        .map_err(|_| {
-            tracing::error!("API_KEY_HMAC_SECRET environment variable not set");
-            GatewayError::service_unavailable("Auth", "API_KEY_HMAC_SECRET not configured")
-        })?;
+    let hmac_key = std::env::var("API_KEY_HMAC_SECRET").map_err(|_| {
+        tracing::error!("API_KEY_HMAC_SECRET environment variable not set");
+        GatewayError::service_unavailable("Auth", "API_KEY_HMAC_SECRET not configured")
+    })?;
 
     // Compute HMAC of the provided key
     let mut mac = HmacSha256::new_from_slice(hmac_key.as_bytes())
@@ -87,10 +89,11 @@ pub async fn validate_api_key(db: &sqlx::SqlitePool, key: &str) -> Result<ApiKey
             let db_clone = db.clone();
             let record_id = record.id;
             tokio::spawn(async move {
-                let _ = sqlx::query("UPDATE api_keys SET last_used_at = datetime('now') WHERE id = ?1")
-                    .bind(&record_id)
-                    .execute(&db_clone)
-                    .await;
+                let _ =
+                    sqlx::query("UPDATE api_keys SET last_used_at = datetime('now') WHERE id = ?1")
+                        .bind(&record_id)
+                        .execute(&db_clone)
+                        .await;
             });
 
             Ok(ApiKeyAuth {

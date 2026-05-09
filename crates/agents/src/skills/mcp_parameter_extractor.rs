@@ -82,7 +82,8 @@ impl McpParameterExtractor {
         Self { llm }
     }
 
-    /// Extract parameters from natural language input based on the tool's JSON schema.
+    /// Extract parameters from natural language input based on the tool's JSON
+    /// schema.
     ///
     /// # Arguments
     /// * `user_input` - The user's natural language request.
@@ -96,8 +97,11 @@ impl McpParameterExtractor {
         tool_name: &str,
         tool_description: &str,
     ) -> Result<ExtractedParams, AgentError> {
-        let param_desc = schema_to_parameter_description(tool_schema)
-            .unwrap_or_else(|| "No specific parameter schema defined. Extract any relevant values from the user request.".to_string());
+        let param_desc = schema_to_parameter_description(tool_schema).unwrap_or_else(|| {
+            "No specific parameter schema defined. Extract any relevant values from the user \
+             request."
+                .to_string()
+        });
 
         let prompt = build_extraction_prompt(user_input, tool_name, tool_description, &param_desc);
 
@@ -113,11 +117,9 @@ impl McpParameterExtractor {
             prompt,
         )];
 
-        let response = self
-            .llm
-            .call_llm(messages, None)
-            .await
-            .map_err(|e| AgentError::Execution(format!("Parameter extraction LLM call failed: {}", e)))?;
+        let response = self.llm.call_llm(messages, None).await.map_err(|e| {
+            AgentError::Execution(format!("Parameter extraction LLM call failed: {}", e))
+        })?;
 
         debug!("McpParameterExtractor raw response: {}", response);
 
@@ -135,7 +137,10 @@ impl McpParameterExtractor {
         let parsed: Value = match serde_json::from_str(json_str) {
             Ok(v) => v,
             Err(e) => {
-                warn!("Failed to parse extraction response as JSON: {}. Raw: {}", e, response);
+                warn!(
+                    "Failed to parse extraction response as JSON: {}. Raw: {}",
+                    e, response
+                );
                 return Ok(ExtractedParams::Unclear {
                     reason: format!("Could not parse LLM extraction result: {}", e),
                 });
@@ -156,7 +161,11 @@ impl McpParameterExtractor {
         let missing_names: Vec<String> = parsed
             .get("_missing")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let properties = tool_schema
@@ -168,7 +177,11 @@ impl McpParameterExtractor {
         let required: Vec<String> = tool_schema
             .get("required")
             .and_then(|r| r.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let mut params = serde_json::Map::new();
@@ -199,7 +212,10 @@ impl McpParameterExtractor {
                             .to_string(),
                         required: true,
                     };
-                    if !missing_fields.iter().any(|f: &FieldSchema| f.name == field.name) {
+                    if !missing_fields
+                        .iter()
+                        .any(|f: &FieldSchema| f.name == field.name)
+                    {
                         missing_fields.push(field);
                     }
                 }
@@ -208,7 +224,9 @@ impl McpParameterExtractor {
 
         // Also include explicitly reported missing fields
         for missing_name in missing_names {
-            if !params.contains_key(&missing_name) && !missing_fields.iter().any(|f| f.name == missing_name) {
+            if !params.contains_key(&missing_name)
+                && !missing_fields.iter().any(|f| f.name == missing_name)
+            {
                 if let Some(prop) = properties.get(&missing_name) {
                     let field = FieldSchema {
                         name: missing_name,
@@ -230,7 +248,10 @@ impl McpParameterExtractor {
         }
 
         if missing_fields.is_empty() {
-            info!("McpParameterExtractor: complete extraction, params: {:?}", params.keys().collect::<Vec<_>>());
+            info!(
+                "McpParameterExtractor: complete extraction, params: {:?}",
+                params.keys().collect::<Vec<_>>()
+            );
             Ok(ExtractedParams::Complete(params))
         } else {
             info!(
@@ -272,27 +293,38 @@ impl McpParameterExtractor {
     }
 }
 
-/// Convert a JSON schema's properties into a human-readable parameter description.
+/// Convert a JSON schema's properties into a human-readable parameter
+/// description.
 fn schema_to_parameter_description(schema: &Value) -> Option<String> {
     let properties = schema.get("properties").and_then(|p| p.as_object())?;
     let required: Vec<String> = schema
         .get("required")
         .and_then(|r| r.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut lines = vec![];
     for (name, prop) in properties {
-        let ty = prop.get("type").and_then(|t| t.as_str()).unwrap_or("string");
-        let desc = prop.get("description").and_then(|d| d.as_str()).unwrap_or("");
+        let ty = prop
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("string");
+        let desc = prop
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
         let is_req = required.contains(name);
-        let enum_vals: Option<String> = prop
-            .get("enum")
-            .and_then(|e| e.as_array())
-            .map(|arr| {
-                let vals: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
-                format!(" (allowed values: {})", vals.join(", "))
-            });
+        let enum_vals: Option<String> = prop.get("enum").and_then(|e| e.as_array()).map(|arr| {
+            let vals: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            format!(" (allowed values: {})", vals.join(", "))
+        });
 
         lines.push(format!(
             "- {} ({}{}): {}{}",
@@ -353,10 +385,7 @@ Return ONLY a JSON object. Example outputs:
 - Partial: {{"symbol":"BTC/USD","_missing":["side","notional"]}}
 - Unclear: {{"_unclear":true,"_reason":"User did not specify what to trade"}}
 "#,
-        tool_name,
-        tool_description,
-        parameter_descriptions,
-        user_input
+        tool_name, tool_description, parameter_descriptions, user_input
     )
 }
 

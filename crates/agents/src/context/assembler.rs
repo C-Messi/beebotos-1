@@ -693,7 +693,8 @@ impl ContextAssembler {
         Ok(selected)
     }
 
-    /// 🆕 OPTIMIZATION: SummarizeMiddle strategy — keep head + tail, summarize middle
+    /// 🆕 OPTIMIZATION: SummarizeMiddle strategy — keep head + tail, summarize
+    /// middle
     fn select_summarize_middle(
         &self,
         messages: Vec<ContextMessage>,
@@ -727,7 +728,8 @@ impl ContextAssembler {
         let middle = &messages[head_end..tail_start];
         if !middle.is_empty() {
             let summary = Self::generate_simple_summary(middle);
-            let summary_tokens = (summary.len() as f32 / self.config.chars_per_token).ceil() as usize;
+            let summary_tokens =
+                (summary.len() as f32 / self.config.chars_per_token).ceil() as usize;
             if token_count + summary_tokens <= available_tokens {
                 let summary_msg = ContextMessage {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -761,7 +763,8 @@ impl ContextAssembler {
         selected
     }
 
-    /// Generate a simple summary of messages (placeholder for LLM-based summarization)
+    /// Generate a simple summary of messages (placeholder for LLM-based
+    /// summarization)
     fn generate_simple_summary(messages: &[ContextMessage]) -> String {
         let topics: Vec<String> = messages
             .iter()
@@ -770,7 +773,11 @@ impl ContextAssembler {
                 format!("{:?}: {}", m.role, content)
             })
             .collect();
-        format!("对话涉及 {} 轮交流，主题包括: {}", messages.len(), topics.join("; "))
+        format!(
+            "对话涉及 {} 轮交流，主题包括: {}",
+            messages.len(),
+            topics.join("; ")
+        )
     }
 
     /// 🆕 OPTIMIZATION: Assemble with compression using HistoryStrategy
@@ -838,7 +845,6 @@ impl Default for ContextAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     fn create_test_message(role: MessageRole, content: &str, tokens: usize) -> ContextMessage {
         ContextMessage {

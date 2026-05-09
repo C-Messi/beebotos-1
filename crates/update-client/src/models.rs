@@ -1,8 +1,9 @@
 //! Shared data models for update client
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Semantic version wrapper
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -35,8 +36,16 @@ impl From<semver::Version> for SemVer {
             major: v.major,
             minor: v.minor,
             patch: v.patch,
-            pre: if v.pre.is_empty() { None } else { Some(v.pre.to_string()) },
-            build: if v.build.is_empty() { None } else { Some(v.build.to_string()) },
+            pre: if v.pre.is_empty() {
+                None
+            } else {
+                Some(v.pre.to_string())
+            },
+            build: if v.build.is_empty() {
+                None
+            } else {
+                Some(v.build.to_string())
+            },
         }
     }
 }

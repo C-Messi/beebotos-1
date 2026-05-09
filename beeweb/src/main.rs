@@ -6,17 +6,14 @@
 //! - Update reporting: POST /api/v1/updates/report
 //! - Metrics: GET /metrics
 
-use axum::{
-    routing::{get, post},
-    Router,
-};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::{
-    compression::CompressionLayer,
-    cors::CorsLayer,
-    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
-};
+
+use axum::routing::{get, post};
+use axum::Router;
+use tower_http::compression::CompressionLayer;
+use tower_http::cors::CorsLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::{info, warn, Level};
 
 mod db;
@@ -56,7 +53,10 @@ async fn main() -> anyhow::Result<()> {
                 s
             }
             Err(e) => {
-                warn!("Failed to initialize SQLite storage: {}, falling back to memory", e);
+                warn!(
+                    "Failed to initialize SQLite storage: {}, falling back to memory",
+                    e
+                );
                 let s = Storage::new();
                 s.seed_sample_data().await;
                 s
@@ -73,8 +73,8 @@ async fn main() -> anyhow::Result<()> {
     info!("Metrics initialized");
 
     // Configuration
-    let packages_dir = std::env::var("BEEWEB_PACKAGES_DIR")
-        .unwrap_or_else(|_| "/data/packages".to_string());
+    let packages_dir =
+        std::env::var("BEEWEB_PACKAGES_DIR").unwrap_or_else(|_| "/data/packages".to_string());
     let port = std::env::var("BEEWEB_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -158,10 +158,11 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::util::ServiceExt;
+
+    use super::*;
 
     async fn test_app() -> Router {
         let storage = Storage::new();
@@ -179,7 +180,12 @@ mod tests {
     async fn test_health_check() {
         let app = test_app().await;
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 

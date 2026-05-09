@@ -290,9 +290,10 @@ impl From<crate::api::ApiError> for AppError {
             crate::api::ApiError::NotFound => {
                 AppError::new(ErrorCode::UserResourceNotFound, "Resource not found")
             }
-            crate::api::ApiError::ServerError(code, msg) => {
-                AppError::new(ErrorCode::ServerInternal, msg.unwrap_or_else(|| format!("Server error: {}", code)))
-            }
+            crate::api::ApiError::ServerError(code, msg) => AppError::new(
+                ErrorCode::ServerInternal,
+                msg.unwrap_or_else(|| format!("Server error: {}", code)),
+            ),
             crate::api::ApiError::ClientError(code, msg) => AppError::new(
                 ErrorCode::UserInvalidInput,
                 msg.unwrap_or_else(|| format!("Invalid request: {}", code)),

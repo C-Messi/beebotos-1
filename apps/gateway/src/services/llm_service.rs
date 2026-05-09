@@ -6,8 +6,8 @@
 //! Now supports multimodal inputs (text + images).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use beebotos_agents::communication::Message as ChannelMessage;
 use beebotos_agents::llm::{
@@ -47,14 +47,15 @@ impl LlmMetrics {
     pub async fn record_success(&self, latency_ms: u64, input_tokens: u32, output_tokens: u32) {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         self.successful_requests.fetch_add(1, Ordering::Relaxed);
-        self.total_latency_ms.fetch_add(latency_ms, Ordering::Relaxed);
-        self.input_tokens.fetch_add(input_tokens as u64, Ordering::Relaxed);
-        self.output_tokens.fetch_add(output_tokens as u64, Ordering::Relaxed);
-        self.total_tokens.fetch_add(
-            (input_tokens + output_tokens) as u64,
-            Ordering::Relaxed,
-        );
-        
+        self.total_latency_ms
+            .fetch_add(latency_ms, Ordering::Relaxed);
+        self.input_tokens
+            .fetch_add(input_tokens as u64, Ordering::Relaxed);
+        self.output_tokens
+            .fetch_add(output_tokens as u64, Ordering::Relaxed);
+        self.total_tokens
+            .fetch_add((input_tokens + output_tokens) as u64, Ordering::Relaxed);
+
         // Add to latency histogram
         let mut hist = self.latency_histogram.write().await;
         hist.push(latency_ms);
@@ -87,14 +88,14 @@ impl LlmMetrics {
         if hist.is_empty() {
             return (0.0, 0.0, 0.0);
         }
-        
+
         let mut sorted = hist.clone();
         sorted.sort_unstable();
-        
+
         let p50 = sorted[sorted.len() * 50 / 100] as f64;
         let p95 = sorted[sorted.len() * 95 / 100] as f64;
         let p99 = sorted[sorted.len() * 99 / 100] as f64;
-        
+
         (p50, p95, p99)
     }
 
@@ -124,7 +125,8 @@ pub struct MetricsSummary {
 
 /// LLM Service for processing messages
 ///
-/// Uses beebotos_agents::llm module for provider management with automatic failover.
+/// Uses beebotos_agents::llm module for provider management with automatic
+/// failover.
 pub struct LlmService {
     /// Configuration
     config: BeeBotOSConfig,
@@ -141,7 +143,7 @@ impl LlmService {
     pub async fn new(config: BeeBotOSConfig) -> Result<Self, GatewayError> {
         // Validate configuration before creating providers
         Self::validate_config(&config)?;
-        
+
         // Create failover provider from configuration
         let failover_provider = Self::create_failover_provider(&config).await?;
 
@@ -164,7 +166,11 @@ impl LlmService {
         }
 
         // Check if default provider has configuration
-        if !config.models.providers.contains_key(&config.models.default_provider) {
+        if !config
+            .models
+            .providers
+            .contains_key(&config.models.default_provider)
+        {
             return Err(GatewayError::Internal {
                 message: format!(
                     "Default provider '{}' has no configuration",
@@ -177,20 +183,36 @@ impl LlmService {
         // Validate each provider configuration
         for (name, provider_config) in &config.models.providers {
             // Check if provider name is supported
-            let supported_providers = ["kimi", "openai", "zhipu", "deepseek", "ollama", "anthropic", "claude"];
+            let supported_providers = [
+                "kimi",
+                "openai",
+                "zhipu",
+                "deepseek",
+                "ollama",
+                "anthropic",
+                "claude",
+            ];
             if !supported_providers.contains(&name.as_str()) {
-                warn!("Provider '{}' is not in the supported list: {:?}", name, supported_providers);
+                warn!(
+                    "Provider '{}' is not in the supported list: {:?}",
+                    name, supported_providers
+                );
             }
 
             // Check if API key is set (except for ollama)
             if name != "ollama" {
-                let has_api_key = provider_config.api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false);
+                let has_api_key = provider_config
+                    .api_key
+                    .as_ref()
+                    .map(|k| !k.is_empty())
+                    .unwrap_or(false);
                 let has_env_key = std::env::var(format!("{}_API_KEY", name.to_uppercase())).is_ok();
-                
+
                 if !has_api_key && !has_env_key {
                     return Err(GatewayError::Internal {
                         message: format!(
-                            "Provider '{}' is missing API key. Set {}_API_KEY environment variable or configure in config file.",
+                            "Provider '{}' is missing API key. Set {}_API_KEY environment \
+                             variable or configure in config file.",
                             name,
                             name.to_uppercase()
                         ),
@@ -257,10 +279,7 @@ impl LlmService {
                     }
                 }
                 Err(e) => {
-                    warn!(
-                        "Failed to initialize provider '{}': {}",
-                        provider_name, e
-                    );
+                    warn!("Failed to initialize provider '{}': {}", provider_name, e);
                     if idx == 0 {
                         return Err(GatewayError::Internal {
                             message: format!(
@@ -316,7 +335,9 @@ impl LlmService {
 
         match name {
             "kimi" => {
-                let thinking = provider_config.thinking.as_ref()
+                let thinking = provider_config
+                    .thinking
+                    .as_ref()
                     .and_then(|t| beebotos_agents::llm::providers::ThinkingMode::from_str(t))
                     .unwrap_or_default();
                 let kimi_config = KimiConfig {
@@ -517,10 +538,7 @@ impl LlmService {
     }
 
     /// Process an incoming message and generate a response
-    pub async fn process_message(
-        &self,
-        message: &ChannelMessage,
-    ) -> Result<String, GatewayError> {
+    pub async fn process_message(&self, message: &ChannelMessage) -> Result<String, GatewayError> {
         // Process multimodal content
         let multimodal_content = self
             .multimodal_processor
@@ -535,9 +553,10 @@ impl LlmService {
     ///
     /// 🆕 FIX: Supports proper system/user/assistant role separation
     /// to avoid double-flattening in Agent→Gateway path.
-    /// 🆕 FIX: Accept optional max_tokens override from caller (e.g. Agent extra_params).
-    /// 🆕 FIX: Supports native function calling via OpenAI-compatible tools parameter.
-    /// 🆕 FIX: Accept optional model override (e.g. "kimi-flash" for fast ranking tasks).
+    /// 🆕 FIX: Accept optional max_tokens override from caller (e.g. Agent
+    /// extra_params). 🆕 FIX: Supports native function calling via
+    /// OpenAI-compatible tools parameter. 🆕 FIX: Accept optional model
+    /// override (e.g. "kimi-flash" for fast ranking tasks).
     pub async fn chat(
         &self,
         messages: Vec<LLMMessage>,
@@ -561,7 +580,9 @@ impl LlmService {
             request_config.tools = Some(t.clone());
             let choice = tool_choice.as_deref().unwrap_or("auto");
             request_config.tool_choice = match choice {
-                "required" => Some(beebotos_agents::llm::ToolChoice::Required("required".to_string())),
+                "required" => Some(beebotos_agents::llm::ToolChoice::Required(
+                    "required".to_string(),
+                )),
                 "none" => Some(beebotos_agents::llm::ToolChoice::None("none".to_string())),
                 _ => Some(beebotos_agents::llm::ToolChoice::Auto("auto".to_string())),
             };
@@ -577,9 +598,10 @@ impl LlmService {
 
         match result {
             Ok(response) => {
-                let (input_tokens, output_tokens) = response.usage.as_ref().map_or((0, 0), |u| {
-                    (u.prompt_tokens, u.completion_tokens)
-                });
+                let (input_tokens, output_tokens) = response
+                    .usage
+                    .as_ref()
+                    .map_or((0, 0), |u| (u.prompt_tokens, u.completion_tokens));
 
                 self.metrics
                     .record_success(latency_ms, input_tokens, output_tokens)
@@ -602,16 +624,13 @@ impl LlmService {
                             let skill_lines: Vec<String> = tool_calls
                                 .iter()
                                 .map(|tc| {
-                                    format!(
-                                        "SKILL:{}|{}",
-                                        tc.function.name,
-                                        tc.function.arguments
-                                    )
+                                    format!("SKILL:{}|{}", tc.function.name, tc.function.arguments)
                                 })
                                 .collect();
                             let result_text = skill_lines.join("\n");
                             info!(
-                                "✅ Received LLM tool_calls ({} calls), formatted as SKILL: lines, latency={}ms, tokens={}/{}",
+                                "✅ Received LLM tool_calls ({} calls), formatted as SKILL: \
+                                 lines, latency={}ms, tokens={}/{}",
                                 tool_calls.len(),
                                 latency_ms,
                                 input_tokens,
@@ -652,10 +671,13 @@ impl LlmService {
         include_system_prompt: bool,
     ) -> Result<String, GatewayError> {
         let start_time = std::time::Instant::now();
-        
+
         // Handle multimodal processing result
         let multimodal_content = multimodal_result.unwrap_or_else(|e| {
-            warn!("Failed to process multimodal content: {}, using text only", e);
+            warn!(
+                "Failed to process multimodal content: {}, using text only",
+                e
+            );
             MultimodalContent {
                 text: fallback_text,
                 images: vec![],
@@ -733,9 +755,10 @@ impl LlmService {
                     .unwrap_or_default();
 
                 // Extract token usage from response
-                let (input_tokens, output_tokens) = response.usage.as_ref().map_or((0, 0), |u| {
-                    (u.prompt_tokens, u.completion_tokens)
-                });
+                let (input_tokens, output_tokens) = response
+                    .usage
+                    .as_ref()
+                    .map_or((0, 0), |u| (u.prompt_tokens, u.completion_tokens));
 
                 // Record metrics
                 self.metrics
@@ -754,7 +777,7 @@ impl LlmService {
             Err(e) => {
                 // Record failure metrics
                 self.metrics.record_failure();
-                
+
                 Err(GatewayError::Internal {
                     message: format!("LLM request failed: {}", e),
                     correlation_id: uuid::Uuid::new_v4().to_string(),
@@ -764,21 +787,24 @@ impl LlmService {
     }
 
     /// Process a message with streaming response
-    /// 
+    ///
     /// Returns a channel receiver that yields response chunks
     pub async fn process_message_stream(
         &self,
         message: &ChannelMessage,
     ) -> Result<tokio::sync::mpsc::Receiver<String>, GatewayError> {
         let start_time = std::time::Instant::now();
-        
+
         // Process multimodal content
         let multimodal_content = self
             .multimodal_processor
             .process_message(message, message.platform, None)
             .await
             .unwrap_or_else(|e| {
-                warn!("Failed to process multimodal content: {}, using text only", e);
+                warn!(
+                    "Failed to process multimodal content: {}, using text only",
+                    e
+                );
                 MultimodalContent {
                     text: message.content.clone(),
                     images: vec![],
@@ -850,7 +876,7 @@ impl LlmService {
         // Spawn task to handle streaming
         tokio::spawn(async move {
             let mut full_content = String::new();
-            
+
             while let Some(chunk) = stream_rx.recv().await {
                 // Extract content from chunk
                 for choice in &chunk.choices {
@@ -863,7 +889,7 @@ impl LlmService {
                             return;
                         }
                     }
-                    
+
                     // Check for finish reason
                     if choice.finish_reason.is_some() {
                         let latency_ms = start_time.elapsed().as_millis() as u64;
@@ -872,7 +898,7 @@ impl LlmService {
                     }
                 }
             }
-            
+
             // Stream completed
             let latency_ms = start_time.elapsed().as_millis() as u64;
             metrics.record_success(latency_ms, 0, 0).await;
@@ -891,7 +917,9 @@ impl LlmService {
     ) -> Result<(), GatewayError> {
         debug!(
             "Sending reply to {:?} channel {}: content_length={}",
-            platform, channel_id, content.len()
+            platform,
+            channel_id,
+            content.len()
         );
 
         info!(
@@ -942,8 +970,8 @@ impl LlmService {
     }
 }
 
-// Note: LlmService does not implement Default because it requires async initialization.
-// Use `LlmService::new(config).await` instead.
+// Note: LlmService does not implement Default because it requires async
+// initialization. Use `LlmService::new(config).await` instead.
 
 #[cfg(test)]
 mod tests {
@@ -973,7 +1001,7 @@ mod tests {
             api_key: Some("config-api-key".to_string()),
             ..Default::default()
         };
-        
+
         // Temporarily clear env var
         let key = LlmService::get_api_key("test_provider", &config);
         assert_eq!(key, Some("config-api-key".to_string()));
@@ -982,7 +1010,7 @@ mod tests {
     #[test]
     fn test_get_base_url_defaults() {
         let config = ModelProviderConfig::default();
-        
+
         assert_eq!(
             LlmService::get_base_url("kimi", &config),
             "https://api.moonshot.cn/v1"
@@ -1004,19 +1032,10 @@ mod tests {
     #[test]
     fn test_get_model_defaults() {
         let config = ModelProviderConfig::default();
-        
-        assert_eq!(
-            LlmService::get_model("kimi", &config),
-            "moonshot-v1-8k"
-        );
-        assert_eq!(
-            LlmService::get_model("openai", &config),
-            "gpt-4o-mini"
-        );
-        assert_eq!(
-            LlmService::get_model("zhipu", &config),
-            "glm-4"
-        );
+
+        assert_eq!(LlmService::get_model("kimi", &config), "moonshot-v1-8k");
+        assert_eq!(LlmService::get_model("openai", &config), "gpt-4o-mini");
+        assert_eq!(LlmService::get_model("zhipu", &config), "glm-4");
     }
 
     #[test]
@@ -1024,7 +1043,7 @@ mod tests {
         let mut config = BeeBotOSConfig::default();
         config.models.default_provider = "kimi".to_string();
         config.models.fallback_chain = vec!["openai".to_string(), "zhipu".to_string()];
-        
+
         // Verify the chain would be: kimi -> openai -> zhipu
         let mut providers_to_try: Vec<String> = Vec::new();
         providers_to_try.push(config.models.default_provider.clone());
@@ -1033,7 +1052,7 @@ mod tests {
                 providers_to_try.push(fallback.clone());
             }
         }
-        
+
         assert_eq!(providers_to_try, vec!["kimi", "openai", "zhipu"]);
     }
 
@@ -1043,7 +1062,7 @@ mod tests {
         config.models.default_provider = "kimi".to_string();
         // Duplicate kimi in fallback chain
         config.models.fallback_chain = vec!["kimi".to_string(), "openai".to_string()];
-        
+
         let mut providers_to_try: Vec<String> = Vec::new();
         providers_to_try.push(config.models.default_provider.clone());
         for fallback in &config.models.fallback_chain {
@@ -1051,7 +1070,7 @@ mod tests {
                 providers_to_try.push(fallback.clone());
             }
         }
-        
+
         // kimi should appear only once
         assert_eq!(providers_to_try, vec!["kimi", "openai"]);
     }

@@ -3,11 +3,10 @@
 use async_trait::async_trait;
 use sqlx::SqlitePool;
 
+use super::user_channel_store::UserChannelStore;
 use crate::communication::user_channel::{ChannelBindingStatus, UserChannelBinding};
 use crate::communication::PlatformType;
 use crate::error::{AgentError, Result};
-
-use super::user_channel_store::UserChannelStore;
 
 pub struct SqliteUserChannelStore {
     pool: SqlitePool,
@@ -37,14 +36,11 @@ impl SqliteUserChannelStore {
 
 #[async_trait]
 impl UserChannelStore for SqliteUserChannelStore {
-    async fn create(
-        &self,
-        binding: &UserChannelBinding,
-        config_encrypted: &str,
-    ) -> Result<()> {
-        // 🟢 P1 FIX: Auto-create placeholder user record to satisfy FOREIGN KEY constraint.
-        // External platform users (WeChat, Telegram, etc.) won't exist in the users table,
-        // so we upsert a minimal placeholder before inserting the user_channel binding.
+    async fn create(&self, binding: &UserChannelBinding, config_encrypted: &str) -> Result<()> {
+        // 🟢 P1 FIX: Auto-create placeholder user record to satisfy FOREIGN KEY
+        // constraint. External platform users (WeChat, Telegram, etc.) won't
+        // exist in the users table, so we upsert a minimal placeholder before
+        // inserting the user_channel binding.
         sqlx::query(
             r#"
             INSERT OR IGNORE INTO users (id, username, email, password_hash)
@@ -145,7 +141,9 @@ impl UserChannelStore for SqliteUserChannelStore {
         .bind(id)
         .execute(&self.pool)
         .await
-        .map_err(|e| AgentError::Database(format!("Failed to update user channel status: {}", e)))?;
+        .map_err(|e| {
+            AgentError::Database(format!("Failed to update user channel status: {}", e))
+        })?;
 
         Ok(())
     }

@@ -39,7 +39,7 @@ impl Default for ClaudeConfig {
 impl ClaudeConfig {
     pub fn from_env() -> Result<Self, String> {
         use std::env;
-        
+
         let api_key = env::var("ANTHROPIC_API_KEY")
             .or_else(|_| env::var("CLAUDE_API_KEY"))
             .map_err(|_| "ANTHROPIC_API_KEY not set".to_string())?;
@@ -88,7 +88,10 @@ impl ClaudeProvider {
             max_output_tokens: 8_192,
         };
 
-        info!("Claude provider initialized with model: {}", config.default_model);
+        info!(
+            "Claude provider initialized with model: {}",
+            config.default_model
+        );
 
         Ok(Self {
             config,
@@ -98,8 +101,7 @@ impl ClaudeProvider {
     }
 
     pub fn from_env() -> Result<Self, LLMError> {
-        let config = ClaudeConfig::from_env()
-            .map_err(|e| LLMError::InvalidRequest(e))?;
+        let config = ClaudeConfig::from_env().map_err(|e| LLMError::InvalidRequest(e))?;
         Self::new(config)
     }
 
@@ -115,7 +117,10 @@ impl ClaudeProvider {
             HeaderValue::from_str(&self.config.version)
                 .map_err(|e| LLMError::InvalidRequest(e.to_string()))?,
         );
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
         Ok(headers)
     }
 
@@ -183,21 +188,43 @@ impl ClaudeProvider {
 
         let mut attempt = 0u32;
         loop {
-            let response = self.http_client.post(&url).headers(headers.clone()).json(&body).send().await
-                .map_err(|e| if e.is_timeout() { LLMError::Timeout } else { LLMError::Network(e.to_string()) })?;
+            let response = self
+                .http_client
+                .post(&url)
+                .headers(headers.clone())
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        LLMError::Timeout
+                    } else {
+                        LLMError::Network(e.to_string())
+                    }
+                })?;
 
-            if response.status().is_success() { return Ok(response); }
+            if response.status().is_success() {
+                return Ok(response);
+            }
 
             let status = response.status();
-            let error_body = response.text().await.unwrap_or_else(|_| "Unknown".to_string());
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown".to_string());
             let error = match status {
                 reqwest::StatusCode::UNAUTHORIZED => LLMError::Auth("Invalid key".to_string()),
                 reqwest::StatusCode::TOO_MANY_REQUESTS => LLMError::RateLimit { retry_after: None },
                 reqwest::StatusCode::BAD_REQUEST => LLMError::InvalidRequest(error_body),
-                _ => LLMError::Api { code: status.as_u16(), message: error_body },
+                _ => LLMError::Api {
+                    code: status.as_u16(),
+                    message: error_body,
+                },
             };
 
-            if !self.config.retry_policy.should_retry(&error, attempt) { return Err(error); }
+            if !self.config.retry_policy.should_retry(&error, attempt) {
+                return Err(error);
+            }
             attempt += 1;
             tokio::time::sleep(self.config.retry_policy.delay_for_attempt(attempt)).await;
         }
@@ -206,15 +233,22 @@ impl ClaudeProvider {
 
 #[async_trait]
 impl LLMProvider for ClaudeProvider {
-    fn name(&self) -> &str { "claude" }
-    fn capabilities(&self) -> ProviderCapabilities { self.capabilities.clone() }
+    fn name(&self) -> &str {
+        "claude"
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.capabilities.clone()
+    }
 
     async fn complete(&self, request: LLMRequest) -> LLMResult<LLMResponse> {
         let response = self.execute_with_retry(request).await?;
-        let claude_resp: ClaudeResponse = response.json().await
+        let claude_resp: ClaudeResponse = response
+            .json()
+            .await
             .map_err(|e| LLMError::Serialization(e.to_string()))?;
 
-        let content = claude_resp.content
+        let content = claude_resp
+            .content
             .first()
             .map(|c| c.text.clone())
             .unwrap_or_default();
@@ -227,7 +261,11 @@ impl LLMProvider for ClaudeProvider {
             choices: vec![Choice {
                 index: 0,
                 message: Message::assistant(content),
-                finish_reason: Some(claude_resp.stop_reason.unwrap_or_else(|| "stop".to_string())),
+                finish_reason: Some(
+                    claude_resp
+                        .stop_reason
+                        .unwrap_or_else(|| "stop".to_string()),
+                ),
                 logprobs: None,
             }],
             usage: Some(Usage {
@@ -238,46 +276,81 @@ impl LLMProvider for ClaudeProvider {
         })
     }
 
-    async fn complete_stream(&self, _request: LLMRequest) -> LLMResult<mpsc::Receiver<StreamChunk>> {
-        Err(LLMError::NotImplemented("Streaming not yet implemented for Claude".to_string()))
+    async fn complete_stream(
+        &self,
+        _request: LLMRequest,
+    ) -> LLMResult<mpsc::Receiver<StreamChunk>> {
+        Err(LLMError::NotImplemented(
+            "Streaming not yet implemented for Claude".to_string(),
+        ))
     }
 
     async fn health_check(&self) -> LLMResult<()> {
         let test = LLMRequest {
             messages: vec![Message::user("Hi")],
-            config: RequestConfig { max_tokens: Some(1), ..Default::default() },
+            config: RequestConfig {
+                max_tokens: Some(1),
+                ..Default::default()
+            },
         };
-        self.complete(test).await.map(|_| ()).map_err(|e| LLMError::Provider(format!("Health check: {}", e)))
+        self.complete(test)
+            .await
+            .map(|_| ())
+            .map_err(|e| LLMError::Provider(format!("Health check: {}", e)))
     }
 
     async fn list_models(&self) -> LLMResult<Vec<ModelInfo>> {
         Ok(vec![
             ModelInfo {
-                id: claude_models::CLAUDE_3_5_SONNET.to_string(), name: "Claude 3.5 Sonnet".to_string(),
+                id: claude_models::CLAUDE_3_5_SONNET.to_string(),
+                name: "Claude 3.5 Sonnet".to_string(),
                 description: Some("Best balance of intelligence and speed".to_string()),
-                context_window: 200_000, max_tokens: 8_192,
-                capabilities: ModelCapabilities { vision: true, function_calling: true, json_mode: true },
+                context_window: 200_000,
+                max_tokens: 8_192,
+                capabilities: ModelCapabilities {
+                    vision: true,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.003, 0.015)),
             },
             ModelInfo {
-                id: claude_models::CLAUDE_3_OPUS.to_string(), name: "Claude 3 Opus".to_string(),
+                id: claude_models::CLAUDE_3_OPUS.to_string(),
+                name: "Claude 3 Opus".to_string(),
                 description: Some("Most powerful model for complex tasks".to_string()),
-                context_window: 200_000, max_tokens: 4_096,
-                capabilities: ModelCapabilities { vision: true, function_calling: true, json_mode: true },
+                context_window: 200_000,
+                max_tokens: 4_096,
+                capabilities: ModelCapabilities {
+                    vision: true,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.015, 0.075)),
             },
             ModelInfo {
-                id: claude_models::CLAUDE_3_HAIKU.to_string(), name: "Claude 3 Haiku".to_string(),
+                id: claude_models::CLAUDE_3_HAIKU.to_string(),
+                name: "Claude 3 Haiku".to_string(),
                 description: Some("Fastest model for lightweight actions".to_string()),
-                context_window: 200_000, max_tokens: 4_096,
-                capabilities: ModelCapabilities { vision: true, function_calling: true, json_mode: true },
+                context_window: 200_000,
+                max_tokens: 4_096,
+                capabilities: ModelCapabilities {
+                    vision: true,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.00025, 0.00125)),
             },
             ModelInfo {
-                id: claude_models::CLAUDE_3_5_HAIKU.to_string(), name: "Claude 3.5 Haiku".to_string(),
+                id: claude_models::CLAUDE_3_5_HAIKU.to_string(),
+                name: "Claude 3.5 Haiku".to_string(),
                 description: Some("Updated fast model".to_string()),
-                context_window: 200_000, max_tokens: 8_192,
-                capabilities: ModelCapabilities { vision: false, function_calling: true, json_mode: true },
+                context_window: 200_000,
+                max_tokens: 8_192,
+                capabilities: ModelCapabilities {
+                    vision: false,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.0008, 0.004)),
             },
         ])

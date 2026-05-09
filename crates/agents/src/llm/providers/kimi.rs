@@ -6,16 +6,14 @@
 use async_trait::async_trait;
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace};
 
 use crate::llm::http_client::{LLMHttpClient, OpenAIRequestBuilder, ProviderConfig};
 use crate::llm::traits::*;
-use crate::llm::types::*;
-
 // Re-export models for public access
 pub use crate::llm::types::kimi_models;
+use crate::llm::types::*;
 
 /// 🔧 P1 FIX: Provider mode for multi-provider configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -100,7 +98,7 @@ impl Default for KimiConfig {
             default_model: kimi_models::KIMI_LATEST.to_string(),
             timeout: std::time::Duration::from_secs(120),
             retry_policy: RetryPolicy::default(),
-            mode: ProviderMode::default(), // merge by default
+            mode: ProviderMode::default(),     // merge by default
             thinking: ThinkingMode::default(), // disabled by default
         }
     }
@@ -110,16 +108,16 @@ impl KimiConfig {
     /// Create from environment variables
     pub fn from_env() -> Result<Self, String> {
         use std::env;
-        
+
         let api_key = env::var("KIMI_API_KEY")
             .or_else(|_| env::var("MOONSHOT_API_KEY"))
             .map_err(|_| "KIMI_API_KEY or MOONSHOT_API_KEY not set".to_string())?;
 
-        let base_url = env::var("KIMI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.moonshot.cn/v1".to_string());
+        let base_url =
+            env::var("KIMI_BASE_URL").unwrap_or_else(|_| "https://api.moonshot.cn/v1".to_string());
 
-        let default_model = env::var("KIMI_DEFAULT_MODEL")
-            .unwrap_or_else(|_| kimi_models::KIMI_LATEST.to_string());
+        let default_model =
+            env::var("KIMI_DEFAULT_MODEL").unwrap_or_else(|_| kimi_models::KIMI_LATEST.to_string());
 
         let mode = env::var("KIMI_MODE")
             .ok()
@@ -187,13 +185,13 @@ impl ProviderConfig for KimiConfig {
 
     fn build_headers(&self) -> Result<HeaderMap, LLMError> {
         let mut headers = HeaderMap::new();
-        
+
         headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", self.api_key))
                 .map_err(|e| LLMError::InvalidRequest(e.to_string()))?,
         );
-        
+
         headers.insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
@@ -231,7 +229,10 @@ impl KimiProvider {
             max_output_tokens: 8_192,
         };
 
-        info!("Kimi provider initialized with model: {}", config.default_model);
+        info!(
+            "Kimi provider initialized with model: {}",
+            config.default_model
+        );
 
         Ok(Self {
             config,
@@ -243,18 +244,20 @@ impl KimiProvider {
 
     /// Create from environment
     pub fn from_env() -> Result<Self, LLMError> {
-        let config = KimiConfig::from_env()
-            .map_err(|e| LLMError::InvalidRequest(e))?;
+        let config = KimiConfig::from_env().map_err(|e| LLMError::InvalidRequest(e))?;
         Self::new(config)
     }
 
-    /// 🆕 FIX: Check if web_search tool is present (incompatible with thinking mode)
+    /// 🆕 FIX: Check if web_search tool is present (incompatible with thinking
+    /// mode)
     fn has_web_search_tool(tools: Option<&Vec<crate::llm::types::Tool>>) -> bool {
-        tools.map(|tools| {
-            tools.iter().any(|t| {
-                t.function.name == "$web_search" || t.function.name == "web_search"
+        tools
+            .map(|tools| {
+                tools
+                    .iter()
+                    .any(|t| t.function.name == "$web_search" || t.function.name == "web_search")
             })
-        }).unwrap_or(false)
+            .unwrap_or(false)
     }
 }
 
@@ -277,8 +280,11 @@ impl LLMProvider for KimiProvider {
         }
 
         // 🆕 FIX: Determine effective thinking mode
-        // Constraint 3: $web_search tool is incompatible with thinking mode on K2.6/K2.5
-        let effective_thinking = if request.config.model.contains("k2.6") && Self::has_web_search_tool(request.config.tools.as_ref()) {
+        // Constraint 3: $web_search tool is incompatible with thinking mode on
+        // K2.6/K2.5
+        let effective_thinking = if request.config.model.contains("k2.6")
+            && Self::has_web_search_tool(request.config.tools.as_ref())
+        {
             debug!("Web search tool detected, forcing thinking mode to disabled for Kimi k2.6");
             ThinkingMode::Disabled
         } else {
@@ -287,14 +293,16 @@ impl LLMProvider for KimiProvider {
 
         // 🆕 FIX: Explicitly set thinking parameter (default disabled for fast mode)
         let thinking_json = serde_json::json!({"type": effective_thinking.to_string()});
-        request.config.extra.insert("thinking".to_string(), thinking_json);
+        request
+            .config
+            .extra
+            .insert("thinking".to_string(), thinking_json);
 
-        // 🆕 FIX: Constraint 1 - tool_choice can only be "auto" or "none" for K2.6 with thinking enabled
+        // 🆕 FIX: Constraint 1 - tool_choice can only be "auto" or "none" for K2.6 with
+        // thinking enabled
         if request.config.model.contains("k2.6") {
             if let Some(ref tool_choice) = request.config.tool_choice {
-                let is_valid = matches!(tool_choice,
-                    ToolChoice::Auto(_) | ToolChoice::None(_)
-                );
+                let is_valid = matches!(tool_choice, ToolChoice::Auto(_) | ToolChoice::None(_));
                 if !is_valid {
                     debug!("Invalid tool_choice for Kimi k2.6, resetting to 'auto'");
                     request.config.tool_choice = Some(ToolChoice::Auto("auto".to_string()));
@@ -303,12 +311,11 @@ impl LLMProvider for KimiProvider {
         }
 
         let body = self.request_builder.build_body(request);
-        let response = self.http_client.execute_with_retry(
-            &self.config,
-            "/chat/completions",
-            body
-        ).await?;
-        
+        let response = self
+            .http_client
+            .execute_with_retry(&self.config, "/chat/completions", body)
+            .await?;
+
         let llm_response: LLMResponse = response
             .json()
             .await
@@ -316,13 +323,20 @@ impl LLMProvider for KimiProvider {
 
         debug!(
             "Received response from Kimi: {} tokens used",
-            llm_response.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)
+            llm_response
+                .usage
+                .as_ref()
+                .map(|u| u.total_tokens)
+                .unwrap_or(0)
         );
 
         Ok(llm_response)
     }
 
-    async fn complete_stream(&self, mut request: LLMRequest) -> LLMResult<mpsc::Receiver<StreamChunk>> {
+    async fn complete_stream(
+        &self,
+        mut request: LLMRequest,
+    ) -> LLMResult<mpsc::Receiver<StreamChunk>> {
         debug!("Sending streaming request to Kimi");
 
         let (tx, rx) = mpsc::channel(100);
@@ -334,8 +348,11 @@ impl LLMProvider for KimiProvider {
         request.config.stream = Some(true);
 
         // 🆕 FIX: Determine effective thinking mode
-        // Constraint 3: $web_search tool is incompatible with thinking mode on K2.6/K2.5
-        let effective_thinking = if request.config.model.contains("k2.6") && Self::has_web_search_tool(request.config.tools.as_ref()) {
+        // Constraint 3: $web_search tool is incompatible with thinking mode on
+        // K2.6/K2.5
+        let effective_thinking = if request.config.model.contains("k2.6")
+            && Self::has_web_search_tool(request.config.tools.as_ref())
+        {
             debug!("Web search tool detected, forcing thinking mode to disabled for Kimi k2.6");
             ThinkingMode::Disabled
         } else {
@@ -344,14 +361,16 @@ impl LLMProvider for KimiProvider {
 
         // 🆕 FIX: Explicitly set thinking parameter (default disabled for fast mode)
         let thinking_json = serde_json::json!({"type": effective_thinking.to_string()});
-        request.config.extra.insert("thinking".to_string(), thinking_json);
+        request
+            .config
+            .extra
+            .insert("thinking".to_string(), thinking_json);
 
-        // 🆕 FIX: Constraint 1 - tool_choice can only be "auto" or "none" for K2.6 with thinking enabled
+        // 🆕 FIX: Constraint 1 - tool_choice can only be "auto" or "none" for K2.6 with
+        // thinking enabled
         if request.config.model.contains("k2.6") {
             if let Some(ref tool_choice) = request.config.tool_choice {
-                let is_valid = matches!(tool_choice,
-                    ToolChoice::Auto(_) | ToolChoice::None(_)
-                );
+                let is_valid = matches!(tool_choice, ToolChoice::Auto(_) | ToolChoice::None(_));
                 if !is_valid {
                     debug!("Invalid tool_choice for Kimi k2.6, resetting to 'auto'");
                     request.config.tool_choice = Some(ToolChoice::Auto("auto".to_string()));
@@ -360,12 +379,11 @@ impl LLMProvider for KimiProvider {
         }
 
         let body = self.request_builder.build_body(request);
-        let response = self.http_client.stream_with_retry(
-            &self.config,
-            "/chat/completions",
-            body
-        ).await?;
-        
+        let response = self
+            .http_client
+            .stream_with_retry(&self.config, "/chat/completions", body)
+            .await?;
+
         let mut stream = response.bytes_stream();
 
         tokio::spawn(async move {
@@ -373,11 +391,11 @@ impl LLMProvider for KimiProvider {
                 match chunk_result {
                     Ok(bytes) => {
                         let text = String::from_utf8_lossy(&bytes);
-                        
+
                         for line in text.lines() {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
-                                
+
                                 if data == "[DONE]" {
                                     break;
                                 }
@@ -407,7 +425,8 @@ impl LLMProvider for KimiProvider {
     }
 
     async fn health_check(&self) -> LLMResult<()> {
-        let _response = self.http_client
+        let _response = self
+            .http_client
             .get_with_retry(&self.config, "/models")
             .await?;
         Ok(())

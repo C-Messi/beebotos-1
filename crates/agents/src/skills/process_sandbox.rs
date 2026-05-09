@@ -50,11 +50,15 @@ mod linux {
                     | libc::CLONE_NEWIPC
                     | libc::CLONE_NEWUTS;
                 if libc::unshare(flags) != 0 {
-                    // Non-fatal: continue even if namespaces fail (e.g. inside Docker without privileges)
-                    stderr_write("beebotos-sandbox: unshare failed, continuing without namespaces\n");
+                    // Non-fatal: continue even if namespaces fail (e.g. inside Docker without
+                    // privileges)
+                    stderr_write(
+                        "beebotos-sandbox: unshare failed, continuing without namespaces\n",
+                    );
                 }
 
-                // 2. Prevent privilege escalation (required for seccomp, but we use it even without)
+                // 2. Prevent privilege escalation (required for seccomp, but we use it even
+                //    without)
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     abort("beebotos-sandbox: prctl(PR_SET_NO_NEW_PRIVS) failed\n");
                 }

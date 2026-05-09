@@ -1,7 +1,8 @@
 //! MCP Tools
 
-use crate::error::Result;
 use serde::{Deserialize, Serialize};
+
+use crate::error::Result;
 
 /// MCP Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,9 +19,7 @@ pub struct McpToolRegistry {
 
 impl McpToolRegistry {
     pub fn new() -> Self {
-        Self {
-            tools: Vec::new(),
-        }
+        Self { tools: Vec::new() }
     }
 
     pub fn register(&mut self, tool: McpTool) {

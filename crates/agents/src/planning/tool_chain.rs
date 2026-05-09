@@ -89,7 +89,11 @@ impl ToolChainParser {
     /// ```
     pub fn parse(text: &str) -> Result<ToolChain, ToolChainParseError> {
         let mut steps = Vec::new();
-        let lines: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = text
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
 
         let mut i = 0;
         while i < lines.len() {
@@ -147,7 +151,9 @@ impl ToolChainParser {
         }
     }
 
-    fn parse_conditional(lines: &[&str]) -> Result<(ConditionalToolCall, usize), ToolChainParseError> {
+    fn parse_conditional(
+        lines: &[&str],
+    ) -> Result<(ConditionalToolCall, usize), ToolChainParseError> {
         if lines.is_empty() {
             return Err(ToolChainParseError::InvalidCondition);
         }

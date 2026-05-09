@@ -1,6 +1,7 @@
 //! Skill Activation Trace
 //!
-//! Full observability of every skill matching decision for debugging and self-optimization.
+//! Full observability of every skill matching decision for debugging and
+//! self-optimization.
 
 use chrono::{DateTime, Utc};
 
@@ -68,7 +69,8 @@ impl SkillActivationTrace {
         self
     }
 
-    /// Whether this was a false positive (skill selected but shouldn't have been)
+    /// Whether this was a false positive (skill selected but shouldn't have
+    /// been)
     pub fn is_false_positive(&self) -> bool {
         match &self.feedback {
             Some(fb) => fb.was_correct == false && self.ranking.selected_skill.is_some(),
@@ -76,7 +78,8 @@ impl SkillActivationTrace {
         }
     }
 
-    /// Whether this was a false negative (no skill selected but one should have been)
+    /// Whether this was a false negative (no skill selected but one should have
+    /// been)
     pub fn is_false_negative(&self) -> bool {
         match &self.feedback {
             Some(fb) => fb.was_correct == false && self.ranking.selected_skill.is_none(),
@@ -181,9 +184,7 @@ impl TraceStore for InMemoryTraceStore {
         let traces = self.traces.read().await;
         let filtered: Vec<_> = traces
             .iter()
-            .filter(|t| {
-                t.ranking.selected_skill.as_ref() == Some(&skill_id.to_string())
-            })
+            .filter(|t| t.ranking.selected_skill.as_ref() == Some(&skill_id.to_string()))
             .rev()
             .take(limit)
             .cloned()
@@ -237,9 +238,7 @@ impl TraceStore for InMemoryTraceStore {
         let traces = self.traces.read().await;
         let filtered: Vec<_> = traces
             .iter()
-            .filter(|t| {
-                t.ranking.selected_skill.is_some() && t.ranking.confidence < threshold
-            })
+            .filter(|t| t.ranking.selected_skill.is_some() && t.ranking.confidence < threshold)
             .rev()
             .take(limit)
             .cloned()

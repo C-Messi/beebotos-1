@@ -6,11 +6,12 @@
 //! - Permission-based access control
 //! - Route-level authorization
 
-use crate::state::auth::{use_auth_state, Permission, Role};
 use gloo_storage::Storage;
 use leptos::prelude::*;
 use leptos::view;
 use leptos_router::hooks::use_navigate;
+
+use crate::state::auth::{use_auth_state, Permission, Role};
 
 /// Authentication guard - requires user to be logged in
 #[component]

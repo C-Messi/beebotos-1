@@ -1,9 +1,11 @@
 //! Signature verification utilities
 
-use crate::error::UpdateError;
+use std::path::Path;
+
 use ed25519_dalek::Verifier;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+
+use crate::error::UpdateError;
 
 /// Signature verifier
 pub struct SignatureVerifier {
@@ -18,24 +20,32 @@ impl SignatureVerifier {
     pub fn with_public_key_b64(public_key_b64: &str) -> Result<Self, UpdateError> {
         let bytes = base64_decode(public_key_b64)
             .map_err(|e| UpdateError::InvalidSignature(format!("Invalid public key: {}", e)))?;
-        let public_key = ed25519_dalek::VerifyingKey::from_bytes(&bytes.try_into().map_err(|_| {
-            UpdateError::InvalidSignature("Public key must be 32 bytes".to_string())
-        })?)
-        .map_err(|e| UpdateError::InvalidSignature(format!("Invalid public key: {}", e)))?;
+        let public_key =
+            ed25519_dalek::VerifyingKey::from_bytes(&bytes.try_into().map_err(|_| {
+                UpdateError::InvalidSignature("Public key must be 32 bytes".to_string())
+            })?)
+            .map_err(|e| UpdateError::InvalidSignature(format!("Invalid public key: {}", e)))?;
 
-        Ok(Self { public_key: Some(public_key) })
+        Ok(Self {
+            public_key: Some(public_key),
+        })
     }
 
     pub fn verify_bytes(&self, data: &[u8], signature_b64: &str) -> Result<bool, UpdateError> {
-        let public_key = self.public_key.as_ref()
+        let public_key = self
+            .public_key
+            .as_ref()
             .ok_or_else(|| UpdateError::InvalidSignature("No public key configured".to_string()))?;
 
-        let sig_bytes = base64_decode(signature_b64)
-            .map_err(|e| UpdateError::InvalidSignature(format!("Invalid signature base64: {}", e)))?;
-        let signature = ed25519_dalek::Signature::from_slice(&sig_bytes)
-            .map_err(|e| UpdateError::InvalidSignature(format!("Invalid signature format: {}", e)))?;
+        let sig_bytes = base64_decode(signature_b64).map_err(|e| {
+            UpdateError::InvalidSignature(format!("Invalid signature base64: {}", e))
+        })?;
+        let signature = ed25519_dalek::Signature::from_slice(&sig_bytes).map_err(|e| {
+            UpdateError::InvalidSignature(format!("Invalid signature format: {}", e))
+        })?;
 
-        public_key.verify(data, &signature)
+        public_key
+            .verify(data, &signature)
             .map_err(|e| UpdateError::InvalidSignature(format!("Verification failed: {}", e)))?;
 
         Ok(true)

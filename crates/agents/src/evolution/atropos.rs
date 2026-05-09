@@ -7,8 +7,9 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+
 use chrono::{DateTime, Utc};
+use tokio::sync::RwLock;
 
 use crate::error::AgentError;
 use crate::planning::ToolTrail;
@@ -98,7 +99,10 @@ pub struct BatchTrigger {
 
 impl BatchTrigger {
     pub fn new(max_buffer_size: usize, max_age_secs: u64) -> Self {
-        Self { max_buffer_size, _max_age_secs: max_age_secs }
+        Self {
+            max_buffer_size,
+            _max_age_secs: max_age_secs,
+        }
     }
 
     pub fn should_flush(&self, buffer: &VecDeque<ToolTrail>) -> bool {
@@ -140,7 +144,10 @@ impl TrailCollector {
         Self {
             buffer: Arc::new(RwLock::new(VecDeque::new())),
             storage,
-            batch_trigger: BatchTrigger::new(config.trail_buffer_size, config.batch_flush_interval_secs),
+            batch_trigger: BatchTrigger::new(
+                config.trail_buffer_size,
+                config.batch_flush_interval_secs,
+            ),
         }
     }
 
@@ -166,10 +173,7 @@ impl TrailCollector {
             return Ok(());
         }
 
-        let annotated: Vec<AnnotatedTrail> = trails
-            .into_iter()
-            .map(|t| self.annotate(t))
-            .collect();
+        let annotated: Vec<AnnotatedTrail> = trails.into_iter().map(|t| self.annotate(t)).collect();
 
         self.storage.store_batch(&annotated).await?;
         Ok(())
@@ -192,7 +196,11 @@ impl TrailCollector {
 
     fn calculate_success_rate(&self, trail: &ToolTrail) -> f32 {
         let total = trail.steps.len().max(1);
-        let successful = trail.steps.iter().filter(|s| s.tool_calls.iter().all(|c| c.success)).count();
+        let successful = trail
+            .steps
+            .iter()
+            .filter(|s| s.tool_calls.iter().all(|c| c.success))
+            .count();
         successful as f32 / total as f32
     }
 
@@ -247,7 +255,9 @@ impl EvalEnvPool {
                 },
             })
         } else {
-            Err(AgentError::Execution("Eval environment pool exhausted".to_string()))
+            Err(AgentError::Execution(
+                "Eval environment pool exhausted".to_string(),
+            ))
         }
     }
 
@@ -268,7 +278,10 @@ pub struct TrainingEnvironment {
 
 impl TrainingEnvironment {
     pub fn new(dataset: Vec<AnnotatedTrail>, limits: ResourceLimits) -> Self {
-        Self { dataset, resource_limits: limits }
+        Self {
+            dataset,
+            resource_limits: limits,
+        }
     }
 }
 
@@ -391,7 +404,10 @@ mod tests {
     #[tokio::test]
     async fn test_trail_collector_flush() {
         let storage = Arc::new(InMemoryTrailStorage::new());
-        let config = AtroposConfig { trail_buffer_size: 2, ..Default::default() };
+        let config = AtroposConfig {
+            trail_buffer_size: 2,
+            ..Default::default()
+        };
         let collector = TrailCollector::new(storage.clone(), &config);
 
         let mut trail = ToolTrail::new("t1".to_string());

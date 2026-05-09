@@ -2,8 +2,10 @@
 
 /// Sandbox execution mode for skills.
 ///
-/// - `Wasmtime`: Default. Uses wasmtime WASM sandbox with capability-based security.
-/// - `Docker`: Optional. Runs skill in an isolated Docker container (higher overhead, stronger isolation).
+/// - `Wasmtime`: Default. Uses wasmtime WASM sandbox with capability-based
+///   security.
+/// - `Docker`: Optional. Runs skill in an isolated Docker container (higher
+///   overhead, stronger isolation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxMode {
     /// WASMtime sandbox (default, lightweight, capability-based)
@@ -109,9 +111,8 @@ impl SkillSecurityValidator {
         let parser = Parser::new(0);
 
         for payload in parser.parse_all(wasm) {
-            let payload = payload.map_err(|e| {
-                ValidationError::InvalidWasm(format!("Parse error: {}", e))
-            })?;
+            let payload =
+                payload.map_err(|e| ValidationError::InvalidWasm(format!("Parse error: {}", e)))?;
 
             match payload {
                 Payload::Version { num, .. } => {
@@ -167,7 +168,8 @@ impl SkillSecurityValidator {
                                         "Data segment references non-zero memory index".to_string(),
                                     ));
                                 }
-                                // offset_expr is validated by wasmparser; we just ensure it's present
+                                // offset_expr is validated by wasmparser; we just ensure it's
+                                // present
                                 let _ = offset_expr;
                             }
                         }
@@ -248,7 +250,8 @@ impl SkillSecurityValidator {
         false
     }
 
-    /// Detect potential sandbox escape attempts by scanning imports, exports and custom sections
+    /// Detect potential sandbox escape attempts by scanning imports, exports
+    /// and custom sections
     pub fn detect_sandbox_escape(
         &self,
         wasm: &[u8],
@@ -259,9 +262,8 @@ impl SkillSecurityValidator {
         let parser = Parser::new(0);
 
         for payload in parser.parse_all(wasm) {
-            let payload = payload.map_err(|e| {
-                ValidationError::InvalidWasm(format!("Parse error: {}", e))
-            })?;
+            let payload =
+                payload.map_err(|e| ValidationError::InvalidWasm(format!("Parse error: {}", e)))?;
 
             match payload {
                 Payload::ImportSection(imports) => {
@@ -281,7 +283,10 @@ impl SkillSecurityValidator {
 
                         for (technique, pattern) in escape_patterns {
                             if full_name.contains(pattern) {
-                                detections.push(format!("{} attack pattern in import: {}", technique, full_name));
+                                detections.push(format!(
+                                    "{} attack pattern in import: {}",
+                                    technique, full_name
+                                ));
                             }
                         }
                     }
@@ -301,13 +306,17 @@ impl SkillSecurityValidator {
 
                         for (technique, pattern) in escape_patterns {
                             if export.name.contains(pattern) {
-                                detections.push(format!("{} attack pattern in export: {}", technique, export.name));
+                                detections.push(format!(
+                                    "{} attack pattern in export: {}",
+                                    technique, export.name
+                                ));
                             }
                         }
                     }
                 }
                 Payload::CustomSection(custom) => {
-                    let suspicious_sections: &[&str] = &["malicious", "exploit", "shellcode", "payload"];
+                    let suspicious_sections: &[&str] =
+                        &["malicious", "exploit", "shellcode", "payload"];
                     for name in suspicious_sections {
                         if custom.name().eq_ignore_ascii_case(name) {
                             detections.push(format!(

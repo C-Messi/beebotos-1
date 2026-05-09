@@ -1,12 +1,8 @@
 //! Authentication service
 
-use argon2::{
-    password_hash::{
-        rand_core::OsRng,
-        PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-    },
-    Argon2,
-};
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
 use sqlx::SqlitePool;
 
 use crate::error::AppError;
@@ -113,7 +109,7 @@ impl AuthService {
         let result = sqlx::query_as::<_, UserRow>(
             "INSERT INTO users (username, email, password_hash)
              VALUES (?, ?, ?)
-             RETURNING id, username, email, password_hash, avatar, wallet_address"
+             RETURNING id, username, email, password_hash, avatar, wallet_address",
         )
         .bind(username)
         .bind(&email_value)
@@ -130,8 +126,15 @@ impl AuthService {
                     || message.to_lowercase().contains("constraint failed");
 
                 if is_unique_violation {
-                    let field = db_err.constraint()
-                        .and_then(|c| if c.contains("email") { Some("email") } else { Some("username") })
+                    let field = db_err
+                        .constraint()
+                        .and_then(|c| {
+                            if c.contains("email") {
+                                Some("email")
+                            } else {
+                                Some("username")
+                            }
+                        })
                         .unwrap_or("username");
                     Err(AppError::Validation(vec![crate::error::ValidationError {
                         field: field.to_string(),
@@ -154,7 +157,7 @@ impl AuthService {
     ) -> Result<AuthUserInfo, AppError> {
         let row = sqlx::query_as::<_, UserRow>(
             "SELECT id, username, email, password_hash, avatar, wallet_address
-             FROM users WHERE username = ?"
+             FROM users WHERE username = ?",
         )
         .bind(username)
         .fetch_optional(&self.db)
@@ -172,7 +175,7 @@ impl AuthService {
     pub async fn get_user_by_id(&self, id: &str) -> Result<AuthUserInfo, AppError> {
         let row = sqlx::query_as::<_, UserPublicRow>(
             "SELECT id, username, email, avatar, wallet_address
-             FROM users WHERE id = ?"
+             FROM users WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.db)

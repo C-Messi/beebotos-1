@@ -90,18 +90,18 @@ impl SkillImprovementEngine {
     }
 
     /// Generate self-evaluation prompt for LLM
-    pub fn build_evaluation_prompt(&self, skill_id: &str, input: &str, output: &str, success: bool) -> String {
+    pub fn build_evaluation_prompt(
+        &self,
+        skill_id: &str,
+        input: &str,
+        output: &str,
+        success: bool,
+    ) -> String {
         format!(
-            "请评估以下 skill 执行的效果，并给出改进建议。\n\n\
-            Skill ID: {}\n\
-            输入: {}\n\
-            输出: {}\n\
-            执行结果: {}\n\n\
-            请回答：\n\
-            1. 执行是否成功完成了用户请求？\n\
-            2. 输出质量如何（1-10分）？\n\
-            3. 有哪些可以改进的地方？\n\
-            4. 是否需要更新 skill 的描述或示例？",
+            "请评估以下 skill 执行的效果，并给出改进建议。\n\nSkill ID: {}\n输入: {}\n输出: \
+             {}\n执行结果: {}\n\n请回答：\n1. 执行是否成功完成了用户请求？\n2. \
+             输出质量如何（1-10分）？\n3. 有哪些可以改进的地方？\n4. 是否需要更新 skill \
+             的描述或示例？",
             skill_id,
             input.chars().take(200).collect::<String>(),
             output.chars().take(500).collect::<String>(),
@@ -112,7 +112,7 @@ impl SkillImprovementEngine {
     /// Aggregate feedback into improvement report
     pub fn aggregate_feedback(&self, feedbacks: &[SkillFeedback]) -> Vec<SkillImprovement> {
         let mut improvements = Vec::new();
-        
+
         for fb in feedbacks {
             if !fb.execution_success {
                 improvements.push(SkillImprovement {
@@ -122,16 +122,19 @@ impl SkillImprovementEngine {
                     category: ImprovementCategory::ErrorHandling,
                 });
             }
-            
+
             if fb.execution_time_ms > 10000 {
                 improvements.push(SkillImprovement {
                     skill_id: fb.skill_id.clone(),
-                    suggestion: format!("Execution time {}ms exceeds threshold, consider optimization", fb.execution_time_ms),
+                    suggestion: format!(
+                        "Execution time {}ms exceeds threshold, consider optimization",
+                        fb.execution_time_ms
+                    ),
                     priority: ImprovementPriority::Medium,
                     category: ImprovementCategory::Performance,
                 });
             }
-            
+
             for suggestion in &fb.suggested_improvements {
                 improvements.push(SkillImprovement {
                     skill_id: fb.skill_id.clone(),
@@ -141,14 +144,14 @@ impl SkillImprovementEngine {
                 });
             }
         }
-        
+
         improvements
     }
 
     /// Generate markdown report from improvements
     pub fn generate_report(&self, improvements: &[SkillImprovement]) -> String {
         let mut report = String::from("# Skill Improvement Report\n\n");
-        
+
         for imp in improvements {
             let priority_str = match imp.priority {
                 ImprovementPriority::Low => "🟢 Low",
@@ -156,21 +159,27 @@ impl SkillImprovementEngine {
                 ImprovementPriority::High => "🔴 High",
                 ImprovementPriority::Critical => "🚨 Critical",
             };
-            
+
             report.push_str(&format!(
-                "## {}\n- **Skill**: `{}`\n- **Priority**: {}\n- **Category**: {:?}\n- **Suggestion**: {}\n\n",
+                "## {}\n- **Skill**: `{}`\n- **Priority**: {}\n- **Category**: {:?}\n- \
+                 **Suggestion**: {}\n\n",
                 imp.skill_id, imp.skill_id, priority_str, imp.category, imp.suggestion
             ));
         }
-        
+
         report
     }
 
-    /// 🆕 OPTIMIZATION PHASE 3: Generate structured skill update proposals from feedback
+    /// 🆕 OPTIMIZATION PHASE 3: Generate structured skill update proposals from
+    /// feedback
     ///
-    /// Converts aggregated improvements into actionable skill update instructions
-    /// that can be fed into the PatchEngine or SkillDistiller.
-    pub fn generate_skill_updates(&self, skill_id: &str, feedbacks: &[SkillFeedback]) -> Vec<SkillUpdateProposal> {
+    /// Converts aggregated improvements into actionable skill update
+    /// instructions that can be fed into the PatchEngine or SkillDistiller.
+    pub fn generate_skill_updates(
+        &self,
+        skill_id: &str,
+        feedbacks: &[SkillFeedback],
+    ) -> Vec<SkillUpdateProposal> {
         let mut proposals = Vec::new();
         let mut description_changes = Vec::new();
         let mut example_changes = Vec::new();
@@ -290,7 +299,7 @@ mod tests {
                 token_cost: 200,
             },
         ];
-        
+
         let improvements = engine.aggregate_feedback(&feedbacks);
         assert_eq!(improvements.len(), 3); // 1 failure + 1 slow + 1 suggestion
     }

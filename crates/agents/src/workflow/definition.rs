@@ -62,7 +62,11 @@ impl<'de> Deserialize<'de> for WorkflowDefinition {
 
         let raw = Raw::deserialize(deserializer)?;
         Ok(WorkflowDefinition {
-            id: if raw.id.is_empty() { raw.name.clone() } else { raw.id },
+            id: if raw.id.is_empty() {
+                raw.name.clone()
+            } else {
+                raw.id
+            },
             name: raw.name,
             description: raw.description,
             version: raw.version,
@@ -274,8 +278,7 @@ auth: "bearer"
 
     #[test]
     fn test_load_example_workflows() {
-        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..");
+        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for path in &[
             "data/workflows/daily_news.yaml",
             "examples/workflows/data_processing.yaml",
@@ -288,8 +291,16 @@ auth: "bearer"
                 .unwrap_or_else(|e| panic!("Failed to read {}: {}", full_path.display(), e));
             let def: WorkflowDefinition = serde_yaml::from_str(&content)
                 .unwrap_or_else(|e| panic!("Failed to parse {}: {}", full_path.display(), e));
-            assert!(!def.id.is_empty(), "Workflow {} has empty ID", full_path.display());
-            assert!(!def.steps.is_empty(), "Workflow {} has no steps", full_path.display());
+            assert!(
+                !def.id.is_empty(),
+                "Workflow {} has empty ID",
+                full_path.display()
+            );
+            assert!(
+                !def.steps.is_empty(),
+                "Workflow {} has no steps",
+                full_path.display()
+            );
         }
     }
 

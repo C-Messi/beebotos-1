@@ -7,9 +7,10 @@
 //! - Receives JSON-RPC responses via stdout (newline-delimited)
 //! - Validates command path to prevent path traversal
 
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
@@ -104,13 +105,15 @@ impl StdioTransport {
             ))
         })?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            MCPError::ConnectionFailed("Failed to open stdin pipe".to_string())
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| MCPError::ConnectionFailed("Failed to open stdin pipe".to_string()))?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            MCPError::ConnectionFailed("Failed to open stdout pipe".to_string())
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| MCPError::ConnectionFailed("Failed to open stdout pipe".to_string()))?;
 
         *self.child.lock().await = Some(child);
         *self.stdin.lock().await = Some(stdin);
@@ -130,7 +133,7 @@ impl StdioTransport {
     async fn is_child_alive(&self) -> bool {
         if let Some(ref mut child) = *self.child.lock().await {
             match child.try_wait() {
-                Ok(None) => true,  // still running
+                Ok(None) => true,           // still running
                 Ok(Some(_status)) => false, // exited
                 Err(_) => false,
             }

@@ -5,7 +5,6 @@
 
 use async_trait::async_trait;
 use reqwest::header::{self, HeaderMap, HeaderValue};
-
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
@@ -38,7 +37,7 @@ impl Default for DoubaoConfig {
 impl DoubaoConfig {
     pub fn from_env() -> Result<Self, String> {
         use std::env;
-        
+
         let api_key = env::var("DOUBAO_API_KEY")
             .or_else(|_| env::var("ARK_API_KEY"))
             .map_err(|_| "DOUBAO_API_KEY not set".to_string())?;
@@ -87,7 +86,10 @@ impl ProviderConfig for DoubaoConfig {
             HeaderValue::from_str(&format!("Bearer {}", self.api_key))
                 .map_err(|e| LLMError::InvalidRequest(e.to_string()))?,
         );
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
         Ok(headers)
     }
 }
@@ -118,7 +120,10 @@ impl DoubaoProvider {
             max_output_tokens: 4_096,
         };
 
-        info!("Doubao provider initialized with model: {}", config.default_model);
+        info!(
+            "Doubao provider initialized with model: {}",
+            config.default_model
+        );
 
         Ok(Self {
             config,
@@ -129,27 +134,29 @@ impl DoubaoProvider {
     }
 
     pub fn from_env() -> Result<Self, LLMError> {
-        let config = DoubaoConfig::from_env()
-            .map_err(|e| LLMError::InvalidRequest(e))?;
+        let config = DoubaoConfig::from_env().map_err(|e| LLMError::InvalidRequest(e))?;
         Self::new(config)
     }
 }
 
 #[async_trait]
 impl LLMProvider for DoubaoProvider {
-    fn name(&self) -> &str { "doubao" }
-    fn capabilities(&self) -> ProviderCapabilities { self.capabilities.clone() }
+    fn name(&self) -> &str {
+        "doubao"
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.capabilities.clone()
+    }
 
     async fn complete(&self, request: LLMRequest) -> LLMResult<LLMResponse> {
         debug!("Sending completion request to Doubao");
 
         let body = self.request_builder.build_body(request);
-        let response = self.http_client.execute_with_retry(
-            &self.config,
-            "/chat/completions",
-            body
-        ).await?;
-        
+        let response = self
+            .http_client
+            .execute_with_retry(&self.config, "/chat/completions", body)
+            .await?;
+
         let llm_response: LLMResponse = response
             .json()
             .await
@@ -166,12 +173,11 @@ impl LLMProvider for DoubaoProvider {
         request.config.stream = Some(true);
 
         let body = self.request_builder.build_body(request);
-        let response = self.http_client.stream_with_retry(
-            &self.config,
-            "/chat/completions",
-            body
-        ).await?;
-        
+        let response = self
+            .http_client
+            .stream_with_retry(&self.config, "/chat/completions", body)
+            .await?;
+
         let mut stream = response.bytes_stream();
 
         tokio::spawn(async move {
@@ -181,9 +187,13 @@ impl LLMProvider for DoubaoProvider {
                         for line in String::from_utf8_lossy(&bytes).lines() {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
-                                if data == "[DONE]" { break; }
+                                if data == "[DONE]" {
+                                    break;
+                                }
                                 if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
-                                    if tx.send(chunk).await.is_err() { return; }
+                                    if tx.send(chunk).await.is_err() {
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -199,7 +209,8 @@ impl LLMProvider for DoubaoProvider {
     }
 
     async fn health_check(&self) -> LLMResult<()> {
-        let _response = self.http_client
+        let _response = self
+            .http_client
             .get_with_retry(&self.config, "/models")
             .await?;
         Ok(())
@@ -208,24 +219,42 @@ impl LLMProvider for DoubaoProvider {
     async fn list_models(&self) -> LLMResult<Vec<ModelInfo>> {
         Ok(vec![
             ModelInfo {
-                id: doubao_models::DOUBAO_PRO.to_string(), name: "Doubao-Pro".to_string(),
+                id: doubao_models::DOUBAO_PRO.to_string(),
+                name: "Doubao-Pro".to_string(),
                 description: Some("Flagship model, best performance".to_string()),
-                context_window: 128_000, max_tokens: 4_096,
-                capabilities: ModelCapabilities { vision: false, function_calling: true, json_mode: true },
+                context_window: 128_000,
+                max_tokens: 4_096,
+                capabilities: ModelCapabilities {
+                    vision: false,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.008, 0.008)),
             },
             ModelInfo {
-                id: doubao_models::DOUBAO_LITE.to_string(), name: "Doubao-Lite".to_string(),
+                id: doubao_models::DOUBAO_LITE.to_string(),
+                name: "Doubao-Lite".to_string(),
                 description: Some("Fast and cost-effective".to_string()),
-                context_window: 128_000, max_tokens: 4_096,
-                capabilities: ModelCapabilities { vision: false, function_calling: true, json_mode: true },
+                context_window: 128_000,
+                max_tokens: 4_096,
+                capabilities: ModelCapabilities {
+                    vision: false,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.003, 0.003)),
             },
             ModelInfo {
-                id: doubao_models::DOUBAO_VISION.to_string(), name: "Doubao-Vision".to_string(),
+                id: doubao_models::DOUBAO_VISION.to_string(),
+                name: "Doubao-Vision".to_string(),
                 description: Some("Vision-capable model".to_string()),
-                context_window: 32_000, max_tokens: 4_096,
-                capabilities: ModelCapabilities { vision: true, function_calling: true, json_mode: true },
+                context_window: 32_000,
+                max_tokens: 4_096,
+                capabilities: ModelCapabilities {
+                    vision: true,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.015, 0.015)),
             },
         ])

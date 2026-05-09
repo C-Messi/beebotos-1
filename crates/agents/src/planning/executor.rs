@@ -1,16 +1,18 @@
 //! Plan Executor
 //!
-//! Executes plans with support for sequential, parallel, and adaptive execution strategies.
-//! Handles step dependencies, retries, and dynamic adaptation.
+//! Executes plans with support for sequential, parallel, and adaptive execution
+//! strategies. Handles step dependencies, retries, and dynamic adaptation.
 
-use super::plan::{Action, Plan, PlanId, PlanningError, PlanningResult};
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::timeout;
 use tracing::{info, warn};
+
+use super::plan::{Action, Plan, PlanId, PlanningError, PlanningResult};
 
 /// Plan executor
 pub struct PlanExecutor {
@@ -191,10 +193,13 @@ impl AgentDelegateResolver {
 #[async_trait::async_trait]
 impl DelegateResolver for AgentDelegateResolver {
     async fn resolve(&self, branch: &super::plan::DelegateBranch) -> Result<String, String> {
-        let parent = self.parent.upgrade()
+        let parent = self
+            .parent
+            .upgrade()
             .ok_or_else(|| "Parent agent no longer available".to_string())?;
 
-        let mut child = parent.spawn_sub_agent(branch.agent_config.clone())
+        let mut child = parent
+            .spawn_sub_agent(branch.agent_config.clone())
             .map_err(|e| format!("Failed to spawn sub-agent: {}", e))?;
 
         info!(
@@ -206,14 +211,21 @@ impl DelegateResolver for AgentDelegateResolver {
 
         // Execute the task using the sub-agent
         let result = if let Some(ref skill_hint) = branch.skill_hint {
-            child.execute_skill_by_id(skill_hint, &branch.task, None).await
+            child
+                .execute_skill_by_id(skill_hint, &branch.task, None)
+                .await
                 .map_err(|e| format!("Sub-agent skill execution failed: {}", e))?
         } else {
             // Fallback: use LLM to process the task directly
-            let llm_result = child.call_llm_prompt(
-                branch.task.clone(),
-                Some::<String>("You are an expert assistant. Please complete the given task.".to_string())
-            ).await.map_err(|e| format!("Sub-agent LLM call failed: {}", e))?;
+            let llm_result = child
+                .call_llm_prompt(
+                    branch.task.clone(),
+                    Some::<String>(
+                        "You are an expert assistant. Please complete the given task.".to_string(),
+                    ),
+                )
+                .await
+                .map_err(|e| format!("Sub-agent LLM call failed: {}", e))?;
             crate::skills::executor::SkillExecutionResult {
                 task_id: branch.branch_id.clone(),
                 success: true,
@@ -235,7 +247,7 @@ impl DelegateResolver for AgentDelegateResolver {
 }
 
 /// Default action handler with actual tool execution support
-/// 
+///
 /// ARCHITECTURE FIX: Now supports real tool calls through a tool registry.
 /// Tools must be registered before they can be executed.
 pub struct DefaultActionHandler {
@@ -269,7 +281,8 @@ impl DefaultActionHandler {
         }
     }
 
-    /// Create handler with a delegate resolver for real ParallelDelegate execution
+    /// Create handler with a delegate resolver for real ParallelDelegate
+    /// execution
     pub fn with_delegate_resolver(resolver: Arc<dyn DelegateResolver>) -> Self {
         Self {
             tool_registry: Arc::new(RwLock::new(HashMap::new())),
@@ -281,13 +294,13 @@ impl DefaultActionHandler {
     pub fn set_delegate_resolver(&mut self, resolver: Arc<dyn DelegateResolver>) {
         self.delegate_resolver = Some(resolver);
     }
-    
+
     /// Register a tool for execution
     pub async fn register_tool(&self, name: impl Into<String>, executor: Box<dyn ToolExecutor>) {
         let mut registry = self.tool_registry.write().await;
         registry.insert(name.into(), executor);
     }
-    
+
     /// Check if a tool is registered
     pub async fn has_tool(&self, name: &str) -> bool {
         let registry = self.tool_registry.read().await;
@@ -301,7 +314,8 @@ impl DefaultActionHandler {
     ) -> serde_json::Value {
         match strategy {
             super::plan::MergeStrategy::Concat => {
-                let texts: Vec<String> = branch_results.values()
+                let texts: Vec<String> = branch_results
+                    .values()
                     .filter_map(|r| r.as_ref().ok().cloned())
                     .collect();
                 serde_json::json!({ "merged": texts.join("\n---\n"), "strategy": "concat" })
@@ -320,7 +334,8 @@ impl DefaultActionHandler {
                 serde_json::Value::Object(merged)
             }
             super::plan::MergeStrategy::LlmSummarize => {
-                let texts: Vec<String> = branch_results.values()
+                let texts: Vec<String> = branch_results
+                    .values()
                     .filter_map(|r| r.as_ref().ok().cloned())
                     .collect();
                 serde_json::json!({
@@ -330,7 +345,8 @@ impl DefaultActionHandler {
                 })
             }
             super::plan::MergeStrategy::Custom(name) => {
-                let texts: Vec<String> = branch_results.values()
+                let texts: Vec<String> = branch_results
+                    .values()
                     .filter_map(|r| r.as_ref().ok().cloned())
                     .collect();
                 serde_json::json!({
@@ -347,9 +363,15 @@ impl DefaultActionHandler {
 impl ActionHandler for DefaultActionHandler {
     async fn execute(&self, action: &Action, context: &ExecutionContext) -> ExecutionResult {
         match action {
-            Action::ToolUse { tool_name, parameters } => {
-                info!("Executing tool: {} with params: {:?}", tool_name, parameters);
-                
+            Action::ToolUse {
+                tool_name,
+                parameters,
+            } => {
+                info!(
+                    "Executing tool: {} with params: {:?}",
+                    tool_name, parameters
+                );
+
                 // ARCHITECTURE FIX: Look up tool in registry and execute if found
                 let registry = self.tool_registry.read().await;
                 if let Some(tool) = registry.get(tool_name) {
@@ -362,13 +384,20 @@ impl ActionHandler for DefaultActionHandler {
                     // Tool not registered - return helpful error
                     let available_tools: Vec<String> = registry.keys().cloned().collect();
                     ExecutionResult::failure(format!(
-                        "Tool '{}' not found. Available tools: {:?}. Register tools using register_tool() before execution.",
+                        "Tool '{}' not found. Available tools: {:?}. Register tools using \
+                         register_tool() before execution.",
                         tool_name, available_tools
                     ))
                 }
             }
-            Action::LLMReasoning { prompt, context: reasoning_context } => {
-                info!("LLM reasoning: {} with context: {:?}", prompt, reasoning_context);
+            Action::LLMReasoning {
+                prompt,
+                context: reasoning_context,
+            } => {
+                info!(
+                    "LLM reasoning: {} with context: {:?}",
+                    prompt, reasoning_context
+                );
                 // In production, this would call the LLM provider
                 ExecutionResult::success(Some(serde_json::json!({
                     "reasoning": "completed",
@@ -378,7 +407,10 @@ impl ActionHandler for DefaultActionHandler {
                 })))
             }
             Action::Wait { condition, timeout } => {
-                info!("Waiting for condition: {} (timeout: {:?})", condition, timeout);
+                info!(
+                    "Waiting for condition: {} (timeout: {:?})",
+                    condition, timeout
+                );
                 // ARCHITECTURE FIX: Actually implement wait with timeout
                 if let Some(duration) = timeout {
                     tokio::time::sleep(*duration).await;
@@ -405,7 +437,12 @@ impl ActionHandler for DefaultActionHandler {
                     "status": "delegated"
                 })))
             }
-            Action::Delegate { agent_id, task, skill_hint, output_schema } => {
+            Action::Delegate {
+                agent_id,
+                task,
+                skill_hint,
+                output_schema,
+            } => {
                 info!("Delegating to agent {}: {}", agent_id, task);
                 ExecutionResult::success(Some(serde_json::json!({
                     "delegate_to": agent_id,
@@ -415,7 +452,10 @@ impl ActionHandler for DefaultActionHandler {
                     "status": "delegated"
                 })))
             }
-            Action::ParallelDelegate { branches, merge_strategy } => {
+            Action::ParallelDelegate {
+                branches,
+                merge_strategy,
+            } => {
                 info!("Parallel delegating to {} branches", branches.len());
 
                 if let Some(resolver) = &self.delegate_resolver {
@@ -429,13 +469,17 @@ impl ActionHandler for DefaultActionHandler {
                         }));
                     }
 
-                    let mut branch_results: HashMap<String, Result<String, String>> = HashMap::new();
+                    let mut branch_results: HashMap<String, Result<String, String>> =
+                        HashMap::new();
                     for handle in handles {
                         match handle.await {
-                            Ok((id, result)) => { branch_results.insert(id, result); }
+                            Ok((id, result)) => {
+                                branch_results.insert(id, result);
+                            }
                             Err(e) => {
                                 let err_id = format!("join_error_{}", uuid::Uuid::new_v4());
-                                branch_results.insert(err_id, Err(format!("Task join failed: {}", e)));
+                                branch_results
+                                    .insert(err_id, Err(format!("Task join failed: {}", e)));
                             }
                         }
                     }
@@ -446,12 +490,16 @@ impl ActionHandler for DefaultActionHandler {
                     if all_ok {
                         ExecutionResult::success(Some(merged))
                     } else {
-                        let errors: Vec<String> = branch_results.iter()
-                            .filter_map(|(id, r)| r.as_ref().err().map(|e| format!("{}: {}", id, e)))
+                        let errors: Vec<String> = branch_results
+                            .iter()
+                            .filter_map(|(id, r)| {
+                                r.as_ref().err().map(|e| format!("{}: {}", id, e))
+                            })
                             .collect();
                         ExecutionResult::failure(format!(
                             "Parallel delegation failed for {} branches. Errors: {:?}",
-                            errors.len(), errors
+                            errors.len(),
+                            errors
                         ))
                     }
                 } else {
@@ -469,14 +517,15 @@ impl ActionHandler for DefaultActionHandler {
 
     fn can_handle(&self, action: &Action) -> bool {
         // Can handle all action types
-        matches!(action,
-            Action::ToolUse { .. } |
-            Action::LLMReasoning { .. } |
-            Action::Wait { .. } |
-            Action::UserInteraction { .. } |
-            Action::SubPlan { .. } |
-            Action::Delegate { .. } |
-            Action::ParallelDelegate { .. }
+        matches!(
+            action,
+            Action::ToolUse { .. }
+                | Action::LLMReasoning { .. }
+                | Action::Wait { .. }
+                | Action::UserInteraction { .. }
+                | Action::SubPlan { .. }
+                | Action::Delegate { .. }
+                | Action::ParallelDelegate { .. }
         )
     }
 }
@@ -533,15 +582,9 @@ impl PlanExecutor {
 
         // Execute based on strategy
         let result = match self.config.strategy {
-            ExecutionStrategy::Sequential => {
-                self.execute_sequential(plan).await
-            }
-            ExecutionStrategy::Parallel => {
-                self.execute_parallel(plan).await
-            }
-            ExecutionStrategy::Adaptive => {
-                self.execute_adaptive(plan).await
-            }
+            ExecutionStrategy::Sequential => self.execute_sequential(plan).await,
+            ExecutionStrategy::Parallel => self.execute_parallel(plan).await,
+            ExecutionStrategy::Adaptive => self.execute_adaptive(plan).await,
         };
 
         // Update plan status
@@ -568,10 +611,7 @@ impl PlanExecutor {
             .await
             .ok();
 
-        info!(
-            "Plan {} execution completed in {:?}",
-            plan.id, duration
-        );
+        info!("Plan {} execution completed in {:?}", plan.id, duration);
 
         result
     }
@@ -700,7 +740,7 @@ impl PlanExecutor {
     ) -> PlanningResult<ExecutionResult> {
         // Get previous results before borrowing step mutably
         let previous_results = self.get_previous_results(plan, step_index).await;
-        
+
         let step = &mut plan.steps[step_index];
 
         info!("Executing step {}: {}", step_index, step.description);
@@ -941,7 +981,7 @@ impl Default for ParallelExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::planning::plan::{PlanStep, StepStatus, DelegateBranch, MergeStrategy};
+    use crate::planning::plan::{DelegateBranch, MergeStrategy, PlanStep, StepStatus};
 
     struct MockDelegateResolver;
 

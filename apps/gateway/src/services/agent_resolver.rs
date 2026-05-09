@@ -20,11 +20,14 @@ pub struct AgentResolver {
     /// Channel-to-agent binding store (LEGACY — deprecated)
     ///
     /// P2 OPTIMIZE: Use `agent_channel_service` (new system) instead.
-    /// This field is kept for backward compatibility during the migration period.
+    /// This field is kept for backward compatibility during the migration
+    /// period.
     channel_binding_store: Option<Arc<gateway::ChannelBindingStore>>,
-    /// Agent channel service (new system with routing rules / default agent support)
+    /// Agent channel service (new system with routing rules / default agent
+    /// support)
     agent_channel_service: Option<Arc<beebotos_agents::services::AgentChannelService>>,
-    /// User channel service (for auto-creating user_channel on agent auto-create)
+    /// User channel service (for auto-creating user_channel on agent
+    /// auto-create)
     user_channel_service: Option<Arc<beebotos_agents::services::UserChannelService>>,
     /// Global configuration for LLM settings (model, temperature, etc.)
     config: crate::config::BeeBotOSConfig,
@@ -52,10 +55,7 @@ impl AgentResolver {
     /// Set the channel binding store (LEGACY — deprecated)
     ///
     /// P2 OPTIMIZE: Prefer `with_agent_channel_service()` for new code.
-    pub fn with_channel_binding_store(
-        mut self,
-        store: Arc<gateway::ChannelBindingStore>,
-    ) -> Self {
+    pub fn with_channel_binding_store(mut self, store: Arc<gateway::ChannelBindingStore>) -> Self {
         self.channel_binding_store = Some(store);
         self
     }
@@ -81,8 +81,10 @@ impl AgentResolver {
     /// Resolve the target agent ID for a channel message
     ///
     /// Resolution order:
-    /// 1. ChannelBindingStore binding for (platform, channel_id) — legacy system
-    /// 2. AgentChannelService default binding for (platform, channel_id) — new system
+    /// 1. ChannelBindingStore binding for (platform, channel_id) — legacy
+    ///    system
+    /// 2. AgentChannelService default binding for (platform, channel_id) — new
+    ///    system
     /// 3. Configured default_agent_id (if valid and running)
     /// 4. First available agent from StateStore
     /// 5. Auto-create a default agent if none found
@@ -99,7 +101,11 @@ impl AgentResolver {
         // to the new system. Run `POST /api/v1/admin/migrate-bindings` to migrate.
         if let Some(ref binding_store) = self.channel_binding_store {
             if let Some(agent_id) = binding_store.resolve_agent(&platform_str, channel_id).await {
-                warn!("Agent {} resolved via LEGACY ChannelBindingStore ({}:{}). Consider migrating to the new system.", agent_id, platform_str, channel_id);
+                warn!(
+                    "Agent {} resolved via LEGACY ChannelBindingStore ({}:{}). Consider migrating \
+                     to the new system.",
+                    agent_id, platform_str, channel_id
+                );
                 match self.agent_runtime.status(&agent_id).await {
                     Ok(status) => {
                         if status.state != gateway::AgentState::Stopped
@@ -127,39 +133,38 @@ impl AgentResolver {
         }
 
         // 🟢 P1 FIX: Try new AgentChannelService system
-        // P2 OPTIMIZE: Use channel_id as platform_channel_id to align with bind_agent_channel semantics.
-        // The lookup key is the platform-level channel identifier (chat_id, room_id, etc.),
-        // not the individual sender/user ID.
+        // P2 OPTIMIZE: Use channel_id as platform_channel_id to align with
+        // bind_agent_channel semantics. The lookup key is the platform-level
+        // channel identifier (chat_id, room_id, etc.), not the individual
+        // sender/user ID.
         if let Some(ref agent_channel_service) = self.agent_channel_service {
             match agent_channel_service
                 .find_default_agent_for_platform_channel(platform, channel_id)
                 .await
             {
-                Ok(Some(agent_id)) => {
-                    match self.agent_runtime.status(&agent_id).await {
-                        Ok(status) => {
-                            if status.state != gateway::AgentState::Stopped
-                                && status.state != gateway::AgentState::Error
-                            {
-                                info!(
-                                    "Resolved agent {} from AgentChannelService ({}:{})",
-                                    agent_id, platform_str, channel_id
-                                );
-                                return Ok(agent_id);
-                            }
-                            warn!(
-                                "New-system bound agent {} for {}:{} is in state {:?}, skipping",
-                                agent_id, platform_str, channel_id, status.state
+                Ok(Some(agent_id)) => match self.agent_runtime.status(&agent_id).await {
+                    Ok(status) => {
+                        if status.state != gateway::AgentState::Stopped
+                            && status.state != gateway::AgentState::Error
+                        {
+                            info!(
+                                "Resolved agent {} from AgentChannelService ({}:{})",
+                                agent_id, platform_str, channel_id
                             );
+                            return Ok(agent_id);
                         }
-                        Err(e) => {
-                            warn!(
-                                "New-system bound agent {} for {}:{} not found: {}",
-                                agent_id, platform_str, channel_id, e
-                            );
-                        }
+                        warn!(
+                            "New-system bound agent {} for {}:{} is in state {:?}, skipping",
+                            agent_id, platform_str, channel_id, status.state
+                        );
                     }
-                }
+                    Err(e) => {
+                        warn!(
+                            "New-system bound agent {} for {}:{} not found: {}",
+                            agent_id, platform_str, channel_id, e
+                        );
+                    }
+                },
                 Ok(None) => {
                     debug!(
                         "No default agent binding found in AgentChannelService for {}:{}",
@@ -200,14 +205,14 @@ impl AgentResolver {
         // 🟢 P2 FIX: Use agent_runtime.list_agents() instead of state_store.query()
         // because GatewayAgentRuntime maintains its own AgentStateManager state,
         // which may not be synchronized with the separate StateStore instance.
-        let runtime_agents = self
-            .agent_runtime
-            .list_agents()
-            .await
-            .map_err(|e| GatewayError::Internal {
-                message: format!("Failed to list agents from runtime: {}", e),
-                correlation_id: uuid::Uuid::new_v4().to_string(),
-            })?;
+        let runtime_agents =
+            self.agent_runtime
+                .list_agents()
+                .await
+                .map_err(|e| GatewayError::Internal {
+                    message: format!("Failed to list agents from runtime: {}", e),
+                    correlation_id: uuid::Uuid::new_v4().to_string(),
+                })?;
 
         for agent_status in runtime_agents {
             if agent_status.state != gateway::AgentState::Stopped
@@ -244,7 +249,10 @@ impl AgentResolver {
             .with_llm(llm_config)
             .build();
 
-        info!("🆕 No available agent found, auto-creating default agent {}", agent_id);
+        info!(
+            "🆕 No available agent found, auto-creating default agent {}",
+            agent_id
+        );
         match self.agent_runtime.spawn(agent_config).await {
             Ok(_) => {}
             Err(ref e) if e.to_string().contains("already exists") => {
@@ -259,20 +267,22 @@ impl AgentResolver {
             }
         }
 
-        // 🟢 P1 FIX: Skip LEGACY binding — new system now fully handles agent-channel binding.
-        // LEGACY ChannelBindingStore binding is deprecated and removed to prevent duplicate
-        // binding records and misleading migration warnings.
+        // 🟢 P1 FIX: Skip LEGACY binding — new system now fully handles agent-channel
+        // binding. LEGACY ChannelBindingStore binding is deprecated and removed
+        // to prevent duplicate binding records and misleading migration
+        // warnings.
         //
         // if let Some(ref binding_store) = self.channel_binding_store {
-        //     if let Err(e) = binding_store.bind(&platform_str, channel_id, &agent_id).await {
-        //         warn!("Failed to bind auto-created agent ...");
-        //     }
+        //     if let Err(e) = binding_store.bind(&platform_str, channel_id,
+        // &agent_id).await {         warn!("Failed to bind auto-created agent
+        // ...");     }
         // }
 
         // P1 FIX: Auto-create user_channel and bind via new system
-        if let (Some(ref user_ch_svc), Some(ref agent_ch_svc)) =
-            (self.user_channel_service.as_ref(), self.agent_channel_service.as_ref())
-        {
+        if let (Some(ref user_ch_svc), Some(ref agent_ch_svc)) = (
+            self.user_channel_service.as_ref(),
+            self.agent_channel_service.as_ref(),
+        ) {
             use beebotos_agents::communication::{
                 ChannelBindingStatus, PlatformType, UserChannelBinding,
             };

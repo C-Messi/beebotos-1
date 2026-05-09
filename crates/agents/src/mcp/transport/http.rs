@@ -7,12 +7,12 @@
 //!
 //! Follows OpenClaw HTTP/SSE transport rules.
 
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
+use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
+use tokio::sync::Mutex;
 
 use super::Transport;
 use crate::mcp::types::{JsonRpcRequest, JsonRpcResponse};
@@ -37,7 +37,10 @@ impl std::fmt::Debug for HttpTransportConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpTransportConfig")
             .field("base_url", &self.base_url)
-            .field("auth_token", &self.auth_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("headers", &self.headers)
             .field("timeout_ms", &self.timeout_ms)
             .field("use_sse", &self.use_sse)
@@ -72,7 +75,9 @@ impl HttpTransport {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(config.timeout_ms))
             .build()
-            .map_err(|e| MCPError::ConnectionFailed(format!("Failed to build HTTP client: {}", e)))?;
+            .map_err(|e| {
+                MCPError::ConnectionFailed(format!("Failed to build HTTP client: {}", e))
+            })?;
 
         Ok(Self {
             config,
@@ -91,7 +96,9 @@ impl HttpTransport {
         );
 
         if let Some(ref token) = self.config.auth_token {
-            if let Ok(value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token.expose_secret())) {
+            if let Ok(value) =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token.expose_secret()))
+            {
                 headers.insert(reqwest::header::AUTHORIZATION, value);
             }
         }
@@ -138,12 +145,7 @@ impl HttpTransport {
                     break;
                 }
 
-                match client
-                    .get(&sse_url)
-                    .headers(headers.clone())
-                    .send()
-                    .await
-                {
+                match client.get(&sse_url).headers(headers.clone()).send().await {
                     Ok(resp) => {
                         let mut stream = resp.bytes_stream();
                         while let Some(chunk_result) = stream.next().await {
@@ -170,10 +172,7 @@ impl HttpTransport {
     }
 
     /// Parse SSE event text and extract JSON-RPC responses.
-    fn parse_sse_events(
-        text: &str,
-        tx: &tokio::sync::mpsc::UnboundedSender<JsonRpcResponse>,
-    ) {
+    fn parse_sse_events(text: &str, tx: &tokio::sync::mpsc::UnboundedSender<JsonRpcResponse>) {
         for line in text.lines() {
             let line = line.trim();
             if line.starts_with("data:") {
@@ -216,9 +215,7 @@ impl Transport for HttpTransport {
             .body(json_body)
             .send()
             .await
-            .map_err(|e| {
-                MCPError::ConnectionFailed(format!("HTTP POST failed: {}", e))
-            })?;
+            .map_err(|e| MCPError::ConnectionFailed(format!("HTTP POST failed: {}", e)))?;
 
         if !response.status().is_success() {
             return Err(MCPError::RequestFailed(format!(
@@ -238,8 +235,9 @@ impl Transport for HttpTransport {
                 .await
                 .map_err(|e| MCPError::ConnectionFailed(format!("HTTP body read failed: {}", e)))?;
 
-            let rpc_response: JsonRpcResponse = serde_json::from_str(&body)
-                .map_err(|e| MCPError::SerializationFailed(format!("Invalid JSON-RPC response: {}", e)))?;
+            let rpc_response: JsonRpcResponse = serde_json::from_str(&body).map_err(|e| {
+                MCPError::SerializationFailed(format!("Invalid JSON-RPC response: {}", e))
+            })?;
 
             // Forward to the response channel
             if let Some(ref tx) = *self.sse_response_tx.lock().await {
@@ -251,9 +249,10 @@ impl Transport for HttpTransport {
     }
 
     async fn receive(&self) -> Result<JsonRpcResponse, MCPError> {
-        // In non-SSE mode, receive() is not used (response comes back via HTTP POST response)
-        // In SSE mode, this would read from a channel populated by the SSE listener
-        // For simplicity, we return an error here and expect non-SSE mode
+        // In non-SSE mode, receive() is not used (response comes back via HTTP POST
+        // response) In SSE mode, this would read from a channel populated by
+        // the SSE listener For simplicity, we return an error here and expect
+        // non-SSE mode
         if self.config.use_sse {
             return Err(MCPError::RequestFailed(
                 "SSE mode: use start_sse_listener() instead of receive()".to_string(),

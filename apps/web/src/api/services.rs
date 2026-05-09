@@ -1,9 +1,10 @@
 //! API Service implementations using the advanced ApiClient
 
-use super::client::{ApiClient, ApiError};
-use super::gateway::ApiEndpoints;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+use super::client::{ApiClient, ApiError};
+use super::gateway::ApiEndpoints;
 
 /// API Service trait
 pub trait ApiService {
@@ -25,16 +26,39 @@ impl AgentService {
         self.client.get(ApiEndpoints::AGENTS).await
     }
 
-    pub async fn list_paginated(&self, page: usize, per_page: usize) -> Result<PaginatedResponse<AgentInfo>, ApiError> {
-        self.client.get(&format!("{}?page={}&per_page={}", ApiEndpoints::AGENTS, page, per_page)).await
+    pub async fn list_paginated(
+        &self,
+        page: usize,
+        per_page: usize,
+    ) -> Result<PaginatedResponse<AgentInfo>, ApiError> {
+        self.client
+            .get(&format!(
+                "{}?page={}&per_page={}",
+                ApiEndpoints::AGENTS,
+                page,
+                per_page
+            ))
+            .await
     }
 
     pub async fn get(&self, id: &str) -> Result<AgentInfo, ApiError> {
-        self.client.get(&format!("{}{}", ApiEndpoints::AGENT_DETAIL, js_sys::encode_uri_component(id))).await
+        self.client
+            .get(&format!(
+                "{}{}",
+                ApiEndpoints::AGENT_DETAIL,
+                js_sys::encode_uri_component(id)
+            ))
+            .await
     }
 
     pub async fn get_logs(&self, id: &str) -> Result<Vec<AgentLogEntry>, ApiError> {
-        self.client.get(&format!("{}{}/logs", ApiEndpoints::AGENT_DETAIL, js_sys::encode_uri_component(id))).await
+        self.client
+            .get(&format!(
+                "{}{}/logs",
+                ApiEndpoints::AGENT_DETAIL,
+                js_sys::encode_uri_component(id)
+            ))
+            .await
     }
 
     pub async fn create(&self, req: CreateAgentRequest) -> Result<AgentInfo, ApiError> {
@@ -42,33 +66,59 @@ impl AgentService {
     }
 
     pub async fn update(&self, id: &str, req: UpdateAgentRequest) -> Result<AgentInfo, ApiError> {
-        self.client.put(&format!("{}{}", ApiEndpoints::AGENT_DETAIL, js_sys::encode_uri_component(id)), &req).await
+        self.client
+            .put(
+                &format!(
+                    "{}{}",
+                    ApiEndpoints::AGENT_DETAIL,
+                    js_sys::encode_uri_component(id)
+                ),
+                &req,
+            )
+            .await
     }
 
     pub async fn delete(&self, id: &str) -> Result<(), ApiError> {
-        self.client.delete(&format!("{}{}", ApiEndpoints::AGENT_DETAIL, js_sys::encode_uri_component(id))).await
+        self.client
+            .delete(&format!(
+                "{}{}",
+                ApiEndpoints::AGENT_DETAIL,
+                js_sys::encode_uri_component(id)
+            ))
+            .await
     }
 
     pub async fn start(&self, id: &str) -> Result<serde_json::Value, ApiError> {
         self.client
-            .post(&ApiEndpoints::AGENT_START.replace("{id}", id), &serde_json::json!({}))
+            .post(
+                &ApiEndpoints::AGENT_START.replace("{id}", id),
+                &serde_json::json!({}),
+            )
             .await
     }
 
     pub async fn stop(&self, id: &str) -> Result<serde_json::Value, ApiError> {
         self.client
-            .post(&ApiEndpoints::AGENT_STOP.replace("{id}", id), &serde_json::json!({}))
+            .post(
+                &ApiEndpoints::AGENT_STOP.replace("{id}", id),
+                &serde_json::json!({}),
+            )
             .await
     }
 
     /// Invalidate agent list cache
     pub fn invalidate_cache(&self) {
-        self.client.invalidate_cache(&format!("GET:{}", ApiEndpoints::AGENTS));
+        self.client
+            .invalidate_cache(&format!("GET:{}", ApiEndpoints::AGENTS));
     }
 
     /// Invalidate specific agent cache
     pub fn invalidate_agent_cache(&self, id: &str) {
-        self.client.invalidate_cache(&format!("GET:{}{}", ApiEndpoints::AGENT_DETAIL, js_sys::encode_uri_component(id)));
+        self.client.invalidate_cache(&format!(
+            "GET:{}{}",
+            ApiEndpoints::AGENT_DETAIL,
+            js_sys::encode_uri_component(id)
+        ));
     }
 }
 
@@ -89,7 +139,11 @@ impl SkillService {
         Self { client }
     }
 
-    pub async fn list(&self, hub: Option<&str>, search: Option<&str>) -> Result<Vec<SkillInfo>, ApiError> {
+    pub async fn list(
+        &self,
+        hub: Option<&str>,
+        search: Option<&str>,
+    ) -> Result<Vec<SkillInfo>, ApiError> {
         let mut path = ApiEndpoints::SKILLS.to_string();
         let mut params = Vec::new();
         if let Some(h) = hub {
@@ -107,16 +161,30 @@ impl SkillService {
         self.client.get(&path).await
     }
 
-    pub async fn install(&self, req: InstallSkillRequest) -> Result<InstallSkillResponse, ApiError> {
+    pub async fn install(
+        &self,
+        req: InstallSkillRequest,
+    ) -> Result<InstallSkillResponse, ApiError> {
         self.client.post(ApiEndpoints::SKILL_INSTALL, &req).await
     }
 
     pub async fn uninstall(&self, skill_id: &str) -> Result<(), ApiError> {
-        self.client.delete(&ApiEndpoints::SKILL_UNINSTALL.replace("{id}", skill_id)).await
+        self.client
+            .delete(&ApiEndpoints::SKILL_UNINSTALL.replace("{id}", skill_id))
+            .await
     }
 
-    pub async fn execute(&self, skill_id: &str, input: serde_json::Value) -> Result<ExecuteSkillResponse, ApiError> {
-        self.client.post(&ApiEndpoints::SKILL_EXECUTE.replace("{id}", skill_id), &json!({ "input": input })).await
+    pub async fn execute(
+        &self,
+        skill_id: &str,
+        input: serde_json::Value,
+    ) -> Result<ExecuteSkillResponse, ApiError> {
+        self.client
+            .post(
+                &ApiEndpoints::SKILL_EXECUTE.replace("{id}", skill_id),
+                &json!({ "input": input }),
+            )
+            .await
     }
 
     // Instance-based skill management
@@ -125,19 +193,42 @@ impl SkillService {
     }
 
     pub async fn get_instance(&self, instance_id: &str) -> Result<InstanceInfo, ApiError> {
-        self.client.get(&format!("{}{}", ApiEndpoints::INSTANCE_DETAIL, js_sys::encode_uri_component(instance_id))).await
+        self.client
+            .get(&format!(
+                "{}{}",
+                ApiEndpoints::INSTANCE_DETAIL,
+                js_sys::encode_uri_component(instance_id)
+            ))
+            .await
     }
 
-    pub async fn create_instance(&self, req: CreateInstanceRequest) -> Result<InstanceInfo, ApiError> {
+    pub async fn create_instance(
+        &self,
+        req: CreateInstanceRequest,
+    ) -> Result<InstanceInfo, ApiError> {
         self.client.post(ApiEndpoints::INSTANCES, &req).await
     }
 
     pub async fn delete_instance(&self, instance_id: &str) -> Result<(), ApiError> {
-        self.client.delete(&format!("{}{}", ApiEndpoints::INSTANCE_DETAIL, js_sys::encode_uri_component(instance_id))).await
+        self.client
+            .delete(&format!(
+                "{}{}",
+                ApiEndpoints::INSTANCE_DETAIL,
+                js_sys::encode_uri_component(instance_id)
+            ))
+            .await
     }
 
-    pub async fn execute_instance(&self, instance_id: &str) -> Result<ExecuteSkillResponse, ApiError> {
-        self.client.post(&ApiEndpoints::INSTANCE_EXECUTE.replace("{id}", instance_id), &json!({})).await
+    pub async fn execute_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<ExecuteSkillResponse, ApiError> {
+        self.client
+            .post(
+                &ApiEndpoints::INSTANCE_EXECUTE.replace("{id}", instance_id),
+                &json!({}),
+            )
+            .await
     }
 }
 
@@ -167,7 +258,12 @@ impl DaoService {
     }
 
     pub async fn get_proposal(&self, id: &str) -> Result<ProposalInfo, ApiError> {
-        self.client.get(&format!("/chain/dao/proposals/{}", js_sys::encode_uri_component(id))).await
+        self.client
+            .get(&format!(
+                "/chain/dao/proposals/{}",
+                js_sys::encode_uri_component(id)
+            ))
+            .await
     }
 
     pub async fn vote(
@@ -178,7 +274,10 @@ impl DaoService {
     ) -> Result<serde_json::Value, ApiError> {
         self.client
             .post(
-                &format!("/chain/dao/proposals/{}/vote", js_sys::encode_uri_component(proposal_id)),
+                &format!(
+                    "/chain/dao/proposals/{}/vote",
+                    js_sys::encode_uri_component(proposal_id)
+                ),
                 &serde_json::json!({
                     "vote": if vote_for { "for" } else { "against" },
                 }),
@@ -222,10 +321,15 @@ impl TreasuryService {
     }
 
     pub async fn transfer(&self, to: &str, amount: &str) -> Result<serde_json::Value, ApiError> {
-        self.client.post("/treasury/transfer", &serde_json::json!({
-            "to": to,
-            "amount": amount,
-        })).await
+        self.client
+            .post(
+                "/treasury/transfer",
+                &serde_json::json!({
+                    "to": to,
+                    "amount": amount,
+                }),
+            )
+            .await
     }
 }
 
@@ -345,44 +449,99 @@ impl WorkflowService {
     }
 
     pub async fn get(&self, id: &str) -> Result<WorkflowInfo, ApiError> {
-        self.client.get(&format!("{}{}", ApiEndpoints::WORKFLOW_DETAIL, js_sys::encode_uri_component(id))).await
+        self.client
+            .get(&format!(
+                "{}{}",
+                ApiEndpoints::WORKFLOW_DETAIL,
+                js_sys::encode_uri_component(id)
+            ))
+            .await
     }
 
-    pub async fn execute(&self, id: &str, req: &ExecuteWorkflowRequest) -> Result<WorkflowExecutionResponse, ApiError> {
-        self.client.post(&ApiEndpoints::WORKFLOW_EXECUTE.replace("{id}", id), req).await
+    pub async fn execute(
+        &self,
+        id: &str,
+        req: &ExecuteWorkflowRequest,
+    ) -> Result<WorkflowExecutionResponse, ApiError> {
+        self.client
+            .post(&ApiEndpoints::WORKFLOW_EXECUTE.replace("{id}", id), req)
+            .await
     }
 
     pub async fn dashboard_stats(&self) -> Result<DashboardStats, ApiError> {
-        self.client.get(ApiEndpoints::WORKFLOW_DASHBOARD_STATS).await
+        self.client
+            .get(ApiEndpoints::WORKFLOW_DASHBOARD_STATS)
+            .await
     }
 
-    pub async fn recent_instances(&self, limit: usize) -> Result<Vec<WorkflowInstanceSummary>, ApiError> {
-        self.client.get(&format!("{}?limit={}", ApiEndpoints::WORKFLOW_DASHBOARD_RECENT, limit)).await
+    pub async fn recent_instances(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<WorkflowInstanceSummary>, ApiError> {
+        self.client
+            .get(&format!(
+                "{}?limit={}",
+                ApiEndpoints::WORKFLOW_DASHBOARD_RECENT,
+                limit
+            ))
+            .await
     }
 
     pub async fn workflow_stats(&self, id: &str) -> Result<serde_json::Value, ApiError> {
-        self.client.get(&format!("{}/stats", ApiEndpoints::WORKFLOW_STATS.replace("{id}", id))).await
+        self.client
+            .get(&format!(
+                "{}/stats",
+                ApiEndpoints::WORKFLOW_STATS.replace("{id}", id)
+            ))
+            .await
     }
 
     pub async fn get_source(&self, id: &str) -> Result<WorkflowSourceResponse, ApiError> {
-        self.client.get(&ApiEndpoints::WORKFLOW_SOURCE.replace("{id}", id)).await
+        self.client
+            .get(&ApiEndpoints::WORKFLOW_SOURCE.replace("{id}", id))
+            .await
     }
 
     pub async fn delete(&self, id: &str) -> Result<(), ApiError> {
-        self.client.delete(&format!("{}{}", ApiEndpoints::WORKFLOW_DETAIL, js_sys::encode_uri_component(id))).await
+        self.client
+            .delete(&format!(
+                "{}{}",
+                ApiEndpoints::WORKFLOW_DETAIL,
+                js_sys::encode_uri_component(id)
+            ))
+            .await
     }
 
     pub async fn update(&self, id: &str, yaml: &str) -> Result<WorkflowInfo, ApiError> {
-        let req = UpdateWorkflowRequest { yaml: yaml.to_string() };
-        self.client.put(&format!("{}{}", ApiEndpoints::WORKFLOW_DETAIL, js_sys::encode_uri_component(id)), &req).await
+        let req = UpdateWorkflowRequest {
+            yaml: yaml.to_string(),
+        };
+        self.client
+            .put(
+                &format!(
+                    "{}{}",
+                    ApiEndpoints::WORKFLOW_DETAIL,
+                    js_sys::encode_uri_component(id)
+                ),
+                &req,
+            )
+            .await
     }
 
-    pub async fn install(&self, req: &InstallWorkflowRequest) -> Result<InstallWorkflowResponse, ApiError> {
+    pub async fn install(
+        &self,
+        req: &InstallWorkflowRequest,
+    ) -> Result<InstallWorkflowResponse, ApiError> {
         self.client.post(ApiEndpoints::WORKFLOW_INSTALL, req).await
     }
 
     pub async fn uninstall(&self, id: &str) -> Result<serde_json::Value, ApiError> {
-        self.client.post(&ApiEndpoints::WORKFLOW_UNINSTALL.replace("{id}", id), &serde_json::json!({})).await
+        self.client
+            .post(
+                &ApiEndpoints::WORKFLOW_UNINSTALL.replace("{id}", id),
+                &serde_json::json!({}),
+            )
+            .await
     }
 }
 
@@ -454,19 +613,40 @@ impl CompositionService {
     }
 
     pub async fn get(&self, id: &str) -> Result<CompositionInfo, ApiError> {
-        self.client.get(&format!("{}{}", ApiEndpoints::COMPOSITION_DETAIL, js_sys::encode_uri_component(id))).await
+        self.client
+            .get(&format!(
+                "{}{}",
+                ApiEndpoints::COMPOSITION_DETAIL,
+                js_sys::encode_uri_component(id)
+            ))
+            .await
     }
 
-    pub async fn create(&self, req: &CreateCompositionRequest) -> Result<CompositionInfo, ApiError> {
+    pub async fn create(
+        &self,
+        req: &CreateCompositionRequest,
+    ) -> Result<CompositionInfo, ApiError> {
         self.client.post(ApiEndpoints::COMPOSITIONS, req).await
     }
 
     pub async fn delete(&self, id: &str) -> Result<(), ApiError> {
-        self.client.delete(&format!("{}{}", ApiEndpoints::COMPOSITION_DETAIL, js_sys::encode_uri_component(id))).await
+        self.client
+            .delete(&format!(
+                "{}{}",
+                ApiEndpoints::COMPOSITION_DETAIL,
+                js_sys::encode_uri_component(id)
+            ))
+            .await
     }
 
-    pub async fn execute(&self, id: &str, req: &ExecuteCompositionRequest) -> Result<CompositionExecutionResponse, ApiError> {
-        self.client.post(&ApiEndpoints::COMPOSITION_EXECUTE.replace("{id}", id), req).await
+    pub async fn execute(
+        &self,
+        id: &str,
+        req: &ExecuteCompositionRequest,
+    ) -> Result<CompositionExecutionResponse, ApiError> {
+        self.client
+            .post(&ApiEndpoints::COMPOSITION_EXECUTE.replace("{id}", id), req)
+            .await
     }
 }
 
@@ -590,37 +770,63 @@ impl ChannelService {
 
     /// Get channel by ID
     pub async fn get(&self, id: &str) -> Result<ChannelInfo, ApiError> {
-        self.client.get(&format!("/channels/{}", js_sys::encode_uri_component(id))).await
+        self.client
+            .get(&format!("/channels/{}", js_sys::encode_uri_component(id)))
+            .await
     }
 
     /// Update channel configuration
-    pub async fn update(&self, id: &str, config: ChannelConfig) -> Result<serde_json::Value, ApiError> {
-        self.client.put(&format!("/channels/{}", js_sys::encode_uri_component(id)), &config).await
+    pub async fn update(
+        &self,
+        id: &str,
+        config: ChannelConfig,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.client
+            .put(
+                &format!("/channels/{}", js_sys::encode_uri_component(id)),
+                &config,
+            )
+            .await
     }
 
     /// Enable/disable channel
-    pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<serde_json::Value, ApiError> {
+    pub async fn set_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
         self.client
-            .post(&format!("/channels/{}/enable", js_sys::encode_uri_component(id)), &serde_json::json!({ "enabled": enabled }))
+            .post(
+                &format!("/channels/{}/enable", js_sys::encode_uri_component(id)),
+                &serde_json::json!({ "enabled": enabled }),
+            )
             .await
     }
 
     /// Test channel connection
     pub async fn test_connection(&self, id: &str) -> Result<TestConnectionResponse, ApiError> {
         self.client
-            .post(&format!("/channels/{}/test", js_sys::encode_uri_component(id)), &serde_json::json!({}))
+            .post(
+                &format!("/channels/{}/test", js_sys::encode_uri_component(id)),
+                &serde_json::json!({}),
+            )
             .await
     }
 
     /// Get WeChat QR code for login
     pub async fn get_wechat_qr(&self) -> Result<WeChatQrResponse, ApiError> {
-        self.client.post("/channels/wechat/qr", &serde_json::json!({})).await
+        self.client
+            .post("/channels/wechat/qr", &serde_json::json!({}))
+            .await
     }
 
     /// Check WeChat QR scan status
     pub async fn check_wechat_qr(&self, qr_code: &str) -> Result<QrStatusResponse, ApiError> {
         self.client
-            .post("/channels/wechat/qr/check", &serde_json::json!({ "qr_code": qr_code }))
+            .post(
+                "/channels/wechat/qr/check",
+                &serde_json::json!({ "qr_code": qr_code }),
+            )
             .await
     }
 }
@@ -660,7 +866,10 @@ impl LlmConfigService {
     }
 
     /// Update LLM provider configuration (model & temperature)
-    pub async fn update_config(&self, req: &UpdateLlmConfigRequest) -> Result<serde_json::Value, ApiError> {
+    pub async fn update_config(
+        &self,
+        req: &UpdateLlmConfigRequest,
+    ) -> Result<serde_json::Value, ApiError> {
         self.client.put("/llm/config", req).await
     }
 
@@ -1110,9 +1319,10 @@ pub struct QrStatusResponse {
 
 #[cfg(test)]
 mod qa_tests {
+    use serde_json::json;
+
     use super::*;
     use crate::api::gateway::ApiEndpoints;
-    use serde_json::json;
 
     // ========== ApiEndpoints Path Validation ==========
 
@@ -1141,9 +1351,18 @@ mod qa_tests {
     #[test]
     fn test_base_url_concatenation() {
         let base = "/api/v1";
-        assert_eq!(format!("{}{}", base, ApiEndpoints::AGENTS), "/api/v1/agents");
-        assert_eq!(format!("{}{}", base, "/agents/123/logs"), "/api/v1/agents/123/logs");
-        assert_eq!(format!("{}{}", base, "/chain/dao/proposals"), "/api/v1/chain/dao/proposals");
+        assert_eq!(
+            format!("{}{}", base, ApiEndpoints::AGENTS),
+            "/api/v1/agents"
+        );
+        assert_eq!(
+            format!("{}{}", base, "/agents/123/logs"),
+            "/api/v1/agents/123/logs"
+        );
+        assert_eq!(
+            format!("{}{}", base, "/chain/dao/proposals"),
+            "/api/v1/chain/dao/proposals"
+        );
         assert_eq!(format!("{}{}", base, "/treasury"), "/api/v1/treasury");
     }
 
@@ -1180,7 +1399,8 @@ mod qa_tests {
             "votes_against": 2,
             "user_voted": true
         });
-        let prop: ProposalInfo = serde_json::from_value(json).expect("ProposalInfo should deserialize");
+        let prop: ProposalInfo =
+            serde_json::from_value(json).expect("ProposalInfo should deserialize");
         assert_eq!(prop.status, ProposalStatus::Active);
         assert_eq!(prop.votes_for, 10);
     }
@@ -1196,7 +1416,8 @@ mod qa_tests {
             "votes_for": 0,
             "votes_against": 0
         });
-        let prop: ProposalInfo = serde_json::from_value(json).expect("ProposalInfo with missing fields should deserialize");
+        let prop: ProposalInfo = serde_json::from_value(json)
+            .expect("ProposalInfo with missing fields should deserialize");
         assert_eq!(prop.proposer, "");
         assert_eq!(prop.created_at, "");
         assert_eq!(prop.user_voted, None);
@@ -1210,7 +1431,8 @@ mod qa_tests {
             "status": "connected",
             "current_url": "https://example.com"
         });
-        let inst: crate::browser::BrowserInstance = serde_json::from_value(json).expect("BrowserInstance should deserialize");
+        let inst: crate::browser::BrowserInstance =
+            serde_json::from_value(json).expect("BrowserInstance should deserialize");
         assert_eq!(inst.id, "inst-1");
         assert_eq!(inst.status, crate::browser::ConnectionStatus::Connected);
         assert_eq!(inst.page_title, None); // #[serde(default)]
@@ -1224,7 +1446,8 @@ mod qa_tests {
                 { "name": "openai", "healthy": true, "consecutive_failures": 0 }
             ]
         });
-        let health: LlmHealthResponse = serde_json::from_value(json).expect("LlmHealthResponse should deserialize");
+        let health: LlmHealthResponse =
+            serde_json::from_value(json).expect("LlmHealthResponse should deserialize");
         assert_eq!(health.status, "healthy");
         assert_eq!(health.providers.len(), 1);
     }
@@ -1239,7 +1462,8 @@ mod qa_tests {
             ],
             "recent_transactions": []
         });
-        let info: TreasuryInfo = serde_json::from_value(json).expect("TreasuryInfo should deserialize");
+        let info: TreasuryInfo =
+            serde_json::from_value(json).expect("TreasuryInfo should deserialize");
         assert_eq!(info.total_balance, "1000");
     }
 

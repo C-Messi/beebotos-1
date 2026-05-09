@@ -10,6 +10,7 @@ use std::sync::Arc;
 use regex::Regex;
 use serde_json::Value;
 use tracing::{info, warn};
+
 use crate::skills::process_sandbox::apply_sandbox;
 use crate::Agent;
 
@@ -64,7 +65,8 @@ impl SkillTool for FileWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Write text content to a file. Creates the file if it does not exist. Parameters: path (string), content (string)"
+        "Write text content to a file. Creates the file if it does not exist. Parameters: path \
+         (string), content (string)"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -80,7 +82,9 @@ impl SkillTool for FileWriteTool {
 
     async fn execute(&self, params: &Value) -> Result<String, String> {
         let path = params["path"].as_str().ok_or("Missing 'path' parameter")?;
-        let content = params["content"].as_str().ok_or("Missing 'content' parameter")?;
+        let content = params["content"]
+            .as_str()
+            .ok_or("Missing 'content' parameter")?;
         let path = PathBuf::from(path);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -189,7 +193,11 @@ impl ProcessExecTool {
         Ok(())
     }
 
-    fn resolve_working_dir(&self, specified: Option<&str>, default: &Path) -> Result<PathBuf, String> {
+    fn resolve_working_dir(
+        &self,
+        specified: Option<&str>,
+        default: &Path,
+    ) -> Result<PathBuf, String> {
         let dir = if let Some(d) = specified {
             let p = PathBuf::from(d);
             if p.is_absolute() {
@@ -204,7 +212,8 @@ impl ProcessExecTool {
         // Security: ensure the resolved directory is within allowed prefixes
         let canonical = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
         let allowed = self.allowed_work_dirs.iter().any(|allowed| {
-            let allowed_canonical = std::fs::canonicalize(allowed).unwrap_or_else(|_| allowed.clone());
+            let allowed_canonical =
+                std::fs::canonicalize(allowed).unwrap_or_else(|_| allowed.clone());
             canonical.starts_with(&allowed_canonical)
         });
         if !allowed {
@@ -225,7 +234,8 @@ impl SkillTool for ProcessExecTool {
 
     fn description(&self) -> &str {
         "Execute an external command in a subprocess (e.g. python3 script.py, node script.js). \
-Parameters: command (string), working_dir (string, optional), timeout_ms (integer, optional, default 30000)"
+         Parameters: command (string), working_dir (string, optional), timeout_ms (integer, \
+         optional, default 30000)"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -241,10 +251,16 @@ Parameters: command (string), working_dir (string, optional), timeout_ms (intege
     }
 
     async fn execute(&self, params: &Value) -> Result<String, String> {
-        let command = params["command"].as_str().ok_or("Missing 'command' parameter")?;
+        let command = params["command"]
+            .as_str()
+            .ok_or("Missing 'command' parameter")?;
         self.validate_command(command)?;
 
-        let default_dir = self.allowed_work_dirs.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+        let default_dir = self
+            .allowed_work_dirs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("."));
         let work_dir = self.resolve_working_dir(params["working_dir"].as_str(), &default_dir)?;
 
         let timeout_ms = params["timeout_ms"].as_u64().unwrap_or(30000);
@@ -260,33 +276,29 @@ Parameters: command (string), working_dir (string, optional), timeout_ms (intege
         // 🆕 FIX: Apply Linux sandbox (namespaces, rlimits, privilege drop)
         apply_sandbox(&mut cmd, &default_dir);
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            cmd.output(),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "❌ COMMAND TIMEOUT after {timeout_ms}ms: '{command}'\n\
-                 The command took too long to finish. Possible causes:\n\
-                 1. Infinite loop or blocking input in the script\n\
-                 2. Processing too much data — try filtering or sampling\n\
-                 3. Network request hanging — consider adding a shorter internal timeout\n\
-                 Tip: If this is expected, increase timeout_ms parameter."
-            )
-        })?
-        .map_err(|e| {
-            format!(
-                "❌ FAILED TO EXECUTE COMMAND: '{command}'\n\
-                 Reason: {e}\n\
-                 Common causes:\n\
-                 1. Command not found in PATH — check the executable name\n\
-                 2. Working directory does not exist: '{}'\n\
-                 3. Insufficient permissions — the sandbox may block this operation\n\
-                 4. Missing interpreter (e.g. python3, node) — verify installation",
-                work_dir.display()
-            )
-        })?;
+        let output =
+            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), cmd.output())
+                .await
+                .map_err(|_| {
+                    format!(
+                        "❌ COMMAND TIMEOUT after {timeout_ms}ms: '{command}'\nThe command took \
+                         too long to finish. Possible causes:\n1. Infinite loop or blocking input \
+                         in the script\n2. Processing too much data — try filtering or \
+                         sampling\n3. Network request hanging — consider adding a shorter \
+                         internal timeout\nTip: If this is expected, increase timeout_ms \
+                         parameter."
+                    )
+                })?
+                .map_err(|e| {
+                    format!(
+                        "❌ FAILED TO EXECUTE COMMAND: '{command}'\nReason: {e}\nCommon \
+                         causes:\n1. Command not found in PATH — check the executable name\n2. \
+                         Working directory does not exist: '{}'\n3. Insufficient permissions — \
+                         the sandbox may block this operation\n4. Missing interpreter (e.g. \
+                         python3, node) — verify installation",
+                        work_dir.display()
+                    )
+                })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -294,11 +306,10 @@ Parameters: command (string), working_dir (string, optional), timeout_ms (intege
 
         let mut result = if exit_code != 0 {
             format!(
-                "⚠️  COMMAND EXECUTED BUT RETURNED NON-ZERO EXIT CODE: {exit_code}\n\
-                 Command: '{command}'\n\
-                 Working directory: '{}'\n\
-                 Review STDERR below for error details. Do NOT blindly retry the same command — \
-                 analyze the error and fix the underlying issue first.\n\n",
+                "⚠️  COMMAND EXECUTED BUT RETURNED NON-ZERO EXIT CODE: {exit_code}\nCommand: \
+                 '{command}'\nWorking directory: '{}'\nReview STDERR below for error details. Do \
+                 NOT blindly retry the same command — analyze the error and fix the underlying \
+                 issue first.\n\n",
                 work_dir.display()
             )
         } else {
@@ -332,8 +343,8 @@ impl SkillTool for BashShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command. Same as process_exec but explicitly for bash. \
-Parameters: command (string), working_dir (string, optional), timeout_ms (integer, optional, default 30000)"
+        "Execute a bash command. Same as process_exec but explicitly for bash. Parameters: command \
+         (string), working_dir (string, optional), timeout_ms (integer, optional, default 30000)"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -373,7 +384,8 @@ impl SkillTool for SkillCallTool {
     }
 
     fn description(&self) -> &str {
-        "Call another registered skill by ID. Parameters: skill_id (string), input (string), params (object, optional)"
+        "Call another registered skill by ID. Parameters: skill_id (string), input (string), \
+         params (object, optional)"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -389,19 +401,29 @@ impl SkillTool for SkillCallTool {
     }
 
     async fn execute(&self, params: &Value) -> Result<String, String> {
-        let skill_id = params["skill_id"].as_str()
+        let skill_id = params["skill_id"]
+            .as_str()
             .ok_or("Missing 'skill_id' parameter")?;
         let input = params["input"].as_str().unwrap_or("");
 
-        info!("SkillCallTool: executing skill '{}' with input: {}", skill_id, input);
+        info!(
+            "SkillCallTool: executing skill '{}' with input: {}",
+            skill_id, input
+        );
 
         match self.agent.execute_skill_by_id(skill_id, input, None).await {
             Ok(result) => {
-                info!("SkillCallTool: skill '{}' executed successfully in {}ms", skill_id, result.execution_time_ms);
+                info!(
+                    "SkillCallTool: skill '{}' executed successfully in {}ms",
+                    skill_id, result.execution_time_ms
+                );
                 Ok(result.output)
             }
             Err(e) => {
-                warn!("SkillCallTool: skill '{}' execution failed: {}", skill_id, e);
+                warn!(
+                    "SkillCallTool: skill '{}' execution failed: {}",
+                    skill_id, e
+                );
                 Err(format!("Skill execution failed: {}", e))
             }
         }
@@ -442,8 +464,8 @@ impl SkillTool for WebFetchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch the content of a web page via HTTP GET. \
-Parameters: url (string), max_length (integer, optional, default 8000)"
+        "Fetch the content of a web page via HTTP GET. Parameters: url (string), max_length \
+         (integer, optional, default 8000)"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -477,7 +499,12 @@ Parameters: url (string), max_length (integer, optional, default 8000)"
         let status = response.status();
         let body = match response.text().await {
             Ok(t) => t,
-            Err(e) => return Err(format!("Failed to read response body from '{}': {}", url, e)),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to read response body from '{}': {}",
+                    url, e
+                ))
+            }
         };
 
         let mut result = format!("Status: {}\nURL: {}\n\n", status, url);
@@ -502,16 +529,16 @@ pub fn default_tool_set(skill_dir: &Path) -> HashMap<String, Box<dyn SkillTool>>
         "process_exec".to_string(),
         Box::new(ProcessExecTool::new(dirs.clone())),
     );
-    tools.insert(
-        "bash_shell".to_string(),
-        Box::new(BashShellTool::new(dirs)),
-    );
+    tools.insert("bash_shell".to_string(), Box::new(BashShellTool::new(dirs)));
     tools.insert("web_fetch".to_string(), Box::new(WebFetchTool));
     tools
 }
 
 /// Build extended tool set including skill_call (requires Agent)
-pub fn extended_tool_set(skill_dir: &Path, agent: Arc<Agent>) -> HashMap<String, Box<dyn SkillTool>> {
+pub fn extended_tool_set(
+    skill_dir: &Path,
+    agent: Arc<Agent>,
+) -> HashMap<String, Box<dyn SkillTool>> {
     let mut tools = default_tool_set(skill_dir);
     tools.insert(
         "skill_call".to_string(),
@@ -520,7 +547,8 @@ pub fn extended_tool_set(skill_dir: &Path, agent: Arc<Agent>) -> HashMap<String,
     tools
 }
 
-/// Render tool definitions as a compact markdown list for the ReAct system prompt
+/// Render tool definitions as a compact markdown list for the ReAct system
+/// prompt
 pub fn render_tools_for_prompt(tools: &HashMap<String, Box<dyn SkillTool>>) -> String {
     let mut lines = vec!["Available tools:".to_string()];
     for tool in tools.values() {

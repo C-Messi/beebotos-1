@@ -14,19 +14,20 @@ pub mod qwen;
 pub mod zhipu;
 
 // Re-export providers
-pub use anthropic::{AnthropicConfig, AnthropicProvider, anthropic_models};
-pub use claude::{ClaudeConfig, ClaudeProvider, claude_models};
-
+pub use anthropic::{anthropic_models, AnthropicConfig, AnthropicProvider};
+pub use claude::{claude_models, ClaudeConfig, ClaudeProvider};
+pub use deepseek::{deepseek_models, DeepSeekConfig, DeepSeekProvider};
+pub use doubao::{doubao_models, DoubaoConfig, DoubaoProvider};
+pub use gemini::{gemini_models, GeminiConfig, GeminiProvider};
+pub use kimi::{kimi_models, KimiConfig, KimiProvider, ProviderMode, ThinkingMode};
+pub use ollama::{ollama_models, OllamaConfig, OllamaProvider};
+pub use openai::{openai_models, OpenAIConfig, OpenAIProvider};
+pub use qwen::{qwen_models, QwenConfig, QwenProvider};
 // ChatGLM is now an alias for Zhipu (same provider)
-pub use zhipu::{ZhipuConfig as ChatGLMConfig, ZhipuProvider as ChatGLMProvider, zhipu_models as chatglm_models};
-pub use deepseek::{DeepSeekConfig, DeepSeekProvider, deepseek_models};
-pub use doubao::{DoubaoConfig, DoubaoProvider, doubao_models};
-pub use gemini::{GeminiConfig, GeminiProvider, gemini_models};
-pub use kimi::{KimiConfig, KimiProvider, ProviderMode, ThinkingMode, kimi_models};
-pub use ollama::{OllamaConfig, OllamaProvider, ollama_models};
-pub use openai::{OpenAIConfig, OpenAIProvider, openai_models};
-pub use qwen::{QwenConfig, QwenProvider, qwen_models};
-pub use zhipu::{ZhipuConfig, ZhipuProvider, zhipu_models};
+pub use zhipu::{
+    zhipu_models as chatglm_models, ZhipuConfig as ChatGLMConfig, ZhipuProvider as ChatGLMProvider,
+};
+pub use zhipu::{zhipu_models, ZhipuConfig, ZhipuProvider};
 
 /// Provider factory - creates providers by name
 pub struct ProviderFactory;
@@ -87,15 +88,7 @@ impl ProviderFactory {
     /// List all available provider names
     pub fn available_providers() -> Vec<&'static str> {
         vec![
-            "kimi",
-            "openai",
-            "deepseek",
-            "zhipu",
-            "doubao",
-            "qwen",
-            "gemini",
-            "claude",
-            "ollama",
+            "kimi", "openai", "deepseek", "zhipu", "doubao", "qwen", "gemini", "claude", "ollama",
         ]
     }
 }

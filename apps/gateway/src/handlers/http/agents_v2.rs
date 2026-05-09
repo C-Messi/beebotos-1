@@ -3,29 +3,27 @@
 //! 🟢 P1 FIX: Migrated to use AgentRuntime trait and StateStore (CQRS).
 //! This version is decoupled from the concrete beebotos_agents implementation.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use gateway::error::GatewayError;
+use gateway::middleware::{require_any_role, AuthUser};
 use gateway::{
-    error::GatewayError,
-    middleware::{require_any_role, AuthUser},
-    AgentConfigBuilder,
-    LlmConfig, MemoryConfig,
-    StateQuery, StateCommand,
-    QueryResult, AgentState,
-    TaskConfig, AgentStateCommand,
+    AgentConfigBuilder, AgentState, AgentStateCommand, LlmConfig, MemoryConfig, QueryResult,
+    StateCommand, StateQuery, TaskConfig,
 };
 use serde::Deserialize;
 use serde_json::json;
-
-use crate::models::{AgentResponse, CreateAgentRequest, PaginatedResponse, PaginationParams, ModelInfo};
-use crate::AppState;
-
-use std::collections::HashMap;
 use tracing::{debug, info, warn};
+
+use crate::models::{
+    AgentResponse, CreateAgentRequest, ModelInfo, PaginatedResponse, PaginationParams,
+};
+use crate::AppState;
 
 /// Parse a platform string into PlatformType.
 fn parse_platform(platform: &str) -> Option<beebotos_agents::communication::PlatformType> {
@@ -53,11 +51,16 @@ fn parse_platform(platform: &str) -> Option<beebotos_agents::communication::Plat
 }
 
 /// Check if user owns the agent from StateStore metadata.
-fn check_v2_ownership(user: &AuthUser, metadata: &HashMap<String, String>) -> Result<(), GatewayError> {
+fn check_v2_ownership(
+    user: &AuthUser,
+    metadata: &HashMap<String, String>,
+) -> Result<(), GatewayError> {
     if user.is_admin() || metadata.get("owner_id").map(|s| s.as_str()) == Some(&user.user_id) {
         Ok(())
     } else {
-        Err(GatewayError::forbidden("You don't have permission to access this agent"))
+        Err(GatewayError::forbidden(
+            "You don't have permission to access this agent",
+        ))
     }
 }
 
@@ -106,7 +109,12 @@ pub async fn list_agents_v2(
             name: info.config.name,
             description: Some(info.config.description),
             status: info.current_state.to_string(),
-            capabilities: info.config.capabilities.into_iter().map(|c| c.name).collect(),
+            capabilities: info
+                .config
+                .capabilities
+                .into_iter()
+                .map(|c| c.name)
+                .collect(),
             model: ModelInfo {
                 provider: info.config.llm_config.provider,
                 name: info.config.llm_config.model,
@@ -147,24 +155,21 @@ pub async fn create_agent_v2(
     }
 
     // 🟢 P1 FIX: Build GatewayAgentConfig using builder pattern
-    let agent_config = AgentConfigBuilder::new(
-        uuid::Uuid::new_v4().to_string(),
-        &req.name
-    )
-    .description(&req.description.unwrap_or_default())
-    .with_llm(LlmConfig {
-        provider: req.model_provider.unwrap_or_else(|| "openai".to_string()),
-        model: req.model_name.unwrap_or_else(|| "gpt-4".to_string()),
-        api_key: None,
-        temperature: 0.7,
-        max_tokens: 2000,
-    })
-    .with_memory(MemoryConfig {
-        memory_type: "local".to_string(),
-        storage_path: "data/memory".to_string(),
-        max_entries: 10000,
-    })
-    .build();
+    let agent_config = AgentConfigBuilder::new(uuid::Uuid::new_v4().to_string(), &req.name)
+        .description(&req.description.unwrap_or_default())
+        .with_llm(LlmConfig {
+            provider: req.model_provider.unwrap_or_else(|| "openai".to_string()),
+            model: req.model_name.unwrap_or_else(|| "gpt-4".to_string()),
+            api_key: None,
+            temperature: 0.7,
+            max_tokens: 2000,
+        })
+        .with_memory(MemoryConfig {
+            memory_type: "local".to_string(),
+            storage_path: "data/memory".to_string(),
+            max_entries: 10000,
+        })
+        .build();
 
     // 🟢 P1 FIX: Use AgentRuntime trait to spawn agent
     let handle = state
@@ -200,7 +205,11 @@ pub async fn create_agent_v2(
         name: agent_config.name,
         description: Some(agent_config.description),
         status: "registered".to_string(),
-        capabilities: agent_config.capabilities.into_iter().map(|c| c.name).collect(),
+        capabilities: agent_config
+            .capabilities
+            .into_iter()
+            .map(|c| c.name)
+            .collect(),
         model: ModelInfo {
             provider: agent_config.llm_config.provider,
             name: agent_config.llm_config.model,
@@ -210,10 +219,7 @@ pub async fn create_agent_v2(
         last_heartbeat: None,
     };
 
-    Ok((
-        StatusCode::CREATED,
-        Json(response),
-    ))
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 /// Get agent by ID (V2)
@@ -227,7 +233,9 @@ pub async fn get_agent_v2(
     // 🟢 P1 FIX: Use StateStore to query agent info
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
 
@@ -241,22 +249,26 @@ pub async fn get_agent_v2(
     };
 
     let info = match info {
-        QueryResult::AgentInfo { config, current_state, created_at, updated_at, .. } => {
-            AgentResponse {
-                id: id.clone(),
-                name: config.name,
-                description: Some(config.description),
-                status: current_state.to_string(),
-                capabilities: config.capabilities.into_iter().map(|c| c.name).collect(),
-                model: ModelInfo {
-                    provider: config.llm_config.provider,
-                    name: config.llm_config.model,
-                },
-                created_at,
-                updated_at,
-                last_heartbeat: None,
-            }
-        }
+        QueryResult::AgentInfo {
+            config,
+            current_state,
+            created_at,
+            updated_at,
+            ..
+        } => AgentResponse {
+            id: id.clone(),
+            name: config.name,
+            description: Some(config.description),
+            status: current_state.to_string(),
+            capabilities: config.capabilities.into_iter().map(|c| c.name).collect(),
+            model: ModelInfo {
+                provider: config.llm_config.provider,
+                name: config.llm_config.model,
+            },
+            created_at,
+            updated_at,
+            last_heartbeat: None,
+        },
         _ => return Err(GatewayError::not_found("Agent", &id)),
     };
 
@@ -274,7 +286,9 @@ pub async fn delete_agent_v2(
     // 🟢 P0 FIX: Verify ownership before deletion
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
     if let QueryResult::AgentInfo { metadata, .. } = &query_result {
@@ -293,7 +307,9 @@ pub async fn delete_agent_v2(
     // 🟢 P1 FIX: Archive in StateStore
     state
         .state_store
-        .execute(StateCommand::ArchiveAgent { agent_id: id.clone() })
+        .execute(StateCommand::ArchiveAgent {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::state(format!("Failed to archive agent: {}", e)))?;
 
@@ -317,7 +333,9 @@ pub async fn start_agent_v2(
     // 🟢 P0 FIX: Verify ownership before starting
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
     if let QueryResult::AgentInfo { metadata, .. } = &query_result {
@@ -365,7 +383,9 @@ pub async fn stop_agent_v2(
     // 🟢 P0 FIX: Verify ownership before stopping
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
     if let QueryResult::AgentInfo { metadata, .. } = &query_result {
@@ -401,7 +421,9 @@ pub async fn get_agent_status_v2(
     // 🟢 P0 FIX: Verify ownership before querying status
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
     if let QueryResult::AgentInfo { metadata, .. } = &query_result {
@@ -452,7 +474,9 @@ pub async fn execute_task_v2(
     // 🟢 P0 FIX: Verify ownership before executing task
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
     if let QueryResult::AgentInfo { metadata, .. } = &query_result {
@@ -488,9 +512,10 @@ pub async fn execute_task_v2(
 pub struct BindChannelRequest {
     pub platform: String,
     pub channel_id: String,
-    /// P1 FIX: Optional explicit platform_user_id. If not provided, uses channel_id.
-    /// This should match the sender ID used by the platform's webhook handler
-    /// (e.g., Telegram chat_id, Lark open_id, Slack user_id).
+    /// P1 FIX: Optional explicit platform_user_id. If not provided, uses
+    /// channel_id. This should match the sender ID used by the platform's
+    /// webhook handler (e.g., Telegram chat_id, Lark open_id, Slack
+    /// user_id).
     pub platform_user_id: Option<String>,
 }
 
@@ -505,7 +530,9 @@ pub async fn bind_agent_channel(
     // 🟢 P0 FIX: Verify ownership before binding
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
     if let QueryResult::AgentInfo { metadata, .. } = &query_result {
@@ -524,13 +551,17 @@ pub async fn bind_agent_channel(
         .await
         .map_err(|e| GatewayError::internal(format!("Failed to bind channel: {}", e)))?;
 
-    // 🟢 P1 FIX: Also bind via new AgentChannelService (auto-create user_channel if missing)
-    if let (Some(ref agent_ch_svc), Some(ref user_ch_svc)) =
-        (state.agent_channel_service.as_ref(), state.user_channel_service.as_ref())
-    {
+    // 🟢 P1 FIX: Also bind via new AgentChannelService (auto-create user_channel if
+    // missing)
+    if let (Some(ref agent_ch_svc), Some(ref user_ch_svc)) = (
+        state.agent_channel_service.as_ref(),
+        state.user_channel_service.as_ref(),
+    ) {
         if let Some(platform) = parse_platform(&req.platform) {
             // Use explicit platform_user_id if provided, otherwise fall back to channel_id
-            let platform_user_id = req.platform_user_id.as_ref()
+            let platform_user_id = req
+                .platform_user_id
+                .as_ref()
                 .unwrap_or(&req.channel_id)
                 .clone();
 
@@ -627,7 +658,9 @@ pub async fn unbind_agent_channel(
     // 🟢 P0 FIX: Verify ownership before unbinding
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
     if let QueryResult::AgentInfo { metadata, .. } = &query_result {
@@ -652,11 +685,15 @@ pub async fn unbind_agent_channel(
         .map_err(|e| GatewayError::internal(format!("Failed to unbind channel: {}", e)))?;
 
     // 🟢 P1 FIX: Also unbind via new AgentChannelService if user channel exists
-    if let (Some(ref agent_ch_svc), Some(ref user_ch_svc)) =
-        (state.agent_channel_service.as_ref(), state.user_channel_service.as_ref())
-    {
+    if let (Some(ref agent_ch_svc), Some(ref user_ch_svc)) = (
+        state.agent_channel_service.as_ref(),
+        state.user_channel_service.as_ref(),
+    ) {
         if let Some(platform_type) = parse_platform(&platform) {
-            match user_ch_svc.find_by_platform_user(platform_type, &channel_id).await {
+            match user_ch_svc
+                .find_by_platform_user(platform_type, &channel_id)
+                .await
+            {
                 Ok(Some(user_channel)) => {
                     if let Err(e) = agent_ch_svc.unbind_agent(&id, &user_channel.id).await {
                         warn!(
@@ -672,7 +709,8 @@ pub async fn unbind_agent_channel(
                 }
                 Ok(None) => {
                     debug!(
-                        "No user channel found for platform {:?} user {}, skipping new-system unbind",
+                        "No user channel found for platform {:?} user {}, skipping new-system \
+                         unbind",
                         platform_type, channel_id
                     );
                 }
@@ -705,7 +743,9 @@ pub async fn list_agent_channels(
     // 🟢 P0 FIX: Verify ownership before listing channels
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
     if let QueryResult::AgentInfo { metadata, .. } = &query_result {
@@ -793,7 +833,9 @@ pub async fn bind_agent_channel_v2(
     // Verify ownership
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
     if let QueryResult::AgentInfo { metadata, .. } = &query_result {
@@ -841,7 +883,9 @@ pub async fn list_agent_channel_bindings_v2(
 
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
     if let QueryResult::AgentInfo { metadata, .. } = &query_result {
@@ -898,7 +942,9 @@ pub async fn unbind_agent_channel_v2(
 
     let query_result = state
         .state_store
-        .query(StateQuery::GetAgentInfo { agent_id: id.clone() })
+        .query(StateQuery::GetAgentInfo {
+            agent_id: id.clone(),
+        })
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
     if let QueryResult::AgentInfo { metadata, .. } = &query_result {
@@ -967,7 +1013,10 @@ pub async fn migrate_legacy_bindings(
         let platform = match parse_platform(&binding.platform) {
             Some(p) => p,
             None => {
-                warn!("Skipping migration for unknown platform: {}", binding.platform);
+                warn!(
+                    "Skipping migration for unknown platform: {}",
+                    binding.platform
+                );
                 skipped += 1;
                 continue;
             }
@@ -1007,8 +1056,7 @@ pub async fn migrate_legacy_bindings(
         };
 
         // Create agent_channel_binding
-        let routing_rules =
-            beebotos_agents::communication::agent_channel::RoutingRules::default();
+        let routing_rules = beebotos_agents::communication::agent_channel::RoutingRules::default();
         if let Err(e) = agent_ch_svc
             .bind_agent(
                 &binding.agent_id,
@@ -1050,7 +1098,8 @@ pub async fn migrate_legacy_bindings(
 //
 // To migrate existing handlers:
 //
-// 1. Replace `state.agent_service.xxx()` with `state.agent_runtime.xxx()` for agent lifecycle
+// 1. Replace `state.agent_service.xxx()` with `state.agent_runtime.xxx()` for
+//    agent lifecycle
 // 2. Replace database queries with `state.state_store.query()` for reads
 // 3. Replace state changes with `state.state_store.execute()` for writes
 // 4. Use `GatewayAgentConfig` instead of internal `AgentConfig`

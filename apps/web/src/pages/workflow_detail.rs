@@ -2,12 +2,13 @@
 //!
 //! Displays an interactive SVG graph of workflow step dependencies.
 
-use crate::api::{WorkflowInfo, WorkflowStepInfo};
-use crate::state::use_app_state;
 use leptos::prelude::*;
 use leptos::view;
 use leptos_meta::*;
 use leptos_router::hooks::use_params_map;
+
+use crate::api::{WorkflowInfo, WorkflowStepInfo};
+use crate::state::use_app_state;
 
 const NODE_WIDTH: i32 = 150;
 const NODE_HEIGHT: i32 = 56;
@@ -31,12 +32,11 @@ fn compute_depths(steps: &[WorkflowStepInfo]) -> Vec<(String, usize)> {
         let step = steps.iter().find(|s| s.id == step_id);
         let d = match step {
             Some(s) => match &s.depends_on {
-                Some(deps) if !deps.is_empty() => {
-                    deps.iter()
-                        .map(|dep| depth_of(dep, steps, computed) + 1)
-                        .max()
-                        .unwrap_or(0)
-                }
+                Some(deps) if !deps.is_empty() => deps
+                    .iter()
+                    .map(|dep| depth_of(dep, steps, computed) + 1)
+                    .max()
+                    .unwrap_or(0),
                 _ => 0,
             },
             None => 0,
@@ -66,7 +66,8 @@ fn layout_nodes(steps: &[WorkflowStepInfo]) -> Vec<(String, i32, i32)> {
     let mut positions: Vec<(String, i32, i32)> = Vec::new();
     for (depth, layer) in layers.iter().enumerate() {
         let y = MARGIN + depth as i32 * VERT_SPACING;
-        let total_width = layer.len() as i32 * NODE_WIDTH + (layer.len().saturating_sub(1) as i32) * (HORIZ_SPACING - NODE_WIDTH);
+        let total_width = layer.len() as i32 * NODE_WIDTH
+            + (layer.len().saturating_sub(1) as i32) * (HORIZ_SPACING - NODE_WIDTH);
         let start_x = MARGIN + (total_width.max(0) / 2).saturating_sub(total_width / 2);
         for (idx, step_id) in layer.iter().enumerate() {
             let x = start_x + idx as i32 * HORIZ_SPACING;
@@ -123,8 +124,10 @@ pub fn WorkflowDetailPage() -> impl IntoView {
 #[component]
 fn WorkflowDag(info: WorkflowInfo) -> impl IntoView {
     let positions = layout_nodes(&info.steps);
-    let pos_map: std::collections::HashMap<String, (i32, i32)> =
-        positions.iter().map(|(id, x, y)| (id.clone(), (*x, *y))).collect();
+    let pos_map: std::collections::HashMap<String, (i32, i32)> = positions
+        .iter()
+        .map(|(id, x, y)| (id.clone(), (*x, *y)))
+        .collect();
 
     let max_x = positions.iter().map(|(_, x, _)| *x).max().unwrap_or(0) + NODE_WIDTH + MARGIN;
     let max_y = positions.iter().map(|(_, _, y)| *y).max().unwrap_or(0) + NODE_HEIGHT + MARGIN;
@@ -143,7 +146,12 @@ fn WorkflowDag(info: WorkflowInfo) -> impl IntoView {
                 deps.iter()
                     .filter_map(|dep_id| {
                         let source_pos = pos_map.get(dep_id)?;
-                        Some((dep_id.clone(), source_pos.clone(), step.id.clone(), target_pos.clone()))
+                        Some((
+                            dep_id.clone(),
+                            source_pos.clone(),
+                            step.id.clone(),
+                            target_pos.clone(),
+                        ))
                     })
                     .collect::<Vec<_>>(),
             )

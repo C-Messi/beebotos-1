@@ -1,9 +1,10 @@
 //! CAPO — Context-Aware Prompt Optimization
 //!
-//! Symbol-level evolution engine that optimizes prompts, skill docs, and SOUL.md
-//! by analyzing success/failure trajectories and making directed edits.
+//! Symbol-level evolution engine that optimizes prompts, skill docs, and
+//! SOUL.md by analyzing success/failure trajectories and making directed edits.
 
 use std::sync::Arc;
+
 use tokio::sync::RwLock;
 
 use crate::error::AgentError;
@@ -83,9 +84,15 @@ impl Default for CapoConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditOp {
     /// Replace a paragraph with new text
-    Rewrite { paragraph_id: String, new_text: String },
+    Rewrite {
+        paragraph_id: String,
+        new_text: String,
+    },
     /// Add conditional branch or example after a paragraph
-    Augment { paragraph_id: String, addition: String },
+    Augment {
+        paragraph_id: String,
+        addition: String,
+    },
     /// Remove a paragraph
     Prune { paragraph_id: String },
     /// Reorder paragraphs
@@ -97,9 +104,9 @@ pub enum EditOp {
 pub struct AttributionScore {
     pub paragraph_id: String,
     pub paragraph_text: String,
-    pub success_correlation: f32,   // +1.0 = strongly associated with success
-    pub failure_correlation: f32,   // +1.0 = strongly associated with failure
-    pub overall_impact: f32,        // composite score
+    pub success_correlation: f32, // +1.0 = strongly associated with success
+    pub failure_correlation: f32, // +1.0 = strongly associated with failure
+    pub overall_impact: f32,      // composite score
 }
 
 /// Performance metrics for a document version
@@ -168,7 +175,10 @@ impl CapoEngine {
                     .map(|w| w.to_string())
                     .collect();
 
-                let keyword_hits = para_keywords.iter().filter(|k| trail_text.contains(*k)).count();
+                let keyword_hits = para_keywords
+                    .iter()
+                    .filter(|k| trail_text.contains(*k))
+                    .count();
                 let relevance = if para_keywords.is_empty() {
                     0.0
                 } else {
@@ -201,11 +211,17 @@ impl CapoEngine {
         }
 
         // Sort by absolute impact (descending)
-        scores.sort_by(|a, b| b.overall_impact.abs().partial_cmp(&a.overall_impact.abs()).unwrap());
+        scores.sort_by(|a, b| {
+            b.overall_impact
+                .abs()
+                .partial_cmp(&a.overall_impact.abs())
+                .unwrap()
+        });
         scores
     }
 
-    /// Step 2: Locate top-K problem paragraphs (negative impact) and high-value paragraphs (positive)
+    /// Step 2: Locate top-K problem paragraphs (negative impact) and high-value
+    /// paragraphs (positive)
     pub fn locate_problems(
         &self,
         scores: &[AttributionScore],
@@ -245,16 +261,17 @@ impl CapoEngine {
             } else {
                 edits.push(EditOp::Rewrite {
                     paragraph_id: problem.paragraph_id.clone(),
-                    new_text: format!("[REVISED] {}\n\n注意：此段指令已根据执行轨迹优化。", problem.paragraph_text),
+                    new_text: format!(
+                        "[REVISED] {}\n\n注意：此段指令已根据执行轨迹优化。",
+                        problem.paragraph_text
+                    ),
                 });
             }
         } else {
             // Moderate issue → augment with conditions
             edits.push(EditOp::Augment {
                 paragraph_id: problem.paragraph_id.clone(),
-                addition: format!(
-                    "\n\n> 补充条件：如果上述步骤失败，请先检查环境状态，然后重试。"
-                ),
+                addition: format!("\n\n> 补充条件：如果上述步骤失败，请先检查环境状态，然后重试。"),
             });
         }
 
@@ -281,14 +298,15 @@ impl CapoEngine {
 
     /// Step 5: Apply a single edit and return new document content
     pub fn apply_edit(&self, document: &str, edit: &EditOp) -> String {
-        let paragraphs: Vec<String> = document
-            .split("\n\n")
-            .map(|s| s.to_string())
-            .collect();
+        let paragraphs: Vec<String> = document.split("\n\n").map(|s| s.to_string()).collect();
 
         match edit {
-            EditOp::Rewrite { paragraph_id, new_text } => {
-                let idx = paragraph_id.strip_prefix('p')
+            EditOp::Rewrite {
+                paragraph_id,
+                new_text,
+            } => {
+                let idx = paragraph_id
+                    .strip_prefix('p')
                     .and_then(|n| n.parse::<usize>().ok())
                     .unwrap_or(0);
                 let mut new_paras = paragraphs.clone();
@@ -297,8 +315,12 @@ impl CapoEngine {
                 }
                 new_paras.join("\n\n")
             }
-            EditOp::Augment { paragraph_id, addition } => {
-                let idx = paragraph_id.strip_prefix('p')
+            EditOp::Augment {
+                paragraph_id,
+                addition,
+            } => {
+                let idx = paragraph_id
+                    .strip_prefix('p')
                     .and_then(|n| n.parse::<usize>().ok())
                     .unwrap_or(0);
                 let mut new_paras = paragraphs.clone();
@@ -308,7 +330,8 @@ impl CapoEngine {
                 new_paras.join("\n\n")
             }
             EditOp::Prune { paragraph_id } => {
-                let idx = paragraph_id.strip_prefix('p')
+                let idx = paragraph_id
+                    .strip_prefix('p')
                     .and_then(|n| n.parse::<usize>().ok())
                     .unwrap_or(0);
                 let mut new_paras = paragraphs;
@@ -320,7 +343,8 @@ impl CapoEngine {
             EditOp::Reorder { paragraph_ids } => {
                 let mut reordered = Vec::new();
                 for pid in paragraph_ids {
-                    let idx = pid.strip_prefix('p')
+                    let idx = pid
+                        .strip_prefix('p')
                         .and_then(|n| n.parse::<usize>().ok())
                         .unwrap_or(0);
                     if idx < paragraphs.len() {
@@ -346,9 +370,11 @@ impl CapoEngine {
         trajectories: &[(ToolTrail, bool)],
     ) -> Result<(String, VersionMetrics, Vec<EditOp>), AgentError> {
         if trajectories.len() < self.config.min_trajectories {
-            return Err(AgentError::Execution(
-                format!("Need {} trajectories, got {}", self.config.min_trajectories, trajectories.len())
-            ));
+            return Err(AgentError::Execution(format!(
+                "Need {} trajectories, got {}",
+                self.config.min_trajectories,
+                trajectories.len()
+            )));
         }
 
         // 1. Attribution
@@ -358,7 +384,9 @@ impl CapoEngine {
         let (problems, high_value) = self.locate_problems(&scores);
 
         if problems.is_empty() {
-            return Err(AgentError::Execution("No problem paragraphs found".to_string()));
+            return Err(AgentError::Execution(
+                "No problem paragraphs found".to_string(),
+            ));
         }
 
         // 3. Generate edits for the worst problem
@@ -373,7 +401,8 @@ impl CapoEngine {
         Ok((new_doc, metrics, edits))
     }
 
-    /// Full CAPO pipeline: iterate until improvement threshold or max iterations
+    /// Full CAPO pipeline: iterate until improvement threshold or max
+    /// iterations
     pub async fn evolve(
         &self,
         initial_document: &str,
@@ -450,7 +479,10 @@ impl CapoEngine {
     /// Rollback to a specific version
     pub async fn rollback_to(&self, version_id: &str) -> Option<String> {
         let history = self.version_history.read().await;
-        history.iter().find(|v| v.version_id == version_id).map(|v| v.content.clone())
+        history
+            .iter()
+            .find(|v| v.version_id == version_id)
+            .map(|v| v.content.clone())
     }
 }
 
@@ -471,14 +503,19 @@ mod tests {
 
     fn make_trail(success: bool) -> (ToolTrail, bool) {
         let mut trail = ToolTrail::new("test".to_string());
-        trail.finish(if success { crate::planning::TrailStatus::Success } else { crate::planning::TrailStatus::Failed });
+        trail.finish(if success {
+            crate::planning::TrailStatus::Success
+        } else {
+            crate::planning::TrailStatus::Failed
+        });
         (trail, success)
     }
 
     #[test]
     fn test_attribution_analysis() {
         let engine = CapoEngine::new(CapoConfig::default());
-        let doc = "Always check environment first.\n\nIgnore errors and continue.\n\nValidate all inputs.";
+        let doc = "Always check environment first.\n\nIgnore errors and continue.\n\nValidate all \
+                   inputs.";
         let trajectories = vec![
             make_trail(true),
             make_trail(true),

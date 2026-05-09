@@ -14,15 +14,24 @@ pub struct ProcessReward {
 
 impl ProcessReward {
     pub fn positive(score: f32, reason: impl Into<String>) -> Self {
-        Self { score: score.clamp(0.0, 1.0), reason: reason.into() }
+        Self {
+            score: score.clamp(0.0, 1.0),
+            reason: reason.into(),
+        }
     }
 
     pub fn negative(score: f32, reason: impl Into<String>) -> Self {
-        Self { score: -score.clamp(0.0, 1.0), reason: reason.into() }
+        Self {
+            score: -score.clamp(0.0, 1.0),
+            reason: reason.into(),
+        }
     }
 
     pub fn neutral(reason: impl Into<String>) -> Self {
-        Self { score: 0.0, reason: reason.into() }
+        Self {
+            score: 0.0,
+            reason: reason.into(),
+        }
     }
 }
 
@@ -44,7 +53,9 @@ pub struct CodeExecutionValidator;
 
 #[async_trait::async_trait]
 impl ToolCallValidator for CodeExecutionValidator {
-    fn tool_name(&self) -> &str { "execute_code" }
+    fn tool_name(&self) -> &str {
+        "execute_code"
+    }
 
     async fn validate(
         &self,
@@ -78,7 +89,9 @@ pub struct HttpApiValidator;
 
 #[async_trait::async_trait]
 impl ToolCallValidator for HttpApiValidator {
-    fn tool_name(&self) -> &str { "http_request" }
+    fn tool_name(&self) -> &str {
+        "http_request"
+    }
 
     async fn validate(
         &self,
@@ -108,18 +121,26 @@ pub struct FileOperationValidator;
 
 #[async_trait::async_trait]
 impl ToolCallValidator for FileOperationValidator {
-    fn tool_name(&self) -> &str { "file_operation" }
+    fn tool_name(&self) -> &str {
+        "file_operation"
+    }
 
     async fn validate(
         &self,
         _params: &serde_json::Value,
         result: &serde_json::Value,
     ) -> ProcessReward {
-        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if success {
             ProcessReward::positive(0.8, "File operation succeeded")
         } else {
-            let error = result.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+            let error = result
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error");
             if error.contains("not found") || error.contains("No such file") {
                 ProcessReward::negative(0.8, "File not found")
             } else if error.contains("permission") {
@@ -176,24 +197,22 @@ impl CreditAssigner {
     }
 
     /// Assign process rewards to each step
-    pub fn assign(
-        &self,
-        step_rewards: &[ProcessReward],
-    ) -> Vec<f32> {
+    pub fn assign(&self, step_rewards: &[ProcessReward]) -> Vec<f32> {
         let n = step_rewards.len();
-        if n == 0 { return Vec::new(); }
+        if n == 0 {
+            return Vec::new();
+        }
 
         match self.config.credit_assignment {
-            CreditAssignmentStrategy::Uniform => {
-                step_rewards.iter()
-                    .map(|r| r.score * self.config.process_reward_weight / n as f32)
-                    .collect()
-            }
+            CreditAssignmentStrategy::Uniform => step_rewards
+                .iter()
+                .map(|r| r.score * self.config.process_reward_weight / n as f32)
+                .collect(),
             CreditAssignmentStrategy::Decay { decay_factor } => {
-                let total_weight: f32 = (0..n)
-                    .map(|i| decay_factor.powi(i as i32))
-                    .sum();
-                step_rewards.iter().enumerate()
+                let total_weight: f32 = (0..n).map(|i| decay_factor.powi(i as i32)).sum();
+                step_rewards
+                    .iter()
+                    .enumerate()
                     .map(|(i, r)| {
                         let weight = decay_factor.powi(i as i32) / total_weight;
                         r.score * self.config.process_reward_weight * weight
@@ -202,18 +221,18 @@ impl CreditAssigner {
             }
             CreditAssignmentStrategy::Advantage => {
                 let baseline = step_rewards.iter().map(|r| r.score).sum::<f32>() / n as f32;
-                step_rewards.iter()
+                step_rewards
+                    .iter()
                     .map(|r| {
                         let advantage = r.score - baseline;
                         advantage * self.config.process_reward_weight
                     })
                     .collect()
             }
-            CreditAssignmentStrategy::ValidatorAttribution => {
-                step_rewards.iter()
-                    .map(|r| r.score * self.config.process_reward_weight)
-                    .collect()
-            }
+            CreditAssignmentStrategy::ValidatorAttribution => step_rewards
+                .iter()
+                .map(|r| r.score * self.config.process_reward_weight)
+                .collect(),
         }
     }
 }
@@ -284,10 +303,7 @@ impl PapoTrainer {
     }
 
     /// Compute step-level rewards for a trajectory
-    pub async fn compute_step_rewards(
-        &self,
-        trail: &ToolTrail,
-    ) -> Vec<ProcessReward> {
+    pub async fn compute_step_rewards(&self, trail: &ToolTrail) -> Vec<ProcessReward> {
         let mut rewards = Vec::new();
         for step in &trail.steps {
             for call in &step.tool_calls {
@@ -305,11 +321,7 @@ impl PapoTrainer {
     }
 
     /// Compute total reward = process rewards + final reward
-    pub fn compute_total_reward(
-        &self,
-        step_rewards: &[ProcessReward],
-        trail_success: bool,
-    ) -> f32 {
+    pub fn compute_total_reward(&self, step_rewards: &[ProcessReward], trail_success: bool) -> f32 {
         let credits = self.credit_assigner.assign(step_rewards);
         let process_total: f32 = credits.iter().sum();
 

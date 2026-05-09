@@ -1,16 +1,18 @@
 //! Cron Job HTTP Handlers
 //!
-//! REST API for managing scheduled cron jobs with tokio-cron-scheduler integration.
+//! REST API for managing scheduled cron jobs with tokio-cron-scheduler
+//! integration.
+
+use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::Json;
-use std::sync::Arc;
+use gateway::middleware::{require_any_role, AuthUser};
 use tracing::{info, warn};
 
 use crate::error::GatewayError;
 use crate::services::cron_job_service::CronJobRequest;
 use crate::AppState;
-use gateway::middleware::{require_any_role, AuthUser};
 
 /// List all cron jobs
 pub async fn list_jobs(
@@ -19,11 +21,15 @@ pub async fn list_jobs(
 ) -> Result<Json<Vec<serde_json::Value>>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let svc = state.cron_job_service.as_ref()
+    let svc = state
+        .cron_job_service
+        .as_ref()
         .ok_or_else(|| GatewayError::internal("Cron job service not initialized"))?;
 
     let jobs = svc.list_jobs().await?;
-    Ok(Json(jobs.into_iter().map(|j| serde_json::json!(j)).collect()))
+    Ok(Json(
+        jobs.into_iter().map(|j| serde_json::json!(j)).collect(),
+    ))
 }
 
 /// Get a single cron job
@@ -34,7 +40,9 @@ pub async fn get_job(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let svc = state.cron_job_service.as_ref()
+    let svc = state
+        .cron_job_service
+        .as_ref()
         .ok_or_else(|| GatewayError::internal("Cron job service not initialized"))?;
 
     let job = svc.get_job(&id).await?;
@@ -49,7 +57,9 @@ pub async fn create_job(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let svc = state.cron_job_service.as_ref()
+    let svc = state
+        .cron_job_service
+        .as_ref()
         .ok_or_else(|| GatewayError::internal("Cron job service not initialized"))?;
 
     let job = svc.create_job(req, &user.user_id).await?;
@@ -75,7 +85,9 @@ pub async fn update_job(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let svc = state.cron_job_service.as_ref()
+    let svc = state
+        .cron_job_service
+        .as_ref()
         .ok_or_else(|| GatewayError::internal("Cron job service not initialized"))?;
 
     // Remove old scheduler registration
@@ -110,7 +122,9 @@ pub async fn delete_job(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let svc = state.cron_job_service.as_ref()
+    let svc = state
+        .cron_job_service
+        .as_ref()
         .ok_or_else(|| GatewayError::internal("Cron job service not initialized"))?;
 
     // Remove from scheduler
@@ -137,7 +151,9 @@ pub async fn toggle_job(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let svc = state.cron_job_service.as_ref()
+    let svc = state
+        .cron_job_service
+        .as_ref()
         .ok_or_else(|| GatewayError::internal("Cron job service not initialized"))?;
 
     let enabled = svc.toggle_enabled(&id).await?;
@@ -168,7 +184,9 @@ pub async fn run_job(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let svc = state.cron_job_service.as_ref()
+    let svc = state
+        .cron_job_service
+        .as_ref()
         .ok_or_else(|| GatewayError::internal("Cron job service not initialized"))?;
 
     let job = svc.get_job(&id).await?;
@@ -183,15 +201,22 @@ pub async fn run_job(
         let result = execute_cron_job(&state_clone, &job_clone).await;
         match result {
             Ok(output) => {
-                let _ = svc_clone.record_run_complete(&run_id_for_spawn, "success", &output, "").await;
+                let _ = svc_clone
+                    .record_run_complete(&run_id_for_spawn, "success", &output, "")
+                    .await;
             }
             Err(e) => {
-                let _ = svc_clone.record_run_complete(&run_id_for_spawn, "failed", "", &e.to_string()).await;
+                let _ = svc_clone
+                    .record_run_complete(&run_id_for_spawn, "failed", "", &e.to_string())
+                    .await;
             }
         }
     });
 
-    info!("Manually triggered cron job {} by user {}", id, user.user_id);
+    info!(
+        "Manually triggered cron job {} by user {}",
+        id, user.user_id
+    );
     Ok(Json(serde_json::json!({
         "success": true,
         "run_id": run_id,
@@ -207,11 +232,15 @@ pub async fn list_runs(
 ) -> Result<Json<Vec<serde_json::Value>>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let svc = state.cron_job_service.as_ref()
+    let svc = state
+        .cron_job_service
+        .as_ref()
         .ok_or_else(|| GatewayError::internal("Cron job service not initialized"))?;
 
     let runs = svc.list_runs(&id, 50).await?;
-    Ok(Json(runs.into_iter().map(|r| serde_json::json!(r)).collect()))
+    Ok(Json(
+        runs.into_iter().map(|r| serde_json::json!(r)).collect(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -222,9 +251,13 @@ async fn register_job_with_scheduler(
     state: &Arc<AppState>,
     job: &crate::services::cron_job_service::CronJob,
 ) -> Result<(), GatewayError> {
-    let scheduler = state.workflow_cron_scheduler.as_ref()
+    let scheduler = state
+        .workflow_cron_scheduler
+        .as_ref()
         .ok_or_else(|| GatewayError::internal("Cron scheduler not initialized"))?;
-    let svc = state.cron_job_service.as_ref()
+    let svc = state
+        .cron_job_service
+        .as_ref()
         .ok_or_else(|| GatewayError::internal("Cron job service not initialized"))?;
 
     // Build cron expression for tokio-cron-scheduler
@@ -238,9 +271,7 @@ async fn register_job_with_scheduler(
             parse_every_to_cron(&job.schedule_expr)
                 .ok_or_else(|| GatewayError::bad_request("Invalid interval expression"))?
         }
-        crate::services::cron_job_service::ScheduleType::Cron => {
-            job.schedule_expr.clone()
-        }
+        crate::services::cron_job_service::ScheduleType::Cron => job.schedule_expr.clone(),
     };
 
     let job_id = job.id.clone();
@@ -252,7 +283,9 @@ async fn register_job_with_scheduler(
         let job = job_clone.clone();
         Box::pin(async move {
             let svc = state.cron_job_service.as_ref();
-            if svc.is_none() { return; }
+            if svc.is_none() {
+                return;
+            }
             let svc = svc.unwrap();
 
             // 🆕 FIX (P0): Re-read latest run_count from DB before checking max_runs
@@ -260,7 +293,10 @@ async fn register_job_with_scheduler(
             let refreshed_job = match svc.get_job(&job.id).await {
                 Ok(j) => j,
                 Err(e) => {
-                    warn!("Failed to refresh job {} state before execution: {}", job.id, e);
+                    warn!(
+                        "Failed to refresh job {} state before execution: {}",
+                        job.id, e
+                    );
                     return;
                 }
             };
@@ -268,7 +304,10 @@ async fn register_job_with_scheduler(
             // 🆕 FIX (P0): Check max_runs using latest DB state
             if let Some(max) = refreshed_job.max_runs {
                 if refreshed_job.run_count >= max {
-                    info!("Cron job {} reached max runs ({} / {}), disabling", job.id, refreshed_job.run_count, max);
+                    info!(
+                        "Cron job {} reached max runs ({} / {}), disabling",
+                        job.id, refreshed_job.run_count, max
+                    );
                     let _ = svc.disable_job(&job.id).await;
                     // Remove from scheduler to prevent further triggers
                     if let Some(old_uuid) = svc.get_scheduler_uuid(&job.id).await {
@@ -292,12 +331,16 @@ async fn register_job_with_scheduler(
             let result = execute_cron_job(&state, &job).await;
             match result {
                 Ok(output) => {
-                    let _ = svc.record_run_complete(&run_id, "success", &output, "").await;
+                    let _ = svc
+                        .record_run_complete(&run_id, "success", &output, "")
+                        .await;
                     info!("Cron job {} executed successfully", job.id);
                 }
                 Err(e) => {
                     let err_str = e.to_string();
-                    let _ = svc.record_run_complete(&run_id, "failed", "", &err_str).await;
+                    let _ = svc
+                        .record_run_complete(&run_id, "failed", "", &err_str)
+                        .await;
                     warn!("Cron job {} failed: {}", job.id, err_str);
 
                     // Exponential backoff retry (max 3 retries within 24h)
@@ -308,9 +351,17 @@ async fn register_job_with_scheduler(
                     if fail_count < 3 {
                         let retry_num = fail_count; // 0-based after this run
                         if let Err(sched_err) = svc.schedule_retry(&job.id, retry_num).await {
-                            warn!("Failed to schedule retry for cron job {}: {}", job.id, sched_err);
+                            warn!(
+                                "Failed to schedule retry for cron job {}: {}",
+                                job.id, sched_err
+                            );
                         } else {
-                            info!("Scheduled retry {} for cron job {} (backoff: {} min)", retry_num + 1, job.id, (2i64.pow(retry_num.min(5) as u32)).min(60));
+                            info!(
+                                "Scheduled retry {} for cron job {} (backoff: {} min)",
+                                retry_num + 1,
+                                job.id,
+                                (2i64.pow(retry_num.min(5) as u32)).min(60)
+                            );
                         }
                     } else {
                         warn!("Cron job {} reached max retries (3), disabling", job.id);
@@ -319,17 +370,20 @@ async fn register_job_with_scheduler(
                 }
             }
         })
-    }).map_err(|e| GatewayError::internal(format!("Failed to create cron job: {}", e)))?;
+    })
+    .map_err(|e| GatewayError::internal(format!("Failed to create cron job: {}", e)))?;
 
     let job_uuid = ts_job.guid();
-    scheduler.add(ts_job).await
-        .map_err(|e| GatewayError::internal(format!("Failed to add cron job to scheduler: {}", e)))?;
+    scheduler.add(ts_job).await.map_err(|e| {
+        GatewayError::internal(format!("Failed to add cron job to scheduler: {}", e))
+    })?;
 
     svc.track_scheduler_uuid(&job_id, job_uuid).await;
     Ok(())
 }
 
-/// Convert interval expressions like "5m", "30m", "1h", "1d" to cron expressions
+/// Convert interval expressions like "5m", "30m", "1h", "1d" to cron
+/// expressions
 fn parse_every_to_cron(expr: &str) -> Option<String> {
     let expr = expr.trim();
     if expr.len() < 2 {
@@ -365,7 +419,8 @@ async fn execute_cron_job(
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         execute_cron_job_inner(state, job),
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(Ok(output)) => {
@@ -391,8 +446,9 @@ async fn execute_cron_job_inner(
     job: &crate::services::cron_job_service::CronJob,
 ) -> Result<String, GatewayError> {
     if let Some(ref processor) = state.message_processor {
-        use beebotos_agents::communication::{Message, MessageType, PlatformType};
         use std::collections::HashMap;
+
+        use beebotos_agents::communication::{Message, MessageType, PlatformType};
 
         let platform = PlatformType::WebChat;
         let channel_id = format!("cron:{}", job.id);
@@ -408,22 +464,34 @@ async fn execute_cron_job_inner(
                 m.insert("cron_job_id".to_string(), job.id.clone());
                 m.insert("cron_job_name".to_string(), job.name.clone());
                 // 🆕 FIX (P1): Pass context_mode so Agent can decide session strategy
-                m.insert("context_mode".to_string(), match job.context_mode {
-                    crate::services::cron_job_service::ContextMode::Main => "main".to_string(),
-                    crate::services::cron_job_service::ContextMode::Isolated => "isolated".to_string(),
-                });
+                m.insert(
+                    "context_mode".to_string(),
+                    match job.context_mode {
+                        crate::services::cron_job_service::ContextMode::Main => "main".to_string(),
+                        crate::services::cron_job_service::ContextMode::Isolated => {
+                            "isolated".to_string()
+                        }
+                    },
+                );
                 m
             },
             timestamp: chrono::Utc::now(),
         };
 
-        let _ = processor.process_event(beebotos_agents::communication::channel::ChannelEvent::MessageReceived {
-            platform,
-            channel_id,
-            message,
-        }).await;
+        let _ = processor
+            .process_event(
+                beebotos_agents::communication::channel::ChannelEvent::MessageReceived {
+                    platform,
+                    channel_id,
+                    message,
+                },
+            )
+            .await;
 
-        Ok(format!("Dispatched cron job '{}' to agent system", job.name))
+        Ok(format!(
+            "Dispatched cron job '{}' to agent system",
+            job.name
+        ))
     } else {
         Err(GatewayError::internal("Message processor not available"))
     }
@@ -459,7 +527,11 @@ async fn notify_cron_result(
                     "message": msg,
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                 });
-                let channel = if job.delivery_target.is_empty() { "webchat" } else { &job.delivery_target };
+                let channel = if job.delivery_target.is_empty() {
+                    "webchat"
+                } else {
+                    &job.delivery_target
+                };
                 let _ = ws.broadcast_to_channel(channel, payload).await;
             }
         }
@@ -474,7 +546,8 @@ async fn notify_cron_result(
                     "error": error,
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                 });
-                let _ = client.post(&job.delivery_target)
+                let _ = client
+                    .post(&job.delivery_target)
                     .json(&body)
                     .timeout(std::time::Duration::from_secs(10))
                     .send()
@@ -483,7 +556,10 @@ async fn notify_cron_result(
         }
         _ => {
             // Unknown channel: log only
-            info!("Cron job {} notification to unsupported channel '{}' skipped", job.id, job.delivery_channel);
+            info!(
+                "Cron job {} notification to unsupported channel '{}' skipped",
+                job.id, job.delivery_channel
+            );
         }
     }
 
@@ -492,14 +568,19 @@ async fn notify_cron_result(
 
 /// Bulk register all enabled jobs on startup
 pub async fn register_all_enabled_jobs(state: &Arc<AppState>) -> Result<(), GatewayError> {
-    let svc = state.cron_job_service.as_ref()
+    let svc = state
+        .cron_job_service
+        .as_ref()
         .ok_or_else(|| GatewayError::internal("Cron job service not initialized"))?;
 
     let jobs = svc.get_enabled_jobs().await?;
     let mut registered = 0;
 
     for job in jobs {
-        if matches!(job.schedule_type, crate::services::cron_job_service::ScheduleType::At) {
+        if matches!(
+            job.schedule_type,
+            crate::services::cron_job_service::ScheduleType::At
+        ) {
             // One-shot jobs are not registered with the scheduler
             continue;
         }
@@ -537,7 +618,10 @@ pub async fn start_at_job_checker(state: Arc<AppState>, interval_secs: u64) {
                 // 🆕 FIX (P0): Check max_runs before executing one-shot at-job
                 if let Some(max) = job.max_runs {
                     if job.run_count >= max {
-                        info!("At-job {} reached max runs ({} / {}), disabling", job.id, job.run_count, max);
+                        info!(
+                            "At-job {} reached max runs ({} / {}), disabling",
+                            job.id, job.run_count, max
+                        );
                         let _ = svc.disable_job(&job.id).await;
                         continue;
                     }
@@ -556,11 +640,15 @@ pub async fn start_at_job_checker(state: Arc<AppState>, interval_secs: u64) {
                 let result = execute_cron_job(&state, &job).await;
                 match result {
                     Ok(output) => {
-                        let _ = svc.record_run_complete(&run_id, "success", &output, "").await;
+                        let _ = svc
+                            .record_run_complete(&run_id, "success", &output, "")
+                            .await;
                         info!("At-job {} executed successfully", job.id);
                     }
                     Err(e) => {
-                        let _ = svc.record_run_complete(&run_id, "failed", "", &e.to_string()).await;
+                        let _ = svc
+                            .record_run_complete(&run_id, "failed", "", &e.to_string())
+                            .await;
                         warn!("At-job {} failed: {}", job.id, e);
                     }
                 }

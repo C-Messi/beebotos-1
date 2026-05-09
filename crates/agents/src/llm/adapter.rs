@@ -4,14 +4,16 @@
 //! the new comprehensive `LLMClient`.
 
 use std::collections::HashMap;
+
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::communication::{LLMCallInterface, Message as CommMessage};
-use crate::llm::{LLMClient, Message as LLMMessage, Role};
 use crate::error::Result as AgentResult;
+use crate::llm::{LLMClient, Message as LLMMessage, Role};
 
-/// Adapter that wraps the new LLMClient to implement the legacy LLMCallInterface
+/// Adapter that wraps the new LLMClient to implement the legacy
+/// LLMCallInterface
 pub struct LLMClientAdapter {
     client: LLMClient,
 }
@@ -65,7 +67,10 @@ impl LLMCallInterface for LLMClientAdapter {
             if let Some(tools_json) = ctx.get("tools_json") {
                 prompt.push_str("\n\n--- AVAILABLE TOOLS ---\n");
                 prompt.push_str(tools_json);
-                prompt.push_str("\n\nWhen a tool can answer the request, output ONLY: SKILL:<tool_name>\nDo NOT explain or analyze.");
+                prompt.push_str(
+                    "\n\nWhen a tool can answer the request, output ONLY: SKILL:<tool_name>\nDo \
+                     NOT explain or analyze.",
+                );
             }
         }
 
@@ -104,7 +109,10 @@ impl LLMCallInterface for LLMClientAdapter {
             .map(|m| m.content)
             .unwrap_or_default();
 
-        let rx = self.client.chat_stream(&last_msg).await
+        let rx = self
+            .client
+            .chat_stream(&last_msg)
+            .await
             .map_err(|e| crate::error::AgentError::Execution(e.to_string()))?;
 
         Ok(rx)
@@ -121,7 +129,8 @@ impl LLMCallInterface for LLMClientAdapter {
         context: Option<HashMap<String, String>>,
     ) -> AgentResult<String> {
         // Preserve message roles by separating system context from user query.
-        // System messages become the prompt prefix; the last user message is the actual input.
+        // System messages become the prompt prefix; the last user message is the actual
+        // input.
         let mut system_parts = Vec::new();
         let mut user_parts = Vec::new();
         for m in &messages {
@@ -156,7 +165,10 @@ impl LLMCallInterface for LLMClientAdapter {
             .collect();
 
         // 🆕 FIX: Pass max_tokens and tool_choice from context
-        let max_tokens = context.as_ref().and_then(|c| c.get("max_tokens")).and_then(|s| s.parse::<u32>().ok());
+        let max_tokens = context
+            .as_ref()
+            .and_then(|c| c.get("max_tokens"))
+            .and_then(|s| s.parse::<u32>().ok());
         let tool_choice = context.as_ref().and_then(|c| c.get("tool_choice")).cloned();
 
         let result = self
@@ -169,7 +181,8 @@ impl LLMCallInterface for LLMClientAdapter {
     }
 }
 
-/// Adapter that bridges communication::ToolDefinition to llm::traits::ToolHandler
+/// Adapter that bridges communication::ToolDefinition to
+/// llm::traits::ToolHandler
 struct NativeToolAdapter {
     name: String,
     description: String,
@@ -191,8 +204,8 @@ impl crate::llm::ToolHandler for NativeToolAdapter {
 
     async fn execute(&self, _arguments: &str) -> Result<String, String> {
         Err(format!(
-            "NativeToolAdapter for '{}' is a definition-only stub. \
-             Real tool execution must be provided by the caller.",
+            "NativeToolAdapter for '{}' is a definition-only stub. Real tool execution must be \
+             provided by the caller.",
             self.name
         ))
     }
@@ -204,7 +217,8 @@ pub struct LegacyLLMClientBuilder;
 impl LegacyLLMClientBuilder {
     /// Build from environment (Kimi)
     pub async fn from_env() -> AgentResult<Box<dyn LLMCallInterface>> {
-        let client = crate::llm::create_kimi_client().await
+        let client = crate::llm::create_kimi_client()
+            .await
             .map_err(|e| crate::error::AgentError::InvalidConfig(e.to_string()))?;
 
         Ok(Box::new(LLMClientAdapter::new(client)))

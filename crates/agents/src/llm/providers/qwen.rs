@@ -5,7 +5,6 @@
 
 use async_trait::async_trait;
 use reqwest::header::{self, HeaderMap, HeaderValue};
-
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
@@ -38,7 +37,7 @@ impl Default for QwenConfig {
 impl QwenConfig {
     pub fn from_env() -> Result<Self, String> {
         use std::env;
-        
+
         let api_key = env::var("QWEN_API_KEY")
             .or_else(|_| env::var("DASHSCOPE_API_KEY"))
             .map_err(|_| "QWEN_API_KEY or DASHSCOPE_API_KEY not set".to_string())?;
@@ -46,8 +45,8 @@ impl QwenConfig {
         let base_url = env::var("QWEN_BASE_URL")
             .unwrap_or_else(|_| "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string());
 
-        let default_model = env::var("QWEN_DEFAULT_MODEL")
-            .unwrap_or_else(|_| qwen_models::QWEN_MAX.to_string());
+        let default_model =
+            env::var("QWEN_DEFAULT_MODEL").unwrap_or_else(|_| qwen_models::QWEN_MAX.to_string());
 
         Ok(Self {
             base_url,
@@ -87,7 +86,10 @@ impl ProviderConfig for QwenConfig {
             HeaderValue::from_str(&format!("Bearer {}", self.api_key))
                 .map_err(|e| LLMError::InvalidRequest(e.to_string()))?,
         );
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
         Ok(headers)
     }
 }
@@ -118,7 +120,10 @@ impl QwenProvider {
             max_output_tokens: 8_192,
         };
 
-        info!("Qwen provider initialized with model: {}", config.default_model);
+        info!(
+            "Qwen provider initialized with model: {}",
+            config.default_model
+        );
 
         Ok(Self {
             config,
@@ -129,27 +134,29 @@ impl QwenProvider {
     }
 
     pub fn from_env() -> Result<Self, LLMError> {
-        let config = QwenConfig::from_env()
-            .map_err(|e| LLMError::InvalidRequest(e))?;
+        let config = QwenConfig::from_env().map_err(|e| LLMError::InvalidRequest(e))?;
         Self::new(config)
     }
 }
 
 #[async_trait]
 impl LLMProvider for QwenProvider {
-    fn name(&self) -> &str { "qwen" }
-    fn capabilities(&self) -> ProviderCapabilities { self.capabilities.clone() }
+    fn name(&self) -> &str {
+        "qwen"
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.capabilities.clone()
+    }
 
     async fn complete(&self, request: LLMRequest) -> LLMResult<LLMResponse> {
         debug!("Sending completion request to Qwen");
 
         let body = self.request_builder.build_body(request);
-        let response = self.http_client.execute_with_retry(
-            &self.config,
-            "/chat/completions",
-            body
-        ).await?;
-        
+        let response = self
+            .http_client
+            .execute_with_retry(&self.config, "/chat/completions", body)
+            .await?;
+
         let llm_response: LLMResponse = response
             .json()
             .await
@@ -166,12 +173,11 @@ impl LLMProvider for QwenProvider {
         request.config.stream = Some(true);
 
         let body = self.request_builder.build_body(request);
-        let response = self.http_client.stream_with_retry(
-            &self.config,
-            "/chat/completions",
-            body
-        ).await?;
-        
+        let response = self
+            .http_client
+            .stream_with_retry(&self.config, "/chat/completions", body)
+            .await?;
+
         let mut stream = response.bytes_stream();
 
         tokio::spawn(async move {
@@ -181,9 +187,13 @@ impl LLMProvider for QwenProvider {
                         for line in String::from_utf8_lossy(&bytes).lines() {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
-                                if data == "[DONE]" { break; }
+                                if data == "[DONE]" {
+                                    break;
+                                }
                                 if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
-                                    if tx.send(chunk).await.is_err() { return; }
+                                    if tx.send(chunk).await.is_err() {
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -199,7 +209,8 @@ impl LLMProvider for QwenProvider {
     }
 
     async fn health_check(&self) -> LLMResult<()> {
-        let _response = self.http_client
+        let _response = self
+            .http_client
             .get_with_retry(&self.config, "/models")
             .await?;
         Ok(())
@@ -208,38 +219,68 @@ impl LLMProvider for QwenProvider {
     async fn list_models(&self) -> LLMResult<Vec<ModelInfo>> {
         Ok(vec![
             ModelInfo {
-                id: qwen_models::QWEN_MAX.to_string(), name: "Qwen-Max".to_string(),
+                id: qwen_models::QWEN_MAX.to_string(),
+                name: "Qwen-Max".to_string(),
                 description: Some("Best performance, 128K context".to_string()),
-                context_window: 128_000, max_tokens: 8_192,
-                capabilities: ModelCapabilities { vision: false, function_calling: true, json_mode: true },
+                context_window: 128_000,
+                max_tokens: 8_192,
+                capabilities: ModelCapabilities {
+                    vision: false,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.02, 0.06)),
             },
             ModelInfo {
-                id: qwen_models::QWEN_PLUS.to_string(), name: "Qwen-Plus".to_string(),
+                id: qwen_models::QWEN_PLUS.to_string(),
+                name: "Qwen-Plus".to_string(),
                 description: Some("Balanced performance and cost".to_string()),
-                context_window: 128_000, max_tokens: 8_192,
-                capabilities: ModelCapabilities { vision: false, function_calling: true, json_mode: true },
+                context_window: 128_000,
+                max_tokens: 8_192,
+                capabilities: ModelCapabilities {
+                    vision: false,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.008, 0.02)),
             },
             ModelInfo {
-                id: qwen_models::QWEN_TURBO.to_string(), name: "Qwen-Turbo".to_string(),
+                id: qwen_models::QWEN_TURBO.to_string(),
+                name: "Qwen-Turbo".to_string(),
                 description: Some("Fast and cost-effective".to_string()),
-                context_window: 128_000, max_tokens: 8_192,
-                capabilities: ModelCapabilities { vision: false, function_calling: true, json_mode: true },
+                context_window: 128_000,
+                max_tokens: 8_192,
+                capabilities: ModelCapabilities {
+                    vision: false,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.003, 0.006)),
             },
             ModelInfo {
-                id: qwen_models::QWEN_VL_MAX.to_string(), name: "Qwen-VL-Max".to_string(),
+                id: qwen_models::QWEN_VL_MAX.to_string(),
+                name: "Qwen-VL-Max".to_string(),
                 description: Some("Vision-language model".to_string()),
-                context_window: 32_000, max_tokens: 2_048,
-                capabilities: ModelCapabilities { vision: true, function_calling: true, json_mode: true },
+                context_window: 32_000,
+                max_tokens: 2_048,
+                capabilities: ModelCapabilities {
+                    vision: true,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.02, 0.02)),
             },
             ModelInfo {
-                id: qwen_models::QWEN_CODER_PLUS.to_string(), name: "Qwen-Coder-Plus".to_string(),
+                id: qwen_models::QWEN_CODER_PLUS.to_string(),
+                name: "Qwen-Coder-Plus".to_string(),
                 description: Some("Specialized for coding".to_string()),
-                context_window: 128_000, max_tokens: 8_192,
-                capabilities: ModelCapabilities { vision: false, function_calling: true, json_mode: true },
+                context_window: 128_000,
+                max_tokens: 8_192,
+                capabilities: ModelCapabilities {
+                    vision: false,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.008, 0.02)),
             },
         ])

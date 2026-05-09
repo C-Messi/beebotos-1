@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use beebotos_agents::skills::tool_set::{FileReadTool, ProcessExecTool, SkillTool};
 use beebotos_agents::skills::{
     CodeSkillExecutor, KnowledgeSkillExecutor, SkillDiscovery, SkillKind,
 };
-use beebotos_agents::skills::tool_set::{FileReadTool, ProcessExecTool, SkillTool};
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -34,10 +34,17 @@ impl beebotos_agents::communication::LLMCallInterface for MockLLM {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let hello_py = self.skill_dir.join("hello.py").to_string_lossy().to_string();
+        let hello_py = self
+            .skill_dir
+            .join("hello.py")
+            .to_string_lossy()
+            .to_string();
 
         // Simulate LLM deciding to use process_exec on first call
-        if prompt.contains("hello") && prompt.contains("process_exec") && !prompt.contains("Observation") {
+        if prompt.contains("hello")
+            && prompt.contains("process_exec")
+            && !prompt.contains("Observation")
+        {
             Ok(format!(
                 r#"
 ACTION: process_exec
@@ -132,7 +139,11 @@ async fn test_process_exec_tool_blocks_dangerous_command() {
     let result = tool.execute(&params).await;
     assert!(result.is_err(), "Expected dangerous command to be blocked");
     let err = result.unwrap_err();
-    assert!(err.contains("blocked"), "Expected 'blocked' in error: {}", err);
+    assert!(
+        err.contains("blocked"),
+        "Expected 'blocked' in error: {}",
+        err
+    );
 }
 
 #[tokio::test]
@@ -146,18 +157,22 @@ async fn test_file_read_tool() {
     let result = tool.execute(&params).await;
     assert!(result.is_ok(), "File read failed: {:?}", result);
     let output = result.unwrap();
-    assert!(output.contains("Hello World"), "Expected skill content, got: {}", output);
+    assert!(
+        output.contains("Hello World"),
+        "Expected skill content, got: {}",
+        output
+    );
 }
 
 #[tokio::test]
 async fn test_code_skill_executor_runs_react_loop() {
     let skill_dir = project_root().join("skills/daily/hello_world");
-    let llm = Arc::new(MockLLM { skill_dir: skill_dir.clone() });
+    let llm = Arc::new(MockLLM {
+        skill_dir: skill_dir.clone(),
+    });
     let executor = CodeSkillExecutor::new(llm);
 
-    let result = executor
-        .execute(&skill_dir, "Say hello to Alice")
-        .await;
+    let result = executor.execute(&skill_dir, "Say hello to Alice").await;
 
     assert!(result.is_ok(), "Code skill execution failed: {:?}", result);
     let output = result.unwrap();
@@ -171,7 +186,9 @@ async fn test_code_skill_executor_runs_react_loop() {
 #[tokio::test]
 async fn test_knowledge_skill_executor_runs_react_loop() {
     // Use a legacy flat-file skill as knowledge skill
-    let llm = Arc::new(MockLLM { skill_dir: PathBuf::new() });
+    let llm = Arc::new(MockLLM {
+        skill_dir: PathBuf::new(),
+    });
     let executor = KnowledgeSkillExecutor::new(llm);
 
     let skill_md = project_root().join("skills/coding/python_developer.md");
@@ -179,7 +196,11 @@ async fn test_knowledge_skill_executor_runs_react_loop() {
         .execute(&skill_md, "How do I write a Python function?")
         .await;
 
-    assert!(result.is_ok(), "Knowledge skill execution failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Knowledge skill execution failed: {:?}",
+        result
+    );
     let output = result.unwrap();
     assert!(
         !output.is_empty(),

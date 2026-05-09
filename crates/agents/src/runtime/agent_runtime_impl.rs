@@ -7,10 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
-use tokio::sync::{broadcast, mpsc, RwLock};
-use tracing::{error, info, warn, trace};
-
 use beebotos_gateway_lib::agent_runtime::{
     AgentCapability, AgentConfig as GatewayAgentConfig, AgentEvent as GatewayAgentEvent,
     AgentHandle, AgentId, AgentRuntime, AgentState as GatewayAgentState,
@@ -19,6 +15,9 @@ use beebotos_gateway_lib::agent_runtime::{
 };
 use beebotos_gateway_lib::error::GatewayError;
 use beebotos_gateway_lib::Result;
+use chrono::Utc;
+use tokio::sync::{broadcast, mpsc, RwLock};
+use tracing::{error, info, trace, warn};
 
 use crate::kernel_integration::KernelAgentBuilder;
 use crate::state_manager::{AgentState, AgentStateManager, AgentStateRecord, StateTransition};
@@ -71,10 +70,10 @@ struct AgentTaskHandle {
 
 impl GatewayAgentRuntime {
     /// Create new gateway agent runtime
-    /// 
-    /// 🔒 P0 FIX: Automatically recovers agents from persistent state on startup.
-    /// This ensures that agents survive gateway restarts.
-    /// 
+    ///
+    /// 🔒 P0 FIX: Automatically recovers agents from persistent state on
+    /// startup. This ensures that agents survive gateway restarts.
+    ///
     /// 🟢 P2 FIX: Initializes metrics collector for observability.
     pub async fn new(
         kernel: Option<Arc<beebotos_kernel::Kernel>>,
@@ -94,7 +93,7 @@ impl GatewayAgentRuntime {
         };
 
         let (event_tx, _) = broadcast::channel(1000);
-        
+
         // 🟢 P2 FIX: Initialize metrics collector
         let metrics = Arc::new(crate::metrics::MetricsCollector::new());
         info!("✅ Metrics collector initialized");
@@ -102,26 +101,33 @@ impl GatewayAgentRuntime {
         // 🟢 P2 FIX: Initialize memory search system
         let memory_db_path = std::path::PathBuf::from("data/memory_search.db");
 
-        let memory_system = match crate::memory::HybridSearchSqlite::default_with_path(&memory_db_path) {
-            Ok(engine) => {
-                info!("✅ Memory search system initialized at {:?}", memory_db_path);
-                Some(Arc::new(engine) as Arc<dyn crate::memory::MemorySearch>)
-            }
-            Err(e) => {
-                warn!("❌ Failed to initialize memory search system: {}", e);
-                None
-            }
-        };
+        let memory_system =
+            match crate::memory::HybridSearchSqlite::default_with_path(&memory_db_path) {
+                Ok(engine) => {
+                    info!(
+                        "✅ Memory search system initialized at {:?}",
+                        memory_db_path
+                    );
+                    Some(Arc::new(engine) as Arc<dyn crate::memory::MemorySearch>)
+                }
+                Err(e) => {
+                    warn!("❌ Failed to initialize memory search system: {}", e);
+                    None
+                }
+            };
 
         // 🆕 PLANNING FIX: Initialize planning components
         let planning_engine = Arc::new(crate::planning::PlanningEngine::new());
         let plan_executor = Arc::new(crate::planning::PlanExecutor::new());
-        let replanner = Arc::new(crate::planning::ConditionRePlanner::new()) as Arc<dyn crate::planning::RePlanner>;
+        let replanner = Arc::new(crate::planning::ConditionRePlanner::new())
+            as Arc<dyn crate::planning::RePlanner>;
         info!("✅ Planning components initialized");
 
-        // 🟢 P2 FIX: Initialize skill registry (skills can be registered at runtime via API)
+        // 🟢 P2 FIX: Initialize skill registry (skills can be registered at runtime via
+        // API)
         let skill_registry = Arc::new(crate::skills::SkillRegistry::new());
-        // 🆕 FIX: Auto-load markdown skills from skills/ directory so registry is never empty.
+        // 🆕 FIX: Auto-load markdown skills from skills/ directory so registry is never
+        // empty.
         crate::skills::builtin_loader::load_builtin_skills(&skill_registry).await;
         info!("✅ Skill registry initialized");
 
@@ -145,25 +151,25 @@ impl GatewayAgentRuntime {
         Ok(runtime)
     }
 
-    /// 🆕 Recover agents after all runtime dependencies (including MCP manager) are configured.
-    /// Call this after with_mcp() and with_skill_registry() to ensure recovered agents
-    /// have access to MCP tools.
+    /// 🆕 Recover agents after all runtime dependencies (including MCP manager)
+    /// are configured. Call this after with_mcp() and with_skill_registry()
+    /// to ensure recovered agents have access to MCP tools.
     pub async fn recover_agents_now(&self) -> Result<()> {
         self.recover_agents().await
     }
-    
+
     /// 🟢 P2 FIX: Get metrics collector reference
     pub fn metrics(&self) -> &Arc<crate::metrics::MetricsCollector> {
         &self.metrics
     }
-    
+
     /// 🟢 P2 FIX: Export metrics in Prometheus format
     pub fn export_metrics(&self) -> String {
         self.metrics.export_prometheus()
     }
 
-    /// 🟢 P2 FIX: Inject an externally prepared skill registry (e.g. one that has
-    /// already had built-in skills registered).
+    /// 🟢 P2 FIX: Inject an externally prepared skill registry (e.g. one that
+    /// has already had built-in skills registered).
     pub fn with_skill_registry(mut self, registry: Arc<crate::skills::SkillRegistry>) -> Self {
         self.skill_registry = Some(registry);
         self
@@ -176,9 +182,10 @@ impl GatewayAgentRuntime {
     }
 
     /// 🔒 P0 FIX: Recover agents from persistent state
-    /// 
-    /// On gateway restart, this method restores all agents that were in a 
-    /// non-terminal state (not Stopped or Error) and respawns them in the kernel.
+    ///
+    /// On gateway restart, this method restores all agents that were in a
+    /// non-terminal state (not Stopped or Error) and respawns them in the
+    /// kernel.
     async fn recover_agents(&self) -> Result<()> {
         info!("Starting agent recovery from persistent state...");
 
@@ -190,13 +197,16 @@ impl GatewayAgentRuntime {
 
         // Get all agents that need recovery
         let agents_to_recover = self.state_manager.list_agents().await;
-        
+
         if agents_to_recover.is_empty() {
             info!("No agents to recover");
             return Ok(());
         }
 
-        info!("Found {} agents in state manager, checking for recovery...", agents_to_recover.len());
+        info!(
+            "Found {} agents in state manager, checking for recovery...",
+            agents_to_recover.len()
+        );
 
         let mut recovered_count = 0;
         let mut failed_count = 0;
@@ -215,10 +225,14 @@ impl GatewayAgentRuntime {
                     failed_count += 1;
                     warn!("Failed to recover agent {}: {}", agent_id, e);
                     // Mark agent as in error state
-                    let _ = self.state_manager
-                        .transition(&agent_id, StateTransition::Error {
-                            message: format!("Recovery failed: {}", e),
-                        })
+                    let _ = self
+                        .state_manager
+                        .transition(
+                            &agent_id,
+                            StateTransition::Error {
+                                message: format!("Recovery failed: {}", e),
+                            },
+                        )
                         .await;
                 }
             }
@@ -226,7 +240,8 @@ impl GatewayAgentRuntime {
 
         info!(
             "Agent recovery complete: {} recovered, {} failed, {} skipped",
-            recovered_count, failed_count, 
+            recovered_count,
+            failed_count,
             agents_to_recover.len() - recovered_count - failed_count
         );
 
@@ -234,15 +249,21 @@ impl GatewayAgentRuntime {
     }
 
     /// 🔒 P0 FIX: Recover a single agent
-    /// 
+    ///
     /// Returns:
     /// - Ok(true) if agent was recovered
     /// - Ok(false) if agent is in terminal state and doesn't need recovery
     /// - Err if recovery failed
     async fn recover_agent(&self, agent_id: &str) -> Result<bool> {
-        let state = self.state_manager.get_state(agent_id).await
+        let state = self
+            .state_manager
+            .get_state(agent_id)
+            .await
             .map_err(|e| GatewayError::state(format!("Failed to get state: {}", e)))?;
-        let record = self.state_manager.get_record(agent_id).await
+        let record = self
+            .state_manager
+            .get_record(agent_id)
+            .await
             .map_err(|e| GatewayError::state(format!("Failed to get record: {}", e)))?;
 
         // Don't recover agents in terminal states
@@ -266,16 +287,22 @@ impl GatewayAgentRuntime {
         let agent_config = self.reconstruct_config_from_record(&record).await?;
 
         // Only transition to Initializing if agent is in Registered state.
-        // If already Idle/Working/Paused, we can respawn directly without re-initializing.
+        // If already Idle/Working/Paused, we can respawn directly without
+        // re-initializing.
         match state {
             AgentState::Registered => {
                 self.state_manager
                     .transition(agent_id, StateTransition::Start)
                     .await
-                    .map_err(|e| GatewayError::agent(format!("Failed to transition agent state: {}", e)))?;
+                    .map_err(|e| {
+                        GatewayError::agent(format!("Failed to transition agent state: {}", e))
+                    })?;
             }
             AgentState::Idle | AgentState::Working { .. } | AgentState::Paused => {
-                info!("Agent {} is in {:?} state, skipping Start transition during recovery", agent_id, state);
+                info!(
+                    "Agent {} is in {:?} state, skipping Start transition during recovery",
+                    agent_id, state
+                );
             }
             _ => {}
         }
@@ -315,18 +342,26 @@ impl GatewayAgentRuntime {
             builder = builder.with_llm_interface(llm.clone());
         }
 
-        // 🆕 FIX: Rebuild skill catalog for recovered agent so it can discover and use skills
-        // 🟢 P2 OPTIMIZE: Use cached catalog if available to avoid repeated filesystem scans
+        // 🆕 FIX: Rebuild skill catalog for recovered agent so it can discover and use
+        // skills 🟢 P2 OPTIMIZE: Use cached catalog if available to avoid
+        // repeated filesystem scans
         let skill_catalog = {
             let cached = self.skill_catalog.read().await.clone();
             if let Some(catalog) = cached {
-                info!("Using cached skill catalog for recovered agent {}", agent_id);
+                info!(
+                    "Using cached skill catalog for recovered agent {}",
+                    agent_id
+                );
                 Some(catalog)
             } else {
                 let mut discovery = crate::skills::SkillDiscovery::new();
                 discovery.add_path("skills");
                 let metas = discovery.scan().await;
-                info!("SkillDiscovery scanned {} skills for recovered agent {}", metas.len(), agent_id);
+                info!(
+                    "SkillDiscovery scanned {} skills for recovered agent {}",
+                    metas.len(),
+                    agent_id
+                );
                 for m in &metas {
                     info!("  - skill: {} (id={}, kind={:?})", m.name, m.id, m.kind);
                 }
@@ -344,7 +379,11 @@ impl GatewayAgentRuntime {
                             lines.push(format!("- {} ({}): {}", id, r.category, desc));
                         }
                     }
-                    info!("Added {} skills from registry to catalog (total {})", registered.len(), lines.len());
+                    info!(
+                        "Added {} skills from registry to catalog (total {})",
+                        registered.len(),
+                        lines.len()
+                    );
                 }
                 let catalog = if lines.is_empty() {
                     None
@@ -397,7 +436,10 @@ impl GatewayAgentRuntime {
             .insert(agent_id.to_string(), handle);
 
         // Update kernel task ID in state
-        let _ = self.state_manager.set_kernel_task_id(agent_id, task_id.0).await;
+        let _ = self
+            .state_manager
+            .set_kernel_task_id(agent_id, task_id.0)
+            .await;
 
         // Broadcast recovery event
         self.broadcast_event(GatewayAgentEvent::Started {
@@ -409,15 +451,23 @@ impl GatewayAgentRuntime {
     }
 
     /// 🔒 P0 FIX: Reconstruct agent configuration from state record
-    /// 
-    /// 🔧 FIX: Now uses persisted configuration from database instead of defaults
-    async fn reconstruct_config_from_record(&self, record: &AgentStateRecord) -> Result<AgentConfig> {
+    ///
+    /// 🔧 FIX: Now uses persisted configuration from database instead of
+    /// defaults
+    async fn reconstruct_config_from_record(
+        &self,
+        record: &AgentStateRecord,
+    ) -> Result<AgentConfig> {
         // First try to load full config from database
         if let Some(persistence) = self.state_manager.persistence() {
             match persistence.load_config(&record.agent_id).await {
                 Ok(Some(persisted_config)) => {
-                    info!("Loaded full config from database for agent {}", record.agent_id);
-                    // 🔧 FIX: Fast-sync agents table record only (avoid slow save_config during recovery)
+                    info!(
+                        "Loaded full config from database for agent {}",
+                        record.agent_id
+                    );
+                    // 🔧 FIX: Fast-sync agents table record only (avoid slow save_config during
+                    // recovery)
                     let _ = persistence.sync_agents_table(&persisted_config).await;
                     return Ok(AgentConfig {
                         id: persisted_config.agent_id,
@@ -432,30 +482,44 @@ impl GatewayAgentRuntime {
                     });
                 }
                 Ok(None) => {
-                    warn!("No persisted config found for agent {}, using metadata fallback", record.agent_id);
+                    warn!(
+                        "No persisted config found for agent {}, using metadata fallback",
+                        record.agent_id
+                    );
                 }
                 Err(e) => {
-                    warn!("Failed to load config for agent {}: {}, using metadata fallback", record.agent_id, e);
+                    warn!(
+                        "Failed to load config for agent {}: {}, using metadata fallback",
+                        record.agent_id, e
+                    );
                 }
             }
         }
 
         // Fallback: Extract configuration from metadata (legacy mode)
-        let name = record.metadata.get("name")
+        let name = record
+            .metadata
+            .get("name")
             .cloned()
             .unwrap_or_else(|| format!("recovered-agent-{}", record.agent_id));
-        
-        let version = record.metadata.get("version")
+
+        let version = record
+            .metadata
+            .get("version")
             .cloned()
             .unwrap_or_else(|| "1.0.0".to_string());
 
         // Parse capabilities from metadata if available
-        let capabilities: Vec<String> = record.metadata.get("capabilities")
+        let capabilities: Vec<String> = record
+            .metadata
+            .get("capabilities")
             .map(|c| c.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default();
 
         // Try to parse model config from metadata
-        let models = record.metadata.get("model_config")
+        let models = record
+            .metadata
+            .get("model_config")
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_else(|| crate::ModelConfig {
                 provider: "openai".to_string(),
@@ -466,7 +530,9 @@ impl GatewayAgentRuntime {
             });
 
         // Try to parse memory config from metadata
-        let memory = record.metadata.get("memory_config")
+        let memory = record
+            .metadata
+            .get("memory_config")
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_else(|| crate::MemoryConfig {
                 episodic_capacity: 1000,
@@ -476,7 +542,9 @@ impl GatewayAgentRuntime {
             });
 
         // Try to parse personality config from metadata
-        let personality = record.metadata.get("personality_config")
+        let personality = record
+            .metadata
+            .get("personality_config")
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_else(|| crate::PersonalityConfig {
                 openness: 0.5,
@@ -520,7 +588,7 @@ impl GatewayAgentRuntime {
     }
 
     /// Create with explicit state manager
-    /// 
+    ///
     /// 🟢 P2 FIX: Also initializes metrics collector.
     pub fn with_state_manager(
         state_manager: Arc<AgentStateManager>,
@@ -534,21 +602,26 @@ impl GatewayAgentRuntime {
         // 🟢 P2 FIX: Initialize memory search system
         let memory_db_path = std::path::PathBuf::from("data/memory_search.db");
 
-        let memory_system = match crate::memory::HybridSearchSqlite::default_with_path(&memory_db_path) {
-            Ok(engine) => {
-                info!("✅ Memory search system initialized at {:?}", memory_db_path);
-                Some(Arc::new(engine) as Arc<dyn crate::memory::MemorySearch>)
-            }
-            Err(e) => {
-                warn!("❌ Failed to initialize memory search system: {}", e);
-                None
-            }
-        };
+        let memory_system =
+            match crate::memory::HybridSearchSqlite::default_with_path(&memory_db_path) {
+                Ok(engine) => {
+                    info!(
+                        "✅ Memory search system initialized at {:?}",
+                        memory_db_path
+                    );
+                    Some(Arc::new(engine) as Arc<dyn crate::memory::MemorySearch>)
+                }
+                Err(e) => {
+                    warn!("❌ Failed to initialize memory search system: {}", e);
+                    None
+                }
+            };
 
         // 🆕 PLANNING FIX: Initialize planning components
         let planning_engine = Arc::new(crate::planning::PlanningEngine::new());
         let plan_executor = Arc::new(crate::planning::PlanExecutor::new());
-        let replanner = Arc::new(crate::planning::ConditionRePlanner::new()) as Arc<dyn crate::planning::RePlanner>;
+        let replanner = Arc::new(crate::planning::ConditionRePlanner::new())
+            as Arc<dyn crate::planning::RePlanner>;
         info!("✅ Planning components initialized");
 
         // 🟢 P2 FIX: Initialize skill registry
@@ -660,9 +733,10 @@ impl AgentRuntime for GatewayAgentRuntime {
         let agent_id = gateway_config.id.clone();
 
         info!(agent_id = %agent_id, "Spawning agent via GatewayAgentRuntime");
-        
+
         // 🟢 P2 FIX: Record metric
-        self.metrics.record_session_started(&agent_id, "agent_spawn");
+        self.metrics
+            .record_session_started(&agent_id, "agent_spawn");
 
         // Check if agent already exists
         if self.agent_tasks.read().await.contains_key(&agent_id) {
@@ -675,11 +749,16 @@ impl AgentRuntime for GatewayAgentRuntime {
         // Convert config
         let agent_config = self.convert_config(&gateway_config);
 
-        // 🔧 FIX: If agent exists in state_manager but not in active tasks (e.g. stale DB record
-        // in Error state that was skipped during recovery), unregister it so we can respawn.
+        // 🔧 FIX: If agent exists in state_manager but not in active tasks (e.g. stale
+        // DB record in Error state that was skipped during recovery),
+        // unregister it so we can respawn.
         match self.state_manager.get_state(&agent_id).await {
             Ok(_) if !self.agent_tasks.read().await.contains_key(&agent_id) => {
-                warn!("Agent {} exists in state_manager but not in active tasks, unregistering stale record", agent_id);
+                warn!(
+                    "Agent {} exists in state_manager but not in active tasks, unregistering \
+                     stale record",
+                    agent_id
+                );
                 let _ = self.state_manager.unregister_agent(&agent_id).await;
                 if let Some(persistence) = self.state_manager.persistence() {
                     let _ = persistence.delete_record(&agent_id).await;
@@ -692,14 +771,20 @@ impl AgentRuntime for GatewayAgentRuntime {
         let mut metadata = HashMap::new();
         metadata.insert("name".to_string(), gateway_config.name.clone());
         metadata.insert("version".to_string(), gateway_config.version.clone());
-        
+
         // 🔧 FIX: Store full config in metadata for recovery
-        metadata.insert("model_config".to_string(), 
-            serde_json::to_string(&agent_config.models).unwrap_or_default());
-        metadata.insert("memory_config".to_string(), 
-            serde_json::to_string(&agent_config.memory).unwrap_or_default());
-        metadata.insert("personality_config".to_string(), 
-            serde_json::to_string(&agent_config.personality).unwrap_or_default());
+        metadata.insert(
+            "model_config".to_string(),
+            serde_json::to_string(&agent_config.models).unwrap_or_default(),
+        );
+        metadata.insert(
+            "memory_config".to_string(),
+            serde_json::to_string(&agent_config.memory).unwrap_or_default(),
+        );
+        metadata.insert(
+            "personality_config".to_string(),
+            serde_json::to_string(&agent_config.personality).unwrap_or_default(),
+        );
 
         self.state_manager
             .register_agent(&agent_id, metadata)
@@ -720,7 +805,7 @@ impl AgentRuntime for GatewayAgentRuntime {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
-            
+
             if let Err(e) = persistence.save_config(&persisted_config).await {
                 warn!("Failed to save agent config to database: {}", e);
                 // Continue even if config save fails
@@ -742,8 +827,9 @@ impl AgentRuntime for GatewayAgentRuntime {
                 .with_permission("planning:execute")
                 .with_permission("skill:call");
 
-            // 🆕 FIX: Build skill catalog from SkillDiscovery for global LLM context injection
-            // 🟢 P2 OPTIMIZE: Use cached catalog if available to avoid repeated filesystem scans
+            // 🆕 FIX: Build skill catalog from SkillDiscovery for global LLM context
+            // injection 🟢 P2 OPTIMIZE: Use cached catalog if available to
+            // avoid repeated filesystem scans
             let skill_catalog = {
                 let cached = self.skill_catalog.read().await.clone();
                 if let Some(catalog) = cached {
@@ -753,7 +839,11 @@ impl AgentRuntime for GatewayAgentRuntime {
                     let mut discovery = crate::skills::SkillDiscovery::new();
                     discovery.add_path("skills");
                     let metas = discovery.scan().await;
-                    info!("SkillDiscovery scanned {} skills for agent {}", metas.len(), agent_id);
+                    info!(
+                        "SkillDiscovery scanned {} skills for agent {}",
+                        metas.len(),
+                        agent_id
+                    );
                     for m in &metas {
                         info!("  - skill: {} (id={}, kind={:?})", m.name, m.id, m.kind);
                     }
@@ -771,7 +861,11 @@ impl AgentRuntime for GatewayAgentRuntime {
                                 lines.push(format!("- {} ({}): {}", id, r.category, desc));
                             }
                         }
-                        info!("Added {} skills from registry to catalog (total {})", registered.len(), lines.len());
+                        info!(
+                            "Added {} skills from registry to catalog (total {})",
+                            registered.len(),
+                            lines.len()
+                        );
                     }
                     let catalog = if lines.is_empty() {
                         None
@@ -832,13 +926,10 @@ impl AgentRuntime for GatewayAgentRuntime {
                 builder = builder.with_mcp(mcp.clone());
             }
 
-            let (task_id, task_sender) = builder
-                .spawn()
-                .await
-                .map_err(|e| {
-                    error!("❌ builder.spawn() failed for agent {}: {}", agent_id, e);
-                    GatewayError::agent(format!("Failed to spawn agent: {}", e))
-                })?;
+            let (task_id, task_sender) = builder.spawn().await.map_err(|e| {
+                error!("❌ builder.spawn() failed for agent {}: {}", agent_id, e);
+                GatewayError::agent(format!("Failed to spawn agent: {}", e))
+            })?;
 
             AgentTaskHandle {
                 task_sender,
@@ -938,7 +1029,8 @@ impl AgentRuntime for GatewayAgentRuntime {
         // Create task
         let mut parameters = HashMap::new();
 
-        // 🟢 P1 FIX: Extract session metadata from task input and inject into parameters
+        // 🟢 P1 FIX: Extract session metadata from task input and inject into
+        // parameters
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input.to_string()) {
             if let Some(session_id) = json.get("session_id").and_then(|v| v.as_str()) {
                 parameters.insert("session_id".to_string(), session_id.to_string());
@@ -988,8 +1080,9 @@ impl AgentRuntime for GatewayAgentRuntime {
         match result {
             Ok(task_result) => {
                 // Record success metric
-                self.metrics.record_task_completed(agent_id, &task.task_type, duration_ms);
-                
+                self.metrics
+                    .record_task_completed(agent_id, &task.task_type, duration_ms);
+
                 Ok(TaskResult {
                     success: true,
                     output: serde_json::to_value(&task_result.output)
@@ -1000,8 +1093,9 @@ impl AgentRuntime for GatewayAgentRuntime {
             }
             Err(e) => {
                 // Record failure metric
-                self.metrics.record_task_failed(agent_id, &task.task_type, "execution_error");
-                
+                self.metrics
+                    .record_task_failed(agent_id, &task.task_type, "execution_error");
+
                 Ok(TaskResult {
                     success: false,
                     output: serde_json::Value::Null,

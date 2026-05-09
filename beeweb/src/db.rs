@@ -1,12 +1,15 @@
 //! SQLite persistent storage for BeeWeb Update Server
 
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
+use sqlx::sqlite::SqlitePool;
+use sqlx::Row;
+
 use crate::models::{
     PackageInfo, Platform, ReleaseRecord, SemVer, UpdateMetadata, UpdateMetricRecord,
     UpdatePriority, UpdateStatus, VersionInfo,
 };
-use chrono::{DateTime, Utc};
-use sqlx::{sqlite::SqlitePool, Row};
-use std::collections::HashMap;
 
 /// Database storage backend
 #[derive(Clone, Debug)]
@@ -79,7 +82,8 @@ impl DbStorage {
     pub async fn save_release(&self, record: &ReleaseRecord) -> anyhow::Result<i64> {
         let release_notes_json =
             serde_json::to_string(&record.version_info.release_notes).unwrap_or_default();
-        let metadata_json = serde_json::to_string(&record.version_info.metadata).unwrap_or_default();
+        let metadata_json =
+            serde_json::to_string(&record.version_info.metadata).unwrap_or_default();
         let mandatory = if record.version_info.mandatory { 1 } else { 0 };
         let min_sv = record
             .version_info
@@ -249,8 +253,10 @@ impl DbStorage {
                 _ => summary.in_progress_count += cnt as u64,
             }
         }
-        summary.total_count =
-            summary.success_count + summary.failure_count + summary.rollback_count + summary.in_progress_count;
+        summary.total_count = summary.success_count
+            + summary.failure_count
+            + summary.rollback_count
+            + summary.in_progress_count;
         Ok(summary)
     }
 
@@ -275,7 +281,11 @@ impl DbStorage {
         let app_name: String = row.get("app_name");
         let version_str: String = row.get("version");
         let version = SemVer::try_from(version_str.as_str()).unwrap_or_else(|_| SemVer {
-            major: 0, minor: 0, patch: 0, pre: None, build: None,
+            major: 0,
+            minor: 0,
+            patch: 0,
+            pre: None,
+            build: None,
         });
         let channel: String = row.get("channel");
         let released_at: String = row.get("released_at");
@@ -306,12 +316,10 @@ impl DbStorage {
         };
 
         // Load packages
-        let pkg_rows = sqlx::query(
-            "SELECT * FROM packages WHERE release_id = ?1"
-        )
-        .bind(release_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let pkg_rows = sqlx::query("SELECT * FROM packages WHERE release_id = ?1")
+            .bind(release_id)
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut packages = Vec::new();
         for pkg_row in pkg_rows {
@@ -322,7 +330,8 @@ impl DbStorage {
             version: version.clone(),
             released_at,
             mandatory: mandatory != 0,
-            min_supported_version: min_supported_version.and_then(|v| SemVer::try_from(v.as_str()).ok()),
+            min_supported_version: min_supported_version
+                .and_then(|v| SemVer::try_from(v.as_str()).ok()),
             priority,
             release_notes,
             packages,
@@ -374,7 +383,10 @@ impl DbStorage {
         })
     }
 
-    fn row_to_metric_record(&self, row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<UpdateMetricRecord> {
+    fn row_to_metric_record(
+        &self,
+        row: &sqlx::sqlite::SqliteRow,
+    ) -> anyhow::Result<UpdateMetricRecord> {
         let id: String = row.get("id");
         let app_name: String = row.get("app_name");
         let device_id: String = row.get("device_id");

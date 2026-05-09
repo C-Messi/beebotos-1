@@ -1,13 +1,15 @@
 //! Update client implementation for native platforms
 
-use async_trait::async_trait;
 use std::path::{Path, PathBuf};
+
+use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
 
-use crate::{
-    config::UpdateConfig,
-    error::UpdateError,
-    models::{PackageInfo, UpdateCheckRequest, UpdateCheckResponse, UpdateReportRequest, UpdateState, UpdateStatus, VersionInfo},
+use crate::config::UpdateConfig;
+use crate::error::UpdateError;
+use crate::models::{
+    PackageInfo, UpdateCheckRequest, UpdateCheckResponse, UpdateReportRequest, UpdateState,
+    UpdateStatus, VersionInfo,
 };
 
 /// Download progress callback
@@ -25,16 +27,18 @@ pub trait UpdateClient: Send + Sync {
     async fn check_update(&self) -> Result<Option<VersionInfo>, UpdateError>;
 
     /// Download update package
-    async fn download(&self, package: &PackageInfo, progress: &dyn DownloadProgress)
-        -> Result<PathBuf, UpdateError>;
+    async fn download(
+        &self,
+        package: &PackageInfo,
+        progress: &dyn DownloadProgress,
+    ) -> Result<PathBuf, UpdateError>;
 
     /// Verify package integrity and signature
     async fn verify(&self, package_path: &Path, package: &PackageInfo)
         -> Result<bool, UpdateError>;
 
     /// Install the update
-    async fn install(&self, package_path: &Path, info: &VersionInfo)
-        -> Result<(), UpdateError>;
+    async fn install(&self, package_path: &Path, info: &VersionInfo) -> Result<(), UpdateError>;
 
     /// Rollback to previous version
     async fn rollback(&self) -> Result<(), UpdateError>;
@@ -56,8 +60,8 @@ pub struct NativeUpdateClient {
 
 impl NativeUpdateClient {
     pub fn new(config: UpdateConfig) -> Result<Self, UpdateError> {
-        let mut client_builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300));
+        let mut client_builder =
+            reqwest::Client::builder().timeout(std::time::Duration::from_secs(300));
 
         if let Some(proxy) = &config.http_proxy {
             if let Ok(proxy_url) = reqwest::Proxy::all(proxy) {
@@ -71,7 +75,9 @@ impl NativeUpdateClient {
 
         let temp_dir = std::env::temp_dir().join("beebotos").join("updates");
 
-        let current_version: semver::Version = config.current_version.parse()
+        let current_version: semver::Version = config
+            .current_version
+            .parse()
             .map_err(|e: semver::Error| UpdateError::Verification(e.to_string()))?;
 
         Ok(Self {
@@ -129,11 +135,7 @@ impl NativeUpdateClient {
         };
 
         let url = format!("{}/api/v1/updates/report", self.config.server_url);
-        let _resp = self.http_client
-            .post(&url)
-            .json(&report)
-            .send()
-            .await?;
+        let _resp = self.http_client.post(&url).json(&report).send().await?;
 
         Ok(())
     }
@@ -152,11 +154,7 @@ impl UpdateClient for NativeUpdateClient {
         };
 
         let url = format!("{}/api/v1/updates/check", self.config.server_url);
-        let resp = self.http_client
-            .post(&url)
-            .json(&req)
-            .send()
-            .await?;
+        let resp = self.http_client.post(&url).json(&req).send().await?;
 
         if !resp.status().is_success() {
             return Err(UpdateError::Network(format!("HTTP {}", resp.status())));
@@ -198,7 +196,8 @@ impl UpdateClient for NativeUpdateClient {
         self.set_progress(0).await;
 
         // Sanitize package.id to prevent directory traversal
-        let safe_id = package.id
+        let safe_id = package
+            .id
             .replace('/', "_")
             .replace('\\', "_")
             .replace("..", "_");
@@ -265,9 +264,10 @@ impl UpdateClient for NativeUpdateClient {
         // Verify downloaded file size
         let final_size = tokio::fs::metadata(&temp_path).await?.len();
         if final_size != package.size {
-            return Err(UpdateError::Download(
-                format!("Size mismatch: expected {} bytes, got {}", package.size, final_size)
-            ));
+            return Err(UpdateError::Download(format!(
+                "Size mismatch: expected {} bytes, got {}",
+                package.size, final_size
+            )));
         }
 
         self.set_progress(100).await;
@@ -275,7 +275,11 @@ impl UpdateClient for NativeUpdateClient {
         Ok(temp_path)
     }
 
-    async fn verify(&self, package_path: &Path, package: &PackageInfo) -> Result<bool, UpdateError> {
+    async fn verify(
+        &self,
+        package_path: &Path,
+        package: &PackageInfo,
+    ) -> Result<bool, UpdateError> {
         self.set_state(UpdateStatus::Verifying).await;
 
         // SHA-256 hash verification
@@ -284,14 +288,18 @@ impl UpdateClient for NativeUpdateClient {
             .map_err(|e| UpdateError::Verification(format!("Invalid hash: {}", e)))?;
 
         if file_hash != expected_hash {
-            return Err(UpdateError::Verification("SHA-256 hash mismatch".to_string()));
+            return Err(UpdateError::Verification(
+                "SHA-256 hash mismatch".to_string(),
+            ));
         }
 
         // Ed25519 signature verification (if public key configured)
         if let Some(pub_key_b64) = &self.config.public_key_b64 {
             let verifier = crate::verify::SignatureVerifier::with_public_key_b64(pub_key_b64)?;
             if !verifier.verify_bytes(&file_hash, &package.signature)? {
-                return Err(UpdateError::Verification("Signature verification failed".to_string()));
+                return Err(UpdateError::Verification(
+                    "Signature verification failed".to_string(),
+                ));
             }
         }
 
@@ -336,7 +344,12 @@ impl DownloadProgress for ConsoleProgress {
         } else {
             0
         };
-        tracing::info!("Download progress: {}% ({}/{} bytes)", pct, downloaded, total);
+        tracing::info!(
+            "Download progress: {}% ({}/{} bytes)",
+            pct,
+            downloaded,
+            total
+        );
     }
 
     fn on_complete(&self, path: &Path) {

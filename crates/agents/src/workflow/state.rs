@@ -5,9 +5,10 @@
 //! Note: Uses `WorkflowInstance` and `WorkflowStatus` to avoid
 //! naming conflicts with `dag_scheduler::WorkflowInstance`.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Type alias for workflow identifiers
 pub type WorkflowId = String;
@@ -29,7 +30,10 @@ pub enum WorkflowStatus {
 impl WorkflowStatus {
     /// Check if workflow is in a terminal state
     pub fn is_terminal(&self) -> bool {
-        matches!(self, WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled)
+        matches!(
+            self,
+            WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled
+        )
     }
 
     /// Check if workflow is active
@@ -76,7 +80,13 @@ impl StepStatus {
 
     /// Check if step is terminal
     pub fn is_terminal(&self) -> bool {
-        matches!(self, StepStatus::Completed | StepStatus::Failed | StepStatus::Skipped | StepStatus::Cancelled)
+        matches!(
+            self,
+            StepStatus::Completed
+                | StepStatus::Failed
+                | StepStatus::Skipped
+                | StepStatus::Cancelled
+        )
     }
 }
 
@@ -118,13 +128,21 @@ pub struct WorkflowInstance {
 impl WorkflowInstance {
     /// Create a new workflow execution instance
     pub fn new(workflow_id: String, trigger_context: serde_json::Value) -> Self {
-        Self::new_with_id(uuid::Uuid::new_v4().to_string(), workflow_id, trigger_context)
+        Self::new_with_id(
+            uuid::Uuid::new_v4().to_string(),
+            workflow_id,
+            trigger_context,
+        )
     }
 
     /// Create a new workflow execution instance with a pre-generated ID.
-    /// This is useful when the caller needs to know the instance ID before execution starts
-    /// (e.g., for cancellation signal mapping).
-    pub fn new_with_id(id: String, workflow_id: String, trigger_context: serde_json::Value) -> Self {
+    /// This is useful when the caller needs to know the instance ID before
+    /// execution starts (e.g., for cancellation signal mapping).
+    pub fn new_with_id(
+        id: String,
+        workflow_id: String,
+        trigger_context: serde_json::Value,
+    ) -> Self {
         Self {
             id,
             workflow_id,
@@ -192,7 +210,11 @@ impl WorkflowInstance {
         if self.step_states.is_empty() {
             return 0.0;
         }
-        let terminal = self.step_states.values().filter(|s| s.status.is_terminal()).count();
+        let terminal = self
+            .step_states
+            .values()
+            .filter(|s| s.status.is_terminal())
+            .count();
         (terminal as f32 / self.step_states.len() as f32) * 100.0
     }
 }
@@ -285,7 +307,8 @@ mod tests {
 
     #[test]
     fn test_workflow_instance_lifecycle() {
-        let mut instance = WorkflowInstance::new("test_workflow".to_string(), serde_json::Value::Null);
+        let mut instance =
+            WorkflowInstance::new("test_workflow".to_string(), serde_json::Value::Null);
         assert_eq!(instance.status, WorkflowStatus::Pending);
 
         instance.mark_running();

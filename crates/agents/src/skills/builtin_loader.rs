@@ -6,7 +6,8 @@
 //!
 //! 🆕 FIX: Now parses deep markdown sections (Prompt Template, Examples,
 //! Capabilities) so high-quality skills actually deliver their full value.
-//! 🆕 FIX: Supports both directory-based skills (SKILL.md) and legacy flat .md files.
+//! 🆕 FIX: Supports both directory-based skills (SKILL.md) and legacy flat .md
+//! files.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -67,7 +68,8 @@ fn parse_capabilities(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// 🆕 SKILL MATCHING V2: Extract bullet-point examples from an examples text block.
+/// 🆕 SKILL MATCHING V2: Extract bullet-point examples from an examples text
+/// block.
 fn parse_examples(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|line| {
@@ -107,19 +109,35 @@ fn build_tags(content: &str) -> Vec<String> {
     if lower.contains("data") || lower.contains("数据") {
         tags.push("data".to_string());
     }
-    if lower.contains("travel") || lower.contains("tour") || lower.contains("旅游") || lower.contains("旅行") {
+    if lower.contains("travel")
+        || lower.contains("tour")
+        || lower.contains("旅游")
+        || lower.contains("旅行")
+    {
         tags.push("travel".to_string());
     }
     if lower.contains("translate") || lower.contains("翻译") || lower.contains("语言") {
         tags.push("translation".to_string());
     }
-    if lower.contains("cook") || lower.contains("recipe") || lower.contains("食谱") || lower.contains("做菜") {
+    if lower.contains("cook")
+        || lower.contains("recipe")
+        || lower.contains("食谱")
+        || lower.contains("做菜")
+    {
         tags.push("cooking".to_string());
     }
-    if lower.contains("fitness") || lower.contains("workout") || lower.contains("健身") || lower.contains("运动") {
+    if lower.contains("fitness")
+        || lower.contains("workout")
+        || lower.contains("健身")
+        || lower.contains("运动")
+    {
         tags.push("fitness".to_string());
     }
-    if lower.contains("movie") || lower.contains("film") || lower.contains("电影") || lower.contains("剧集") {
+    if lower.contains("movie")
+        || lower.contains("film")
+        || lower.contains("电影")
+        || lower.contains("剧集")
+    {
         tags.push("entertainment".to_string());
     }
     if lower.contains("news") || lower.contains("新闻") || lower.contains("资讯") {
@@ -128,32 +146,35 @@ fn build_tags(content: &str) -> Vec<String> {
     if lower.contains("weather") || lower.contains("天气") || lower.contains("气温") {
         tags.push("weather".to_string());
     }
-    if lower.contains("calculat") || lower.contains("math") || lower.contains("计算") || lower.contains("房贷") || lower.contains("投资") {
+    if lower.contains("calculat")
+        || lower.contains("math")
+        || lower.contains("计算")
+        || lower.contains("房贷")
+        || lower.contains("投资")
+    {
         tags.push("calculator".to_string());
     }
     tags
 }
 
 /// Build a LoadedSkill from SkillMetadata and markdown content.
-/// Shared logic used by both load_builtin_skills and load_markdown_skill_from_dir.
+/// Shared logic used by both load_builtin_skills and
+/// load_markdown_skill_from_dir.
 fn build_loaded_skill(meta: &SkillMetadata, content: &str) -> LoadedSkill {
     // Parse deep markdown sections
     let sections = parse_markdown_sections(content);
 
-    let description = sections
-        .get("description")
-        .cloned()
-        .unwrap_or_else(|| {
-            content
-                .lines()
-                .skip(1)
-                .skip_while(|l| l.trim().is_empty() || l.trim().starts_with('#'))
-                .take_while(|l| !l.trim().starts_with('#') && !l.trim().starts_with("```"))
-                .collect::<Vec<_>>()
-                .join(" ")
-                .trim()
-                .to_string()
-        });
+    let description = sections.get("description").cloned().unwrap_or_else(|| {
+        content
+            .lines()
+            .skip(1)
+            .skip_while(|l| l.trim().is_empty() || l.trim().starts_with('#'))
+            .take_while(|l| !l.trim().starts_with('#') && !l.trim().starts_with("```"))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string()
+    });
 
     let description = if description.is_empty() {
         meta.description.clone()
@@ -265,21 +286,32 @@ pub async fn load_builtin_skills(registry: &Arc<SkillRegistry>) {
         let content = if meta.path.is_dir() {
             let md_path = meta.path.join("SKILL.md");
             if md_path.exists() {
-                tokio::fs::read_to_string(&md_path).await.unwrap_or_default()
+                tokio::fs::read_to_string(&md_path)
+                    .await
+                    .unwrap_or_default()
             } else {
                 continue;
             }
         } else {
-            tokio::fs::read_to_string(&meta.path).await.unwrap_or_default()
+            tokio::fs::read_to_string(&meta.path)
+                .await
+                .unwrap_or_default()
         };
 
         let skill = build_loaded_skill(&meta, &content);
 
         let category = if meta.category.is_empty() {
             if meta.path.is_dir() {
-                meta.path.file_name().and_then(|n| n.to_str()).unwrap_or("general")
+                meta.path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("general")
             } else {
-                meta.path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("general")
+                meta.path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("general")
             }
         } else {
             &meta.category
@@ -296,6 +328,9 @@ pub async fn load_builtin_skills(registry: &Arc<SkillRegistry>) {
     }
 
     if registered > 0 {
-        tracing::info!("✅ Registered {} built-in skills from skills/ directory", registered);
+        tracing::info!(
+            "✅ Registered {} built-in skills from skills/ directory",
+            registered
+        );
     }
 }

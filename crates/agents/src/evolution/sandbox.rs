@@ -190,7 +190,10 @@ impl EvolutionSandbox {
                 let has_upper = clean.chars().any(|c| c.is_uppercase());
                 let has_lower = clean.chars().any(|c| c.is_lowercase());
                 let has_digit = clean.chars().any(|c| c.is_numeric());
-                let type_count = [has_upper, has_lower, has_digit].iter().filter(|&&x| x).count();
+                let type_count = [has_upper, has_lower, has_digit]
+                    .iter()
+                    .filter(|&&x| x)
+                    .count();
                 if type_count >= 2 {
                     return true;
                 }
@@ -214,7 +217,10 @@ mod tests {
             result_size: 100,
             max_allowed_size: 10000,
         };
-        assert_eq!(sandbox.preflight_check(&proposal), Err(SafetyViolation::CredentialLeak));
+        assert_eq!(
+            sandbox.preflight_check(&proposal),
+            Err(SafetyViolation::CredentialLeak)
+        );
     }
 
     #[test]
@@ -227,7 +233,10 @@ mod tests {
             result_size: 100,
             max_allowed_size: 10000,
         };
-        assert_eq!(sandbox.preflight_check(&proposal), Err(SafetyViolation::InstructionInjection));
+        assert_eq!(
+            sandbox.preflight_check(&proposal),
+            Err(SafetyViolation::InstructionInjection)
+        );
     }
 
     #[test]
@@ -240,7 +249,10 @@ mod tests {
             result_size: 20000,
             max_allowed_size: 10000,
         };
-        assert_eq!(sandbox.preflight_check(&proposal), Err(SafetyViolation::CapacityExceeded));
+        assert_eq!(
+            sandbox.preflight_check(&proposal),
+            Err(SafetyViolation::CapacityExceeded)
+        );
     }
 
     #[test]
@@ -253,7 +265,10 @@ mod tests {
             result_size: 100,
             max_allowed_size: 10000,
         };
-        assert_eq!(sandbox.preflight_check(&proposal), Err(SafetyViolation::MaliciousPattern));
+        assert_eq!(
+            sandbox.preflight_check(&proposal),
+            Err(SafetyViolation::MaliciousPattern)
+        );
     }
 
     #[test]
@@ -273,7 +288,10 @@ mod tests {
     fn test_post_execution_verify() {
         let sandbox = EvolutionSandbox::new();
         assert!(sandbox.post_execution_verify("Clean output").is_ok());
-        assert_eq!(sandbox.post_execution_verify("api_key = 'secret'"), Err(SafetyViolation::CredentialLeak));
+        assert_eq!(
+            sandbox.post_execution_verify("api_key = 'secret'"),
+            Err(SafetyViolation::CredentialLeak)
+        );
     }
 
     #[test]

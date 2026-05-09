@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use tracing::{info, warn};
 
-use crate::mcp::{MCPError, MCPManager};
 use crate::mcp::types::Tool;
+use crate::mcp::{MCPError, MCPManager};
 use crate::skills::{
     FunctionDef, FunctionParameter, LoadedSkill, SkillManifest, SkillRegistry, Version,
 };
@@ -60,10 +60,9 @@ impl McpSkillBridge {
         server_name: &str,
         skill_registry: &SkillRegistry,
     ) -> Result<usize, MCPError> {
-        let client = mcp_manager
-            .get_client(server_name)
-            .await
-            .ok_or_else(|| MCPError::ConnectionFailed(format!("Client '{}' not found", server_name)))?;
+        let client = mcp_manager.get_client(server_name).await.ok_or_else(|| {
+            MCPError::ConnectionFailed(format!("Client '{}' not found", server_name))
+        })?;
 
         let tools_result = client.list_tools(None).await?;
         let mut registered = 0;
@@ -74,10 +73,17 @@ impl McpSkillBridge {
 
             let mut tags = vec![server_name.to_string(), "mcp".to_string()];
             let tool_name_lower = tool.name.to_lowercase();
-            if tool_name_lower.contains("order") || tool_name_lower.contains("buy") || tool_name_lower.contains("sell") || tool_name_lower.contains("place") {
+            if tool_name_lower.contains("order")
+                || tool_name_lower.contains("buy")
+                || tool_name_lower.contains("sell")
+                || tool_name_lower.contains("place")
+            {
                 tags.push("trading".to_string());
             }
-            if tool_name_lower.contains("crypto") || tool_name_lower.contains("btc") || tool_name_lower.contains("eth") {
+            if tool_name_lower.contains("crypto")
+                || tool_name_lower.contains("btc")
+                || tool_name_lower.contains("eth")
+            {
                 tags.push("crypto".to_string());
                 tags.push("cryptocurrency".to_string());
             }
@@ -85,19 +91,28 @@ impl McpSkillBridge {
                 tags.push("stock".to_string());
                 tags.push("equity".to_string());
             }
-            if tool_name_lower.contains("quote") || tool_name_lower.contains("price") || tool_name_lower.contains("snapshot") || tool_name_lower.contains("bar") || tool_name_lower.contains("trade") {
+            if tool_name_lower.contains("quote")
+                || tool_name_lower.contains("price")
+                || tool_name_lower.contains("snapshot")
+                || tool_name_lower.contains("bar")
+                || tool_name_lower.contains("trade")
+            {
                 tags.push("market-data".to_string());
             }
-            if tool_name_lower.contains("weather") || tool_name_lower.contains("forecast") || tool_name_lower.contains("temperature") {
+            if tool_name_lower.contains("weather")
+                || tool_name_lower.contains("forecast")
+                || tool_name_lower.contains("temperature")
+            {
                 tags.push("weather".to_string());
             }
 
-            skill_registry
-                .register(loaded_skill, "mcp", tags)
-                .await;
+            skill_registry.register(loaded_skill, "mcp", tags).await;
 
             registered += 1;
-            info!("🔧 Registered MCP skill '{}' from server '{}'", skill_id, server_name);
+            info!(
+                "🔧 Registered MCP skill '{}' from server '{}'",
+                skill_id, server_name
+            );
         }
 
         Ok(registered)
@@ -110,7 +125,11 @@ impl McpSkillBridge {
         // 🆕 FIX: Enrich description with parameter hints so keyword matching
         // can surface tools even when the main docstring is short.
         let mut rich_description = description.clone();
-        if let Some(props) = tool.input_schema.get("properties").and_then(|p| p.as_object()) {
+        if let Some(props) = tool
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+        {
             for (name, prop) in props {
                 if let Some(desc) = prop.get("description").and_then(|d| d.as_str()) {
                     if !desc.is_empty() {
@@ -131,12 +150,21 @@ impl McpSkillBridge {
         if tool_name_lower.contains("stock") {
             rich_description.push_str(" 股票 stock equity shares AAPL TSLA");
         }
-        if tool_name_lower.contains("quote") || tool_name_lower.contains("price") || tool_name_lower.contains("snapshot") || tool_name_lower.contains("bar") || tool_name_lower.contains("trade") {
+        if tool_name_lower.contains("quote")
+            || tool_name_lower.contains("price")
+            || tool_name_lower.contains("snapshot")
+            || tool_name_lower.contains("bar")
+            || tool_name_lower.contains("trade")
+        {
             rich_description.push_str(" 行情 价格 price quote snapshot market data");
         }
 
         // Convert JSON Schema input_schema into FunctionDef parameters
-        let functions = vec![Self::schema_to_function(&tool.name, &description, &tool.input_schema)];
+        let functions = vec![Self::schema_to_function(
+            &tool.name,
+            &description,
+            &tool.input_schema,
+        )];
 
         let manifest = SkillManifest {
             id: skill_id.to_string(),
@@ -152,9 +180,16 @@ impl McpSkillBridge {
             entry_point: tool.name.clone(),
             license: "MCP".to_string(),
             functions,
-            prompt_template: Self::build_prompt_template(&tool.name, &description, &tool.input_schema),
+            prompt_template: Self::build_prompt_template(
+                &tool.name,
+                &description,
+                &tool.input_schema,
+            ),
             examples: String::new(),
-            when_to_use: format!("Use this skill when you need to call the MCP tool '{}' from server '{}'", tool.name, server_name),
+            when_to_use: format!(
+                "Use this skill when you need to call the MCP tool '{}' from server '{}'",
+                tool.name, server_name
+            ),
             when_not_to_use: None,
             activation_examples: vec![format!("Call the {} tool", tool.name)],
             activation_negative_examples: vec![],
@@ -172,7 +207,11 @@ impl McpSkillBridge {
     }
 
     /// Convert a JSON Schema object into a FunctionDef with parameters.
-    fn schema_to_function(name: &str, description: &str, schema: &serde_json::Value) -> FunctionDef {
+    fn schema_to_function(
+        name: &str,
+        description: &str,
+        schema: &serde_json::Value,
+    ) -> FunctionDef {
         let inputs = Self::extract_parameters(schema);
 
         FunctionDef {
@@ -256,16 +295,27 @@ impl McpSkillBridge {
                     "- {} ({}{}): {}\n",
                     p.name,
                     p.param_type,
-                    if p.required { ", required" } else { ", optional" },
+                    if p.required {
+                        ", required"
+                    } else {
+                        ", optional"
+                    },
                     p.description
                 ));
             }
             template.push_str("\n");
         }
 
-        template.push_str("Instructions: Call this tool with the appropriate parameters based on the user's request. ");
-        template.push_str("When calling, output the skill ID followed by a '|' and a JSON object with the parameters. ");
-        template.push_str("Example: SKILL:my_skill|{\"param1\":\"value1\",\"param2\":\"value2\"}. ");
+        template.push_str(
+            "Instructions: Call this tool with the appropriate parameters based on the user's \
+             request. ",
+        );
+        template.push_str(
+            "When calling, output the skill ID followed by a '|' and a JSON object with the \
+             parameters. ",
+        );
+        template
+            .push_str("Example: SKILL:my_skill|{\"param1\":\"value1\",\"param2\":\"value2\"}. ");
         template.push_str("If no parameters are needed, use SKILL:my_skill|{}.");
         template
     }
@@ -396,7 +446,10 @@ mod tests {
         });
 
         let mut args = serde_json::Map::new();
-        args.insert("path".to_string(), serde_json::Value::String("/tmp".to_string()));
+        args.insert(
+            "path".to_string(),
+            serde_json::Value::String("/tmp".to_string()),
+        );
         args.insert("limit".to_string(), serde_json::Value::Number(10.into()));
 
         assert!(validate_tool_arguments(&schema, &args).is_ok());
@@ -428,7 +481,10 @@ mod tests {
         });
 
         let mut args = serde_json::Map::new();
-        args.insert("unknown".to_string(), serde_json::Value::String("x".to_string()));
+        args.insert(
+            "unknown".to_string(),
+            serde_json::Value::String("x".to_string()),
+        );
 
         let result = validate_tool_arguments(&schema, &args);
         assert!(result.is_err());
@@ -445,7 +501,10 @@ mod tests {
         });
 
         let mut args = serde_json::Map::new();
-        args.insert("count".to_string(), serde_json::Value::String("not-a-number".to_string()));
+        args.insert(
+            "count".to_string(),
+            serde_json::Value::String("not-a-number".to_string()),
+        );
 
         let result = validate_tool_arguments(&schema, &args);
         assert!(result.is_err());
@@ -481,11 +540,17 @@ mod tests {
         assert_eq!(params.len(), 2);
 
         // Find params by name to avoid relying on HashMap iteration order
-        let path_param = params.iter().find(|p| p.name == "path").expect("path param");
+        let path_param = params
+            .iter()
+            .find(|p| p.name == "path")
+            .expect("path param");
         assert_eq!(path_param.param_type, "string");
         assert!(path_param.required);
 
-        let limit_param = params.iter().find(|p| p.name == "limit").expect("limit param");
+        let limit_param = params
+            .iter()
+            .find(|p| p.name == "limit")
+            .expect("limit param");
         assert_eq!(limit_param.param_type, "integer");
         assert!(!limit_param.required);
         assert_eq!(limit_param.default_value, "100");

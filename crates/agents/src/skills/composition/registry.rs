@@ -1,6 +1,7 @@
 //! Skill Composition Registry
 //!
-//! Manages persisted composition definitions loaded from `data/compositions/*.yaml`.
+//! Manages persisted composition definitions loaded from
+//! `data/compositions/*.yaml`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,10 +77,7 @@ impl CompositionRegistry {
     }
 
     /// Create a new composition and persist it
-    pub async fn create(
-        &mut self,
-        mut def: CompositionDefinition,
-    ) -> Result<(), RegistryError> {
+    pub async fn create(&mut self, mut def: CompositionDefinition) -> Result<(), RegistryError> {
         if self.compositions.contains_key(&def.id) {
             return Err(RegistryError::AlreadyExists(def.id));
         }
@@ -109,10 +107,7 @@ impl CompositionRegistry {
     }
 
     /// Update an existing composition and persist it
-    pub async fn update(
-        &mut self,
-        mut def: CompositionDefinition,
-    ) -> Result<(), RegistryError> {
+    pub async fn update(&mut self, mut def: CompositionDefinition) -> Result<(), RegistryError> {
         if !self.compositions.contains_key(&def.id) {
             return Err(RegistryError::NotFound(def.id));
         }
@@ -189,7 +184,11 @@ impl CompositionRegistry {
                                         self.compositions.insert(def.id.clone(), def);
                                     }
                                     Err(e) => {
-                                        tracing::warn!("Failed to parse composition {:?}: {}", path, e);
+                                        tracing::warn!(
+                                            "Failed to parse composition {:?}: {}",
+                                            path,
+                                            e
+                                        );
                                     }
                                 }
                             }
@@ -210,20 +209,17 @@ impl CompositionRegistry {
         self.base_dir = Some(dir.to_path_buf());
         Ok(())
     }
-
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::definition::{CompositionConfig, InputMappingDef, PipelineStepDef};
     use super::*;
-    use super::super::definition::{CompositionConfig, PipelineStepDef, InputMappingDef};
 
     #[tokio::test]
     async fn test_registry_crud() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "beebotos_composition_test_{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("beebotos_composition_test_{}", std::process::id()));
         tokio::fs::create_dir_all(&temp_dir).await.unwrap();
 
         let mut registry = CompositionRegistry::with_dir(&temp_dir);

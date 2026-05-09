@@ -3,15 +3,14 @@
 //! Provides read-only access to the current global LLM configuration.
 //! Sensitive fields (API keys) are masked for security.
 
+use std::sync::Arc;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use gateway::{
-    error::GatewayError,
-    middleware::{require_any_role, AuthUser},
-};
+use gateway::error::GatewayError;
+use gateway::middleware::{require_any_role, AuthUser};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 use crate::AppState;
 
@@ -81,7 +80,8 @@ pub async fn get_llm_global_config(
     }))
 }
 
-/// Update LLM provider configuration (model & temperature) and persist to config file
+/// Update LLM provider configuration (model & temperature) and persist to
+/// config file
 pub async fn update_llm_global_config(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -113,10 +113,7 @@ pub async fn update_llm_global_config(
                 let temp: f64 = format!("{}", req.temperature)
                     .parse()
                     .unwrap_or(req.temperature as f64);
-                table.insert(
-                    "temperature".to_string(),
-                    toml::Value::Float(temp),
-                );
+                table.insert("temperature".to_string(), toml::Value::Float(temp));
             } else {
                 return Err(GatewayError::internal(format!(
                     "Provider '{}' is not a TOML table",

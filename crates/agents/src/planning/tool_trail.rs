@@ -71,7 +71,11 @@ impl ToolTrail {
         }
     }
 
-    pub fn add_step(&mut self, step_number: usize, description: impl Into<String>) -> &mut TrailStep {
+    pub fn add_step(
+        &mut self,
+        step_number: usize,
+        description: impl Into<String>,
+    ) -> &mut TrailStep {
         let step = TrailStep {
             step_number,
             description: description.into(),
@@ -155,15 +159,17 @@ impl ToolTrail {
     /// - Terminal reward (success/failure)
     /// - Token consumption
     pub fn to_training_data(&self) -> TrainingData {
-        let actions: Vec<String> = self.steps.iter()
+        let actions: Vec<String> = self
+            .steps
+            .iter()
             .flat_map(|s| s.tool_calls.iter().map(|c| c.tool_name.clone()))
             .collect();
 
-        let states: Vec<String> = self.steps.iter()
-            .map(|s| s.description.clone())
-            .collect();
+        let states: Vec<String> = self.steps.iter().map(|s| s.description.clone()).collect();
 
-        let step_rewards: Vec<f32> = self.steps.iter()
+        let step_rewards: Vec<f32> = self
+            .steps
+            .iter()
             .map(|s| {
                 let successes = s.tool_calls.iter().filter(|c| c.success).count();
                 let total = s.tool_calls.len().max(1);
@@ -228,7 +234,11 @@ impl TrailCollector {
         if self.trails.is_empty() {
             return 0.0;
         }
-        let success_count = self.trails.iter().filter(|t| t.status == TrailStatus::Success).count();
+        let success_count = self
+            .trails
+            .iter()
+            .filter(|t| t.status == TrailStatus::Success)
+            .count();
         success_count as f32 / self.trails.len() as f32
     }
 }

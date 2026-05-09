@@ -6,8 +6,8 @@
 //! Dual-track strategy:
 //! - **Rule engine (lightweight)**: High-frequency, pattern-fixed intents
 //!   (regex + keywords + negation detection, no LLM needed)
-//! - **LLM classifier (precise)**: Complex, ambiguous intents
-//!   (call small model or main model's fast classification mode)
+//! - **LLM classifier (precise)**: Complex, ambiguous intents (call small model
+//!   or main model's fast classification mode)
 
 use std::collections::HashMap;
 
@@ -71,16 +71,42 @@ impl IntentAnalysis {
 
 /// Predefined toolsets with trigger keywords
 const DEFAULT_TOOLSETS: &[(&str, &[&str])] = &[
-    ("account", &["账户", "account", "余额", "balance", "portfolio"]),
-    ("trading", &["下单", "购买", "买入", "卖出", "order", "buy", "sell", "place", "交易"]),
+    (
+        "account",
+        &["账户", "account", "余额", "balance", "portfolio"],
+    ),
+    (
+        "trading",
+        &[
+            "下单", "购买", "买入", "卖出", "order", "buy", "sell", "place", "交易",
+        ],
+    ),
     ("watchlists", &["自选", "watchlist", "关注"]),
     ("stock-data", &["股票", "股价", "stock", "AAPL", "TSLA"]),
-    ("crypto-data", &["比特币", "BTC", "以太坊", "ETH", "crypto", "加密货币"]),
+    (
+        "crypto-data",
+        &["比特币", "BTC", "以太坊", "ETH", "crypto", "加密货币"],
+    ),
     ("options-data", &["期权", "option", "call", "put"]),
     ("news", &["新闻", "news", "头条"]),
     ("weather", &["天气", "weather", "temperature", "预报"]),
     // 🆕 FIX (Plan D): Web search toolset — triggers when user asks to search the web
-    ("search", &["搜索", "查找", "查一下", "网上", "google", "search", "look up", "find online", "查", "搜", "百度"]),
+    (
+        "search",
+        &[
+            "搜索",
+            "查找",
+            "查一下",
+            "网上",
+            "google",
+            "search",
+            "look up",
+            "find online",
+            "查",
+            "搜",
+            "百度",
+        ],
+    ),
 ];
 
 /// Intent Engine with heuristic classification
@@ -141,11 +167,21 @@ impl IntentEngine {
     // ── Internal helpers ──
 
     fn is_correction(lower: &str) -> bool {
-        // 🆕 FIX: "不要" is often a constraint (e.g. "不要超过100USD"), not a cancellation.
-        // Exclude cases where "不要" is followed by a numeric constraint pattern.
+        // 🆕 FIX: "不要" is often a constraint (e.g. "不要超过100USD"), not a
+        // cancellation. Exclude cases where "不要" is followed by a numeric
+        // constraint pattern.
         let excluded_patterns = [
-            "不要超过", "不要低于", "不要多于", "不要少于", "不要大于", "不要小于",
-            "不要超过", "不要超出", "不要过", "不要低过", "不要高过",
+            "不要超过",
+            "不要低于",
+            "不要多于",
+            "不要少于",
+            "不要大于",
+            "不要小于",
+            "不要超过",
+            "不要超出",
+            "不要过",
+            "不要低过",
+            "不要高过",
         ];
         let has_excluded = excluded_patterns.iter().any(|p| lower.contains(p));
         if has_excluded {
@@ -158,9 +194,15 @@ impl IntentEngine {
 
     fn is_meta_question(lower: &str) -> bool {
         let meta_patterns = [
-            "你会什么", "有哪些技能", "你能做什么", "你有什么功能",
-            "what can you do", "what are your skills", "help",
-            "show me your capabilities", "list skills",
+            "你会什么",
+            "有哪些技能",
+            "你能做什么",
+            "你有什么功能",
+            "what can you do",
+            "what are your skills",
+            "help",
+            "show me your capabilities",
+            "list skills",
         ];
         meta_patterns.iter().any(|p| lower.contains(p))
     }
@@ -169,12 +211,17 @@ impl IntentEngine {
         // Simplified: check for common workflow keywords
         let workflow_keywords = ["workflow", "流程", "自动化", "auto"];
         workflow_keywords.iter().any(|k| lower.contains(k))
-            && (lower.contains("运行") || lower.contains("执行") || lower.contains("start") || lower.contains("run"))
+            && (lower.contains("运行")
+                || lower.contains("执行")
+                || lower.contains("start")
+                || lower.contains("run"))
     }
 
     fn has_multi_step_keywords(lower: &str) -> bool {
         let step_keywords = ["先", "再", "然后", "接着", "最后", "第一步", "第二步"];
-        let then_keywords = ["first", "then", "next", "after", "finally", "step 1", "step 2"];
+        let then_keywords = [
+            "first", "then", "next", "after", "finally", "step 1", "step 2",
+        ];
         let has_step = step_keywords.iter().any(|k| lower.contains(k));
         let has_then = then_keywords.iter().any(|k| lower.contains(k));
         (has_step && lower.chars().count() > 10) || (has_then && lower.len() > 20)
@@ -186,13 +233,26 @@ impl IntentEngine {
             // Group 1: query/search
             &["查", "查询", "搜索", "找", "看", "search", "find", "look"],
             // Group 2: trade/order/buy/sell (all synonyms)
-            &["买", "卖", "下单", "交易", "买入", "卖出", "购买", "order", "buy", "sell", "place"],
+            &[
+                "买", "卖", "下单", "交易", "买入", "卖出", "购买", "order", "buy", "sell", "place",
+            ],
             // Group 3: send/create/write
             &["发", "发送", "写", "创建", "send", "create", "write"],
             // Group 4: analyze/summarize/compare
-            &["分析", "总结", "对比", "analyze", "compare", "summary", "summarize"],
+            &[
+                "分析",
+                "总结",
+                "对比",
+                "analyze",
+                "compare",
+                "summary",
+                "summarize",
+            ],
         ];
-        action_groups.iter().filter(|group| group.iter().any(|k| lower.contains(*k))).count()
+        action_groups
+            .iter()
+            .filter(|group| group.iter().any(|k| lower.contains(*k)))
+            .count()
     }
 
     fn detect_toolsets(lower: &str) -> Vec<String> {
@@ -215,7 +275,11 @@ impl IntentEngine {
         }
 
         // Side extraction (buy/sell)
-        if lower.contains("买") || lower.contains("买入") || lower.contains("buy") || lower.contains("purchase") {
+        if lower.contains("买")
+            || lower.contains("买入")
+            || lower.contains("buy")
+            || lower.contains("purchase")
+        {
             entities.insert("side".to_string(), "buy".to_string());
         } else if lower.contains("卖") || lower.contains("卖出") || lower.contains("sell") {
             entities.insert("side".to_string(), "sell".to_string());
@@ -256,9 +320,13 @@ impl IntentEngine {
             if let Ok(_num) = word.parse::<f64>() {
                 if i + 1 < words.len() {
                     let next = words[i + 1].to_lowercase();
-                    if next.contains("股") || next.contains("份") || next.contains("个")
-                        || next.contains("btc") || next.contains("eth")
-                        || next.contains("share") || next.contains("unit")
+                    if next.contains("股")
+                        || next.contains("份")
+                        || next.contains("个")
+                        || next.contains("btc")
+                        || next.contains("eth")
+                        || next.contains("share")
+                        || next.contains("unit")
                     {
                         return Some(format!("{} {}", word, words[i + 1]));
                     }
@@ -291,9 +359,12 @@ impl IntentEngine {
     /// 🆕 OPTIMIZATION: Dual-track classification
     ///
     /// 1. Run heuristic classifier first (fast, no LLM call)
-    /// 2. If confidence < threshold, construct LLM classification prompt
-    ///    for the caller to execute
-    pub fn classify_dual_track(query: &str, confidence_threshold: f32) -> (IntentAnalysis, Option<String>) {
+    /// 2. If confidence < threshold, construct LLM classification prompt for
+    ///    the caller to execute
+    pub fn classify_dual_track(
+        query: &str,
+        confidence_threshold: f32,
+    ) -> (IntentAnalysis, Option<String>) {
         let heuristic = Self::classify_heuristic(query);
         if heuristic.confidence >= confidence_threshold {
             return (heuristic, None);
@@ -344,7 +415,10 @@ impl IntentEngine {
 
         match serde_json::from_str::<serde_json::Value>(json_str) {
             Ok(val) => {
-                let intent_str = val.get("intent").and_then(|v| v.as_str()).unwrap_or("DirectAnswer");
+                let intent_str = val
+                    .get("intent")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("DirectAnswer");
                 let intent = match intent_str {
                     "SingleToolCall" => UserIntent::SingleToolCall,
                     "MultiStepPlanning" => UserIntent::MultiStepPlanning,
@@ -353,7 +427,10 @@ impl IntentEngine {
                     "Correction" => UserIntent::Correction,
                     _ => UserIntent::DirectAnswer,
                 };
-                let confidence = val.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.7) as f32;
+                let confidence = val
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.7) as f32;
                 let mut analysis = IntentAnalysis::new(intent, confidence);
 
                 if let Some(entities) = val.get("entities").and_then(|v| v.as_object()) {
@@ -364,7 +441,10 @@ impl IntentEngine {
                     }
                 }
                 if let Some(constraints) = val.get("constraints").and_then(|v| v.as_array()) {
-                    analysis.constraints = constraints.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                    analysis.constraints = constraints
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
                 }
                 analysis.active_toolsets = Self::detect_toolsets(&response.to_lowercase());
                 analysis
@@ -419,11 +499,8 @@ pub fn build_default_toolsets() -> Vec<Toolset> {
     DEFAULT_TOOLSETS
         .iter()
         .map(|(name, keywords)| {
-            Toolset::new(
-                name.to_string(),
-                format!("{} related tools", name),
-            )
-            .with_keywords(keywords.iter().map(|k| k.to_string()).collect())
+            Toolset::new(name.to_string(), format!("{} related tools", name))
+                .with_keywords(keywords.iter().map(|k| k.to_string()).collect())
         })
         .collect()
 }
@@ -482,7 +559,10 @@ mod tests {
     #[test]
     fn test_entity_extraction() {
         let analysis = IntentEngine::classify_heuristic("买入 0.01 BTC");
-        assert_eq!(analysis.entities.get("symbol"), Some(&"BTC/USD".to_string()));
+        assert_eq!(
+            analysis.entities.get("symbol"),
+            Some(&"BTC/USD".to_string())
+        );
         assert_eq!(analysis.entities.get("side"), Some(&"buy".to_string()));
     }
 }

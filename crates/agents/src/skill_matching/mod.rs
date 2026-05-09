@@ -14,7 +14,8 @@ pub mod intent_analyzer;
 pub mod skill_selector;
 
 pub use activation_trace::{
-    ExecutionTrace, InMemoryTraceStore, RankingTrace, RetrievalTrace, SkillActivationTrace, TraceStore,
+    ExecutionTrace, InMemoryTraceStore, RankingTrace, RetrievalTrace, SkillActivationTrace,
+    TraceStore,
 };
 pub use intent_analyzer::{IntentAnalysisV2, LLMIntentAnalyzer, PlanningStrategyHint};
 pub use skill_selector::{SkillScore, SkillSelection, SkillSelector};

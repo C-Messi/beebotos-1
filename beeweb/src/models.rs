@@ -1,8 +1,9 @@
 //! Data models for BeeWeb Update Server
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Semantic version wrapper for serialization
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -277,13 +278,15 @@ impl axum::response::IntoResponse for UpdateError {
             UpdateError::PackageNotFound(_) | UpdateError::VersionNotFound(_) => {
                 (axum::http::StatusCode::NOT_FOUND, self.to_string())
             }
-            UpdateError::InvalidSignature(_) | UpdateError::Verification(_) => {
-                (axum::http::StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
-            }
-            UpdateError::PermissionDenied => {
-                (axum::http::StatusCode::FORBIDDEN, self.to_string())
-            }
-            _ => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            UpdateError::InvalidSignature(_) | UpdateError::Verification(_) => (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                self.to_string(),
+            ),
+            UpdateError::PermissionDenied => (axum::http::StatusCode::FORBIDDEN, self.to_string()),
+            _ => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                self.to_string(),
+            ),
         };
 
         (status, body).into_response()

@@ -2,21 +2,18 @@
 
 use std::sync::Arc;
 
-use axum::{extract::State, Json};
+use axum::extract::State;
+use axum::Json;
 use chrono::{Duration as ChronoDuration, Utc};
-use gateway::{
-    error::GatewayError,
-    middleware::{AuthUser, Claims, TokenType},
-};
+use gateway::error::GatewayError;
+use gateway::middleware::{AuthUser, Claims, TokenType};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{
-    services::auth_service::{AuthService, AuthUserInfo},
-    AppState,
-};
+use crate::services::auth_service::{AuthService, AuthUserInfo};
+use crate::AppState;
 
 /// Login request
 #[derive(Debug, Deserialize)]

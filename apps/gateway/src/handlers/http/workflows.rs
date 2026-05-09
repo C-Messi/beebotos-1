@@ -3,16 +3,17 @@
 //! REST API for declarative workflow management.
 //! Provides CRUD for WorkflowDefinition and manual execution triggers.
 
+use std::sync::Arc;
+
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use gateway::middleware::{require_any_role, AuthUser};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::error::GatewayError;
 use crate::services::agent_runtime_manager::GatewayLLMInterface;
 use crate::AppState;
-use gateway::middleware::{require_any_role, AuthUser};
 
 // ---------------------------------------------------------------------------
 // Security helpers
@@ -247,7 +248,8 @@ pub async fn load_workflow_instances(
     }
 
     let rows: Vec<InstanceRow> = sqlx::query_as(
-        "SELECT id, workflow_id, status, trigger_context, step_states, error_log, started_at, completed_at FROM workflow_instances ORDER BY started_at DESC LIMIT 1000"
+        "SELECT id, workflow_id, status, trigger_context, step_states, error_log, started_at, \
+         completed_at FROM workflow_instances ORDER BY started_at DESC LIMIT 1000",
     )
     .fetch_all(db)
     .await?;
@@ -271,7 +273,11 @@ pub async fn load_workflow_instances(
         let started_at = chrono::DateTime::parse_from_rfc3339(&row.started_at)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
-        let completed_at = row.completed_at.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc)));
+        let completed_at = row.completed_at.and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        });
 
         instances.push(beebotos_agents::workflow::WorkflowInstance {
             id: row.id,
@@ -317,7 +323,9 @@ pub async fn add_cron_jobs_for_workflow(
     };
 
     for trigger in &definition.triggers {
-        if let beebotos_agents::workflow::TriggerType::Cron { schedule, timezone } = &trigger.trigger_type {
+        if let beebotos_agents::workflow::TriggerType::Cron { schedule, timezone } =
+            &trigger.trigger_type
+        {
             let state_clone = state.clone();
             let wf_id = workflow_id.to_string();
             let sched_str = schedule.clone();
@@ -342,7 +350,10 @@ pub async fn add_cron_jobs_for_workflow(
                     });
                     match execute_workflow_internal(&state, &wf_id, trigger_context).await {
                         Ok(instance) => {
-                            info!("✅ Cron workflow {} completed with status: {}", wf_id, instance.status);
+                            info!(
+                                "✅ Cron workflow {} completed with status: {}",
+                                wf_id, instance.status
+                            );
                         }
                         Err(e) => {
                             warn!("❌ Cron workflow {} failed: {}", wf_id, e);
@@ -357,7 +368,10 @@ pub async fn add_cron_jobs_for_workflow(
                     if let Err(e) = scheduler.add(j).await {
                         warn!("Failed to add cron job for workflow {}: {}", workflow_id, e);
                     } else {
-                        info!("⏰ Registered cron job for workflow {}: {} ({})", workflow_id, log_sched, log_tz);
+                        info!(
+                            "⏰ Registered cron job for workflow {}: {} ({})",
+                            workflow_id, log_sched, log_tz
+                        );
                         uuids.push(job_uuid);
                     }
                 }
@@ -377,10 +391,7 @@ pub async fn add_cron_jobs_for_workflow(
 }
 
 /// Remove all cron jobs for a workflow from the JobScheduler.
-pub async fn remove_cron_jobs_for_workflow(
-    state: &Arc<AppState>,
-    workflow_id: &str,
-) {
+pub async fn remove_cron_jobs_for_workflow(state: &Arc<AppState>, workflow_id: &str) {
     let uuids: Vec<uuid::Uuid> = {
         let mut map = state.workflow_cron_job_uuids.write().await;
         map.remove(workflow_id).unwrap_or_default()
@@ -393,9 +404,15 @@ pub async fn remove_cron_jobs_for_workflow(
     if let Some(ref scheduler) = state.workflow_cron_scheduler {
         for job_uuid in &uuids {
             if let Err(e) = scheduler.remove(job_uuid).await {
-                warn!("Failed to remove cron job {} for workflow {}: {}", job_uuid, workflow_id, e);
+                warn!(
+                    "Failed to remove cron job {} for workflow {}: {}",
+                    job_uuid, workflow_id, e
+                );
             } else {
-                info!("⏰ Removed cron job {} for workflow {}", job_uuid, workflow_id);
+                info!(
+                    "⏰ Removed cron job {} for workflow {}",
+                    job_uuid, workflow_id
+                );
             }
         }
     }
@@ -426,7 +443,8 @@ pub async fn create_workflow(
     };
 
     let mut def: beebotos_agents::workflow::WorkflowDefinition =
-        serde_yaml::from_str(&yaml_content).map_err(|e| GatewayError::bad_request(format!("Invalid YAML: {}", e)))?;
+        serde_yaml::from_str(&yaml_content)
+            .map_err(|e| GatewayError::bad_request(format!("Invalid YAML: {}", e)))?;
 
     if let Some(id_override) = id_override {
         def.id = id_override;
@@ -437,14 +455,18 @@ pub async fn create_workflow(
     }
     validate_workflow_id(&def.id)?;
 
-    // Check if a workflow with the same ID already exists — clean up old cron jobs first
+    // Check if a workflow with the same ID already exists — clean up old cron jobs
+    // first
     let exists = {
         let registry = state.workflow_registry()?;
         let reg = registry.read().await;
         reg.get(&def.id).is_some()
     };
     if exists {
-        info!("Workflow {} already exists, removing old cron jobs before overwrite", def.id);
+        info!(
+            "Workflow {} already exists, removing old cron jobs before overwrite",
+            def.id
+        );
         remove_cron_jobs_for_workflow(&state, &def.id).await;
     }
 
@@ -472,13 +494,21 @@ pub async fn create_workflow(
     if let Some(ref trigger_engine) = state.workflow_trigger_engine {
         let mut engine = trigger_engine.write().await;
         engine.register(&def);
-        info!("Registered {} triggers for workflow {}", def.triggers.len(), def.id);
+        info!(
+            "Registered {} triggers for workflow {}",
+            def.triggers.len(),
+            def.id
+        );
     }
 
     // 🟢 CRON FIX: Dynamically register cron jobs for runtime-created workflows
     let cron_uuids = add_cron_jobs_for_workflow(&state, &def.id, &def).await;
     if !cron_uuids.is_empty() {
-        info!("Dynamically registered {} cron job(s) for workflow {}", cron_uuids.len(), def.id);
+        info!(
+            "Dynamically registered {} cron job(s) for workflow {}",
+            cron_uuids.len(),
+            def.id
+        );
     }
 
     info!("Workflow created: {} ({})", def.name, def.id);
@@ -491,7 +521,11 @@ pub async fn list_workflows(
 ) -> Result<Json<Vec<WorkflowResponse>>, GatewayError> {
     let registry = state.workflow_registry()?;
     let reg = registry.read().await;
-    let workflows: Vec<WorkflowResponse> = reg.list_all().into_iter().map(to_workflow_response).collect();
+    let workflows: Vec<WorkflowResponse> = reg
+        .list_all()
+        .into_iter()
+        .map(to_workflow_response)
+        .collect();
 
     Ok(Json(workflows))
 }
@@ -527,11 +561,13 @@ pub async fn get_workflow_source(
     let paths = vec![root_yaml, root_yml, root_json];
     for path in &paths {
         if let Ok(true) = tokio::fs::try_exists(path).await {
-            let content = tokio::fs::read_to_string(path).await
-                .map_err(|e| GatewayError::Internal {
-                    message: format!("Failed to read workflow source: {}", e),
-                    correlation_id: uuid::Uuid::new_v4().to_string(),
-                })?;
+            let content =
+                tokio::fs::read_to_string(path)
+                    .await
+                    .map_err(|e| GatewayError::Internal {
+                        message: format!("Failed to read workflow source: {}", e),
+                        correlation_id: uuid::Uuid::new_v4().to_string(),
+                    })?;
             return Ok(Json(WorkflowSourceResponse { yaml: content }));
         }
     }
@@ -549,11 +585,12 @@ pub async fn get_workflow_source(
                 }
                 if let Some(stem) = path.file_stem() {
                     if stem.to_string_lossy() == id {
-                        let content = tokio::fs::read_to_string(&path).await
-                            .map_err(|e| GatewayError::Internal {
+                        let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
+                            GatewayError::Internal {
                                 message: format!("Failed to read workflow source: {}", e),
                                 correlation_id: uuid::Uuid::new_v4().to_string(),
-                            })?;
+                            }
+                        })?;
                         return Ok(Json(WorkflowSourceResponse { yaml: content }));
                     }
                 }
@@ -575,8 +612,8 @@ pub async fn update_workflow(
     info!("Updating workflow: {}", id);
     validate_workflow_id(&id)?;
 
-    let mut def: beebotos_agents::workflow::WorkflowDefinition =
-        serde_yaml::from_str(&req.yaml).map_err(|e| GatewayError::bad_request(format!("Invalid YAML: {}", e)))?;
+    let mut def: beebotos_agents::workflow::WorkflowDefinition = serde_yaml::from_str(&req.yaml)
+        .map_err(|e| GatewayError::bad_request(format!("Invalid YAML: {}", e)))?;
 
     // Force the ID to match the URL path to prevent accidental identity changes
     def.id = id.clone();
@@ -596,13 +633,21 @@ pub async fn update_workflow(
         let mut engine = trigger_engine.write().await;
         engine.unregister(&id);
         engine.register(&def);
-        info!("Re-registered {} triggers for workflow {}", def.triggers.len(), id);
+        info!(
+            "Re-registered {} triggers for workflow {}",
+            def.triggers.len(),
+            id
+        );
     }
 
     // Re-register cron jobs for the updated definition
     let cron_uuids = add_cron_jobs_for_workflow(&state, &id, &def).await;
     if !cron_uuids.is_empty() {
-        info!("Dynamically registered {} cron job(s) for updated workflow {}", cron_uuids.len(), id);
+        info!(
+            "Dynamically registered {} cron job(s) for updated workflow {}",
+            cron_uuids.len(),
+            id
+        );
     }
 
     // Persist to disk (overwrite)
@@ -707,15 +752,21 @@ pub async fn install_workflow(
     validate_source_path(&source_path)?;
 
     // Read source file content
-    let content = tokio::fs::read_to_string(&source_path).await
+    let content = tokio::fs::read_to_string(&source_path)
+        .await
         .map_err(|e| GatewayError::bad_request(format!("Failed to read source file: {}", e)))?;
 
     // Parse workflow definition
-    let ext = source_path.extension().and_then(|e| e.to_str()).unwrap_or("yaml");
+    let ext = source_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("yaml");
     let mut def: beebotos_agents::workflow::WorkflowDefinition = if ext == "json" {
-        serde_json::from_str(&content).map_err(|e| GatewayError::bad_request(format!("Invalid JSON: {}", e)))?
+        serde_json::from_str(&content)
+            .map_err(|e| GatewayError::bad_request(format!("Invalid JSON: {}", e)))?
     } else {
-        serde_yaml::from_str(&content).map_err(|e| GatewayError::bad_request(format!("Invalid YAML: {}", e)))?
+        serde_yaml::from_str(&content)
+            .map_err(|e| GatewayError::bad_request(format!("Invalid YAML: {}", e)))?
     };
 
     // OpenClaw compatibility: auto-populate id/name
@@ -726,7 +777,8 @@ pub async fn install_workflow(
         def.name = def.id.clone();
     }
     if def.id.is_empty() {
-        def.id = source_path.file_stem()
+        def.id = source_path
+            .file_stem()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
@@ -744,7 +796,10 @@ pub async fn install_workflow(
         reg.get(&def.id).is_some()
     };
     if exists {
-        info!("Workflow {} already exists, cleaning up old resources before overwrite", def.id);
+        info!(
+            "Workflow {} already exists, cleaning up old resources before overwrite",
+            def.id
+        );
         remove_cron_jobs_for_workflow(&state, &def.id).await;
         if let Some(ref trigger_engine) = state.workflow_trigger_engine {
             let mut engine = trigger_engine.write().await;
@@ -779,16 +834,27 @@ pub async fn install_workflow(
     if let Some(ref trigger_engine) = state.workflow_trigger_engine {
         let mut engine = trigger_engine.write().await;
         engine.register(&def);
-        info!("Registered {} triggers for workflow {}", def.triggers.len(), def.id);
+        info!(
+            "Registered {} triggers for workflow {}",
+            def.triggers.len(),
+            def.id
+        );
     }
 
     // Register cron jobs
     let cron_uuids = add_cron_jobs_for_workflow(&state, &def.id, &def).await;
     if !cron_uuids.is_empty() {
-        info!("Dynamically registered {} cron job(s) for installed workflow {}", cron_uuids.len(), def.id);
+        info!(
+            "Dynamically registered {} cron job(s) for installed workflow {}",
+            cron_uuids.len(),
+            def.id
+        );
     }
 
-    info!("Workflow installed: {} ({}) -> {:?}", def.name, def.id, installed_path);
+    info!(
+        "Workflow installed: {} ({}) -> {:?}",
+        def.name, def.id, installed_path
+    );
     Ok(Json(InstallWorkflowResponse {
         success: true,
         id: def.id.clone(),
@@ -893,7 +959,10 @@ impl DbProgressReporter {
 impl beebotos_agents::workflow::StepProgressReporter for DbProgressReporter {
     async fn on_step_complete(&self, instance: &beebotos_agents::workflow::WorkflowInstance) {
         if let Err(e) = save_workflow_instance(&self.db, instance).await {
-            warn!("Failed to persist workflow instance progress {}: {}", instance.id, e);
+            warn!(
+                "Failed to persist workflow instance progress {}: {}",
+                instance.id, e
+            );
         }
     }
 }
@@ -940,14 +1009,16 @@ pub async fn execute_workflow_internal(
     // Execute workflow with DB progress reporting and cancellation support
     let engine = beebotos_agents::workflow::WorkflowEngine::new();
     let reporter = DbProgressReporter::new(state.db.clone());
-    let instance = engine.execute_with_cancel_and_id(
-        &def,
-        &agent,
-        trigger_context,
-        Some(&reporter),
-        Some(cancel_signal.clone()),
-        Some(instance_id.clone()),
-    ).await;
+    let instance = engine
+        .execute_with_cancel_and_id(
+            &def,
+            &agent,
+            trigger_context,
+            Some(&reporter),
+            Some(cancel_signal.clone()),
+            Some(instance_id.clone()),
+        )
+        .await;
 
     // Clean up cancellation signal regardless of success or failure
     {
@@ -1025,7 +1096,8 @@ pub async fn workflow_webhook_trigger(
     headers: axum::http::HeaderMap,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<WorkflowExecutionResponse>, GatewayError> {
-    // The trigger path in workflow definition starts with "/" (e.g. "/test-webhook")
+    // The trigger path in workflow definition starts with "/" (e.g.
+    // "/test-webhook")
     let trigger_path = if path.starts_with('/') {
         path.clone()
     } else {
@@ -1040,8 +1112,8 @@ pub async fn workflow_webhook_trigger(
         engine.match_webhook(&trigger_path, "POST")
     };
 
-    let trigger_match = trigger_match
-        .ok_or_else(|| GatewayError::not_found("Webhook trigger", &trigger_path))?;
+    let trigger_match =
+        trigger_match.ok_or_else(|| GatewayError::not_found("Webhook trigger", &trigger_path))?;
 
     // 🟢 AUTH FIX: Validate bearer token if webhook requires auth
     if let Some(expected_token) = &trigger_match.auth {
@@ -1049,15 +1121,21 @@ pub async fn workflow_webhook_trigger(
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok());
         let provided_token = auth_header.and_then(|h| {
-            h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("bearer "))
+            h.strip_prefix("Bearer ")
+                .or_else(|| h.strip_prefix("bearer "))
         });
         match provided_token {
             Some(token) if token == expected_token => {
                 // Auth valid, proceed
             }
             _ => {
-                warn!("Webhook auth failed for path {}: expected Bearer token", path);
-                return Err(GatewayError::unauthorized("Invalid or missing webhook token"));
+                warn!(
+                    "Webhook auth failed for path {}: expected Bearer token",
+                    path
+                );
+                return Err(GatewayError::unauthorized(
+                    "Invalid or missing webhook token",
+                ));
             }
         }
     }
@@ -1277,7 +1355,10 @@ pub async fn cancel_workflow(
 
     // Persist cancellation to database
     if let Err(e) = save_workflow_instance(&state.db, &instance_clone).await {
-        warn!("Failed to persist cancelled workflow instance {}: {}", id, e);
+        warn!(
+            "Failed to persist cancelled workflow instance {}: {}",
+            id, e
+        );
     }
 
     // Clean up cancellation signal
@@ -1362,15 +1443,15 @@ pub async fn workflow_stats(
     drop(reg);
 
     let inst_map = instances.read().await;
-    let workflow_instances: Vec<_> = inst_map.values()
-        .filter(|i| i.workflow_id == id)
-        .collect();
+    let workflow_instances: Vec<_> = inst_map.values().filter(|i| i.workflow_id == id).collect();
 
     let total = workflow_instances.len();
-    let completed = workflow_instances.iter()
+    let completed = workflow_instances
+        .iter()
         .filter(|i| i.status == beebotos_agents::workflow::WorkflowStatus::Completed)
         .count();
-    let failed = workflow_instances.iter()
+    let failed = workflow_instances
+        .iter()
         .filter(|i| i.status == beebotos_agents::workflow::WorkflowStatus::Failed)
         .count();
     let avg_duration = if total > 0 {
@@ -1396,38 +1477,49 @@ pub async fn recent_instances(
     State(state): State<Arc<AppState>>,
     Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<WorkflowInstanceSummary>>, GatewayError> {
-    let limit = query.get("limit")
+    let limit = query
+        .get("limit")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(20);
 
     // 🟢 P2 FIX: Use StateStore CQRS for workflow queries when available
-    let store_result = state.state_store.query(
-        gateway::state_store::StateQuery::ListWorkflowInstances {
+    let store_result = state
+        .state_store
+        .query(gateway::state_store::StateQuery::ListWorkflowInstances {
             status: None,
             limit,
-        }
-    ).await;
+        })
+        .await;
 
-    if let Ok(gateway::state_store::QueryResult::WorkflowInstanceList { instances, .. }) = store_result {
+    if let Ok(gateway::state_store::QueryResult::WorkflowInstanceList { instances, .. }) =
+        store_result
+    {
         let registry = state.workflow_registry()?;
         let reg = registry.read().await;
 
-        let summaries: Vec<WorkflowInstanceSummary> = instances.into_iter().filter_map(|v| {
-            let instance_id = v.get("instance_id")?.as_str()?.to_string();
-            let workflow_id = v.get("workflow_id")?.as_str()?.to_string();
-            let status = v.get("status")?.as_str()?.to_string();
-            let def = reg.get(&workflow_id);
-            Some(WorkflowInstanceSummary {
-                instance_id,
-                workflow_id: workflow_id.clone(),
-                workflow_name: def.map(|d| d.name.clone()).unwrap_or_default(),
-                status,
-                completion_pct: 0.0, // Not available from StateStore query yet
-                duration_secs: 0,
-                started_at: v.get("started_at").and_then(|s| s.as_str()).unwrap_or("").to_string(),
-                step_count: 0,
+        let summaries: Vec<WorkflowInstanceSummary> = instances
+            .into_iter()
+            .filter_map(|v| {
+                let instance_id = v.get("instance_id")?.as_str()?.to_string();
+                let workflow_id = v.get("workflow_id")?.as_str()?.to_string();
+                let status = v.get("status")?.as_str()?.to_string();
+                let def = reg.get(&workflow_id);
+                Some(WorkflowInstanceSummary {
+                    instance_id,
+                    workflow_id: workflow_id.clone(),
+                    workflow_name: def.map(|d| d.name.clone()).unwrap_or_default(),
+                    status,
+                    completion_pct: 0.0, // Not available from StateStore query yet
+                    duration_secs: 0,
+                    started_at: v
+                        .get("started_at")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    step_count: 0,
+                })
             })
-        }).collect();
+            .collect();
 
         return Ok(Json(summaries));
     }
@@ -1443,19 +1535,22 @@ pub async fn recent_instances(
     recent.sort_by(|a, b| b.started_at.cmp(&a.started_at));
     recent.truncate(limit);
 
-    let summaries: Vec<WorkflowInstanceSummary> = recent.into_iter().map(|inst| {
-        let def = reg.get(&inst.workflow_id);
-        WorkflowInstanceSummary {
-            instance_id: inst.id.clone(),
-            workflow_id: inst.workflow_id.clone(),
-            workflow_name: def.map(|d| d.name.clone()).unwrap_or_default(),
-            status: inst.status.to_string(),
-            completion_pct: inst.completion_pct(),
-            duration_secs: inst.duration_secs(),
-            started_at: inst.started_at.to_rfc3339(),
-            step_count: inst.step_states.len(),
-        }
-    }).collect();
+    let summaries: Vec<WorkflowInstanceSummary> = recent
+        .into_iter()
+        .map(|inst| {
+            let def = reg.get(&inst.workflow_id);
+            WorkflowInstanceSummary {
+                instance_id: inst.id.clone(),
+                workflow_id: inst.workflow_id.clone(),
+                workflow_name: def.map(|d| d.name.clone()).unwrap_or_default(),
+                status: inst.status.to_string(),
+                completion_pct: inst.completion_pct(),
+                duration_secs: inst.duration_secs(),
+                started_at: inst.started_at.to_rfc3339(),
+                step_count: inst.step_states.len(),
+            }
+        })
+        .collect();
 
     Ok(Json(summaries))
 }
@@ -1470,33 +1565,36 @@ fn to_workflow_response(def: &beebotos_agents::workflow::WorkflowDefinition) -> 
         .iter()
         .map(|t| {
             let (trigger_type, detail) = match &t.trigger_type {
-                beebotos_agents::workflow::TriggerType::Cron { schedule, timezone } => {
-                    (
-                        "cron".to_string(),
-                        format!("{} (tz: {})", schedule, timezone.as_deref().unwrap_or("UTC")),
-                    )
-                }
-                beebotos_agents::workflow::TriggerType::Event { source, filter } => {
-                    (
-                        "event".to_string(),
-                        format!(
-                            "source: {}{}",
-                            source,
-                            filter.as_ref().map(|f| format!(", filter: {}", f)).unwrap_or_default()
-                        ),
-                    )
-                }
-                beebotos_agents::workflow::TriggerType::Webhook { path, method, auth } => {
-                    (
-                        "webhook".to_string(),
-                        format!(
-                            "{} {}{}",
-                            method,
-                            path,
-                            auth.as_ref().map(|a| format!(", auth: {}", a)).unwrap_or_default()
-                        ),
-                    )
-                }
+                beebotos_agents::workflow::TriggerType::Cron { schedule, timezone } => (
+                    "cron".to_string(),
+                    format!(
+                        "{} (tz: {})",
+                        schedule,
+                        timezone.as_deref().unwrap_or("UTC")
+                    ),
+                ),
+                beebotos_agents::workflow::TriggerType::Event { source, filter } => (
+                    "event".to_string(),
+                    format!(
+                        "source: {}{}",
+                        source,
+                        filter
+                            .as_ref()
+                            .map(|f| format!(", filter: {}", f))
+                            .unwrap_or_default()
+                    ),
+                ),
+                beebotos_agents::workflow::TriggerType::Webhook { path, method, auth } => (
+                    "webhook".to_string(),
+                    format!(
+                        "{} {}{}",
+                        method,
+                        path,
+                        auth.as_ref()
+                            .map(|a| format!(", auth: {}", a))
+                            .unwrap_or_default()
+                    ),
+                ),
                 beebotos_agents::workflow::TriggerType::Manual { .. } => {
                     ("manual".to_string(), "triggered via API".to_string())
                 }

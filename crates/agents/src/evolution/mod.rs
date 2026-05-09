@@ -15,27 +15,42 @@
 //! - DapoTrainer: dynamic sampling policy optimization (entropy-aware RL)
 //! - PapoTrainer: process-aware policy optimization (fine-grained step rewards)
 
+pub mod atropos;
+pub mod benchmark;
+pub mod capo;
+pub mod dapo;
 pub mod memory_nudge;
 pub mod memory_quality;
+pub mod papo;
+pub mod patch_engine;
+pub mod sandbox;
+pub mod scheduler;
 pub mod skill_distiller;
 pub mod skill_lineage;
-pub mod patch_engine;
-pub mod capo;
-pub mod atropos;
-pub mod dapo;
-pub mod papo;
-pub mod scheduler;
-pub mod sandbox;
-pub mod benchmark;
 
-pub use memory_nudge::{NudgeEngine, NudgeConfig, MemoryCandidate, MemoryWriter, NudgeTrigger};
-pub use memory_quality::{MemoryQualityEvaluator, ConsolidationEngine, RedundancyCheck};
-pub use skill_distiller::{SkillDistiller, DistillerConfig, DistilledSkill, DistillDecision, DistillTrigger};
-pub use skill_lineage::{SkillLineage, LineageNode, LineageSource, SkillLifecycleManager, UsageStats, LifecycleAction};
-pub use patch_engine::{PatchEngine, SkillPatch, PatchOp, PatchResult, Precondition};
-pub use capo::{CapoEngine, CapoConfig, ContextScorer, EditOp, AttributionScore, VersionMetrics, EvolutionResult};
-pub use atropos::{AtroposFramework, AtroposConfig, TrailCollector, AnnotatedTrail, EnvironmentManager, EvalEnvPool, DataPipeline, TrailStorage, InMemoryTrailStorage};
-pub use dapo::{DapoTrainer, DapoConfig, TemperatureScheduler, TrainingMetrics, TrajectoryBatch, Policy};
-pub use papo::{PapoTrainer, PapoConfig, CreditAssigner, CreditAssignmentStrategy, ProcessReward, ToolCallValidator, CodeExecutionValidator, HttpApiValidator, FileOperationValidator};
-pub use scheduler::{EvolutionScheduler, EvolutionSchedule, EvolutionSummary};
-pub use sandbox::{EvolutionSandbox, EvolutionProposal, EvolutionTarget, SafetyViolation};
+pub use atropos::{
+    AnnotatedTrail, AtroposConfig, AtroposFramework, DataPipeline, EnvironmentManager, EvalEnvPool,
+    InMemoryTrailStorage, TrailCollector, TrailStorage,
+};
+pub use capo::{
+    AttributionScore, CapoConfig, CapoEngine, ContextScorer, EditOp, EvolutionResult,
+    VersionMetrics,
+};
+pub use dapo::{
+    DapoConfig, DapoTrainer, Policy, TemperatureScheduler, TrainingMetrics, TrajectoryBatch,
+};
+pub use memory_nudge::{MemoryCandidate, MemoryWriter, NudgeConfig, NudgeEngine, NudgeTrigger};
+pub use memory_quality::{ConsolidationEngine, MemoryQualityEvaluator, RedundancyCheck};
+pub use papo::{
+    CodeExecutionValidator, CreditAssigner, CreditAssignmentStrategy, FileOperationValidator,
+    HttpApiValidator, PapoConfig, PapoTrainer, ProcessReward, ToolCallValidator,
+};
+pub use patch_engine::{PatchEngine, PatchOp, PatchResult, Precondition, SkillPatch};
+pub use sandbox::{EvolutionProposal, EvolutionSandbox, EvolutionTarget, SafetyViolation};
+pub use scheduler::{EvolutionSchedule, EvolutionScheduler, EvolutionSummary};
+pub use skill_distiller::{
+    DistillDecision, DistillTrigger, DistilledSkill, DistillerConfig, SkillDistiller,
+};
+pub use skill_lineage::{
+    LifecycleAction, LineageNode, LineageSource, SkillLifecycleManager, SkillLineage, UsageStats,
+};

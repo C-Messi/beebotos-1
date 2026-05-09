@@ -6,28 +6,20 @@
 //! - Attribution: credit/blame per change source
 
 use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
+
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 // use uuid::Uuid; // not currently needed
 
 /// Source of a lineage node — who/what created this version
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LineageSource {
     /// Auto-distilled from a task trail
-    AutoDistilled {
-        task_id: String,
-        trail_id: String,
-    },
+    AutoDistilled { task_id: String, trail_id: String },
     /// User manually edited the skill
-    ManualEdit {
-        user_id: String,
-        reason: String,
-    },
+    ManualEdit { user_id: String, reason: String },
     /// CAPO algorithm optimized the prompt/skill
-    CapoOptimized {
-        generation: u32,
-        improvement: f32,
-    },
+    CapoOptimized { generation: u32, improvement: f32 },
     /// Patch fix for a specific issue
     PatchFix {
         issue_id: String,
@@ -180,7 +172,8 @@ impl SkillLineage {
 
         for node in self.versions_chronological() {
             md.push_str(&format!(
-                "## `{}` (quality: {:.1})\n- **Source**: {:?}\n- **Summary**: {}\n- **Date**: {}\n\n",
+                "## `{}` (quality: {:.1})\n- **Source**: {:?}\n- **Summary**: {}\n- **Date**: \
+                 {}\n\n",
                 node.version,
                 node.quality_score,
                 node.source,
@@ -228,7 +221,10 @@ impl SkillLifecycleManager {
         let current = lineage.current().cloned().unwrap_or_else(|| LineageNode {
             version: lineage.current_version.clone(),
             parent_ids: vec![],
-            source: LineageSource::AutoDistilled { task_id: "unknown".to_string(), trail_id: "unknown".to_string() },
+            source: LineageSource::AutoDistilled {
+                task_id: "unknown".to_string(),
+                trail_id: "unknown".to_string(),
+            },
             change_summary: "Unknown".to_string(),
             created_at: Utc::now(),
             quality_score: 0.0,
@@ -238,7 +234,8 @@ impl SkillLifecycleManager {
 
         let stats = &current.usage_stats;
         let success_rate = stats.success_rate();
-        let days_since_use = stats.last_used
+        let days_since_use = stats
+            .last_used
             .map(|last| (Utc::now() - last).num_days())
             .unwrap_or(365);
 
@@ -293,7 +290,10 @@ mod tests {
         lineage.add_version(LineageNode {
             version: "1.1.0".to_string(),
             parent_ids: vec!["1.0.0".to_string()],
-            source: LineageSource::PatchFix { issue_id: "fix-1".to_string(), fix_description: "Fixed bug".to_string() },
+            source: LineageSource::PatchFix {
+                issue_id: "fix-1".to_string(),
+                fix_description: "Fixed bug".to_string(),
+            },
             change_summary: "Bug fix".to_string(),
             created_at: Utc::now(),
             quality_score: 7.0,
@@ -311,7 +311,10 @@ mod tests {
         lineage.add_version(LineageNode {
             version: "1.1.0".to_string(),
             parent_ids: vec!["1.0.0".to_string()],
-            source: LineageSource::AutoDistilled { task_id: "t".to_string(), trail_id: "t".to_string() },
+            source: LineageSource::AutoDistilled {
+                task_id: "t".to_string(),
+                trail_id: "t".to_string(),
+            },
             change_summary: "Update".to_string(),
             created_at: Utc::now(),
             quality_score: 6.0,
@@ -334,7 +337,10 @@ mod tests {
         lineage.add_version(LineageNode {
             version: "1.1.0".to_string(),
             parent_ids: vec!["1.0.0".to_string()],
-            source: LineageSource::AutoDistilled { task_id: "t".to_string(), trail_id: "t".to_string() },
+            source: LineageSource::AutoDistilled {
+                task_id: "t".to_string(),
+                trail_id: "t".to_string(),
+            },
             change_summary: "Update".to_string(),
             created_at: Utc::now(),
             quality_score: 8.0,
@@ -349,7 +355,12 @@ mod tests {
         });
 
         let health = manager.evaluate(&lineage);
-        assert_eq!(health.recommendation, LifecycleAction::Promote { reason: "High performance skill".to_string() });
+        assert_eq!(
+            health.recommendation,
+            LifecycleAction::Promote {
+                reason: "High performance skill".to_string()
+            }
+        );
     }
 
     #[test]
@@ -360,7 +371,10 @@ mod tests {
         lineage.add_version(LineageNode {
             version: "1.0.0".to_string(),
             parent_ids: vec![],
-            source: LineageSource::AutoDistilled { task_id: "t".to_string(), trail_id: "t".to_string() },
+            source: LineageSource::AutoDistilled {
+                task_id: "t".to_string(),
+                trail_id: "t".to_string(),
+            },
             change_summary: "Old".to_string(),
             created_at: Utc::now() - chrono::Duration::days(100),
             quality_score: 5.0,
@@ -375,6 +389,9 @@ mod tests {
         });
 
         let health = manager.evaluate(&lineage);
-        assert!(matches!(health.recommendation, LifecycleAction::Archive { .. }));
+        assert!(matches!(
+            health.recommendation,
+            LifecycleAction::Archive { .. }
+        ));
     }
 }

@@ -13,30 +13,46 @@ pub mod executor;
 pub mod feedback;
 pub mod hub;
 pub mod instance_manager;
+pub mod investment_analysis;
 pub mod knowledge_executor;
 pub mod link_handler;
-pub mod mcp_parameter_extractor;
 pub mod loader;
+pub mod mcp_parameter_extractor;
 pub mod process_sandbox;
 pub mod rating;
 pub mod react_executor;
 pub mod registry;
 pub mod security;
 pub mod tool_set;
+pub mod unified_react_executor;
 
 pub use code_executor::CodeSkillExecutor;
-pub use command_handler::{CommandContext, CommandHandler, CommandResult, RuntimeInfo, RuntimeStatus};
+pub use command_handler::{
+    CommandContext, CommandHandler, CommandResult, RuntimeInfo, RuntimeStatus,
+};
 pub use discovery::{SkillDiscovery, SkillKind, SkillMetadata};
 pub use dynamic::{DynamicSkill, DynamicSkillLoader};
-pub use executor::{SkillContext, SkillExecutionError, SkillExecutionResult, SkillExecutor, StreamChunk};
+pub use executor::{
+    SkillContext, SkillExecutionError, SkillExecutionResult, SkillExecutor, StreamChunk,
+};
 pub use hub::{SkillInfo, SkillsHub};
-pub use instance_manager::{InstanceError, InstanceFilter, InstanceManager, InstanceStatus, SkillInstance, UsageStats};
+pub use instance_manager::{
+    InstanceError, InstanceFilter, InstanceManager, InstanceStatus, SkillInstance, UsageStats,
+};
 pub use knowledge_executor::KnowledgeSkillExecutor;
-pub use link_handler::{format_summary_for_display, LinkHandler, LinkSummary, ContentType};
-pub use mcp_parameter_extractor::{ExtractedParams, FieldSchema, McpParameterExtractor, PendingParameterForm};
-pub use loader::{FunctionDef, FunctionParameter, LoadedSkill, SkillLoadError, SkillLoader, SkillManifest};
+pub use link_handler::{format_summary_for_display, ContentType, LinkHandler, LinkSummary};
+pub use loader::{
+    FunctionDef, FunctionParameter, LoadedSkill, SkillLoadError, SkillLoader, SkillManifest,
+};
+pub use mcp_parameter_extractor::{
+    ExtractedParams, FieldSchema, McpParameterExtractor, PendingParameterForm,
+};
 pub use rating::{RatingSummary, SkillRating, SkillRatingStore};
 pub use react_executor::ReActExecutor;
 pub use registry::{RegisteredSkill, SkillDefinition, SkillRegistry, Version, VersionError};
 pub use security::{SandboxMode, SkillSecurityPolicy, SkillSecurityValidator, ValidationError};
-pub use tool_set::{default_tool_set, BashShellTool, FileListTool, FileReadTool, FileWriteTool, ProcessExecTool, SkillTool};
+pub use tool_set::{
+    default_tool_set, BashShellTool, FileListTool, FileReadTool, FileWriteTool, ProcessExecTool,
+    SkillTool,
+};
+pub use unified_react_executor::{parse_react_response, UnifiedReActConfig, UnifiedReActExecutor};

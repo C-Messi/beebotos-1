@@ -38,7 +38,7 @@
 //!     // Create multimodal message
 //!     let contents = vec![
 //!         Content::Text {
-//!             text: "What's in this image?".to_string()
+//!             text: "What's in this image?".to_string(),
 //!         },
 //!         Content::ImageUrl {
 //!             image_url: ImageUrlContent {
@@ -60,13 +60,13 @@
 //!
 //! async fn stream_chat() -> Result<(), Box<dyn std::error::Error>> {
 //!     let client = create_kimi_client().await?;
-//!     
+//!
 //!     let mut stream = client.chat_stream("Tell me a story").await?;
-//!     
+//!
 //!     while let Some(chunk) = stream.recv().await {
 //!         print!("{}", chunk);
 //!     }
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -114,52 +114,35 @@ pub mod traits;
 pub mod types;
 
 // Re-export HTTP client types
-pub use http_client::{
-    LLMHttpClient, OpenAIRequestBuilder, ProviderConfig, ProviderInitParams,
-};
-
 // Re-export main types
 pub use adapter::{LLMClientAdapter, LegacyLLMClientBuilder};
-pub use client::{LLMClient, LLMClientBuilder, ToolHandler, ClientMetrics};
-
+pub use client::{ClientMetrics, LLMClient, LLMClientBuilder, ToolHandler};
 // ARCHITECTURE FIX: Re-export failover types
 pub use failover::{FailoverConfig, FailoverProvider, FailoverProviderBuilder};
+pub use http_client::{LLMHttpClient, OpenAIRequestBuilder, ProviderConfig, ProviderInitParams};
+// 🔧 P1 FIX: Re-export ProviderMode for multi-provider configuration
+pub use providers::ProviderMode;
+// Re-export model name modules
+pub use providers::{
+    anthropic_models, chatglm_models, claude_models, deepseek_models, doubao_models, gemini_models,
+    kimi_models, ollama_models, openai_models, qwen_models, zhipu_models,
+};
+// Re-export all providers
+pub use providers::{
+    AnthropicConfig, AnthropicProvider, ChatGLMConfig, ChatGLMProvider, ClaudeConfig,
+    ClaudeProvider, DeepSeekConfig, DeepSeekProvider, DoubaoConfig, DoubaoProvider, GeminiConfig,
+    GeminiProvider, KimiConfig, KimiProvider, OllamaConfig, OllamaProvider, OpenAIConfig,
+    OpenAIProvider, ProviderFactory, QwenConfig, QwenProvider, ZhipuConfig, ZhipuProvider,
+};
 pub use traits::{
     ContextManager, LLMProvider, MetricsCollector, ModelCapabilities, ModelInfo,
     ProviderCapabilities, RetryPolicy, ToolExecutor,
 };
 pub use types::{
-    Choice, Content, Delta, FunctionCall, FunctionDefinition, FunctionChoice,
-    ImageUrlContent, LLMError, LLMRequest, LLMResponse, LLMResult, Message,
-    RequestConfig, ResponseFormat, Role, StreamChunk, StreamChoice, Tool, ToolCall,
-    ToolChoice, ToolResult, Usage,
+    Choice, Content, Delta, FunctionCall, FunctionChoice, FunctionDefinition, ImageUrlContent,
+    LLMError, LLMRequest, LLMResponse, LLMResult, Message, RequestConfig, ResponseFormat, Role,
+    StreamChoice, StreamChunk, Tool, ToolCall, ToolChoice, ToolResult, Usage,
 };
-
-// Re-export model name modules
-pub use providers::{
-    kimi_models, openai_models, deepseek_models, chatglm_models,
-    doubao_models, qwen_models, gemini_models, claude_models,
-    anthropic_models, ollama_models, zhipu_models,
-};
-
-// Re-export all providers
-pub use providers::{
-    AnthropicConfig, AnthropicProvider,
-    ChatGLMConfig, ChatGLMProvider,
-    ClaudeConfig, ClaudeProvider,
-    DeepSeekConfig, DeepSeekProvider,
-    DoubaoConfig, DoubaoProvider,
-    GeminiConfig, GeminiProvider,
-    KimiConfig, KimiProvider,
-    OllamaConfig, OllamaProvider,
-    OpenAIConfig, OpenAIProvider,
-    QwenConfig, QwenProvider,
-    ZhipuConfig, ZhipuProvider,
-    ProviderFactory,
-};
-
-// 🔧 P1 FIX: Re-export ProviderMode for multi-provider configuration
-pub use providers::{ProviderMode};
 
 /// Create a Kimi client from environment variables
 ///
@@ -170,9 +153,7 @@ pub async fn create_kimi_client() -> LLMResult<LLMClient> {
 }
 
 /// Create a Kimi client with custom config
-pub async fn create_kimi_client_with_config(
-    config: KimiConfig,
-) -> LLMResult<LLMClient> {
+pub async fn create_kimi_client_with_config(config: KimiConfig) -> LLMResult<LLMClient> {
     let provider = KimiProvider::new(config)?;
     Ok(LLMClient::new(std::sync::Arc::new(provider)))
 }
@@ -233,7 +214,8 @@ pub async fn create_claude_client() -> LLMResult<LLMClient> {
     Ok(LLMClient::new(std::sync::Arc::new(provider)))
 }
 
-/// Create an Anthropic client from environment variables (alias for create_claude_client)
+/// Create an Anthropic client from environment variables (alias for
+/// create_claude_client)
 ///
 /// Expects ANTHROPIC_API_KEY to be set
 pub async fn create_anthropic_client() -> LLMResult<LLMClient> {
@@ -273,20 +255,20 @@ mod tests {
 
     #[test]
     fn test_message_with_image() {
-        let msg = Message::user("What's in this image?")
-            .with_image("https://example.com/image.png");
-        
+        let msg =
+            Message::user("What's in this image?").with_image("https://example.com/image.png");
+
         assert_eq!(msg.content.len(), 2);
     }
 
     #[test]
     fn test_retry_policy() {
         let policy = RetryPolicy::default();
-        
+
         // Should retry network errors
         let error = LLMError::Network("timeout".to_string());
         assert!(policy.should_retry(&error, 0));
-        
+
         // Should not retry after max attempts
         assert!(!policy.should_retry(&error, 3));
     }

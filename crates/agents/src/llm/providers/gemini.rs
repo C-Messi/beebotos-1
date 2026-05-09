@@ -36,7 +36,7 @@ impl Default for GeminiConfig {
 impl GeminiConfig {
     pub fn from_env() -> Result<Self, String> {
         use std::env;
-        
+
         let api_key = env::var("GEMINI_API_KEY")
             .or_else(|_| env::var("GOOGLE_API_KEY"))
             .map_err(|_| "GEMINI_API_KEY or GOOGLE_API_KEY not set".to_string())?;
@@ -84,7 +84,10 @@ impl GeminiProvider {
             max_output_tokens: 8_192,
         };
 
-        info!("Gemini provider initialized with model: {}", config.default_model);
+        info!(
+            "Gemini provider initialized with model: {}",
+            config.default_model
+        );
 
         Ok(Self {
             config,
@@ -94,8 +97,7 @@ impl GeminiProvider {
     }
 
     pub fn from_env() -> Result<Self, LLMError> {
-        let config = GeminiConfig::from_env()
-            .map_err(|e| LLMError::InvalidRequest(e))?;
+        let config = GeminiConfig::from_env().map_err(|e| LLMError::InvalidRequest(e))?;
         Self::new(config)
     }
 
@@ -129,7 +131,7 @@ impl GeminiProvider {
 
     async fn execute_with_retry(&self, request: LLMRequest) -> LLMResult<reqwest::Response> {
         let (system_prompt, contents) = self.convert_messages(request.messages);
-        
+
         let model = if request.config.model.is_empty() {
             self.config.default_model.clone()
         } else {
@@ -164,26 +166,51 @@ impl GeminiProvider {
 
         let headers = {
             let mut h = HeaderMap::new();
-            h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            h.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
             h
         };
 
         let mut attempt = 0u32;
         loop {
-            let response = self.http_client.post(&url).headers(headers.clone()).json(&body).send().await
-                .map_err(|e| if e.is_timeout() { LLMError::Timeout } else { LLMError::Network(e.to_string()) })?;
+            let response = self
+                .http_client
+                .post(&url)
+                .headers(headers.clone())
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        LLMError::Timeout
+                    } else {
+                        LLMError::Network(e.to_string())
+                    }
+                })?;
 
-            if response.status().is_success() { return Ok(response); }
+            if response.status().is_success() {
+                return Ok(response);
+            }
 
             let status = response.status();
-            let error_body = response.text().await.unwrap_or_else(|_| "Unknown".to_string());
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown".to_string());
             let error = match status {
                 reqwest::StatusCode::UNAUTHORIZED => LLMError::Auth("Invalid key".to_string()),
                 reqwest::StatusCode::TOO_MANY_REQUESTS => LLMError::RateLimit { retry_after: None },
-                _ => LLMError::Api { code: status.as_u16(), message: error_body },
+                _ => LLMError::Api {
+                    code: status.as_u16(),
+                    message: error_body,
+                },
             };
 
-            if !self.config.retry_policy.should_retry(&error, attempt) { return Err(error); }
+            if !self.config.retry_policy.should_retry(&error, attempt) {
+                return Err(error);
+            }
             attempt += 1;
             tokio::time::sleep(self.config.retry_policy.delay_for_attempt(attempt)).await;
         }
@@ -192,16 +219,23 @@ impl GeminiProvider {
 
 #[async_trait]
 impl LLMProvider for GeminiProvider {
-    fn name(&self) -> &str { "gemini" }
-    fn capabilities(&self) -> ProviderCapabilities { self.capabilities.clone() }
+    fn name(&self) -> &str {
+        "gemini"
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.capabilities.clone()
+    }
 
     async fn complete(&self, request: LLMRequest) -> LLMResult<LLMResponse> {
         let response = self.execute_with_retry(request).await?;
-        let gemini_resp: GeminiResponse = response.json().await
+        let gemini_resp: GeminiResponse = response
+            .json()
+            .await
             .map_err(|e| LLMError::Serialization(e.to_string()))?;
 
         // Convert Gemini response to standard format
-        let content = gemini_resp.candidates
+        let content = gemini_resp
+            .candidates
             .first()
             .and_then(|c| c.content.parts.first())
             .map(|p| p.text.clone())
@@ -226,40 +260,69 @@ impl LLMProvider for GeminiProvider {
         })
     }
 
-    async fn complete_stream(&self, _request: LLMRequest) -> LLMResult<mpsc::Receiver<StreamChunk>> {
+    async fn complete_stream(
+        &self,
+        _request: LLMRequest,
+    ) -> LLMResult<mpsc::Receiver<StreamChunk>> {
         // Gemini streaming implementation would go here
-        Err(LLMError::NotImplemented("Streaming not yet implemented for Gemini".to_string()))
+        Err(LLMError::NotImplemented(
+            "Streaming not yet implemented for Gemini".to_string(),
+        ))
     }
 
     async fn health_check(&self) -> LLMResult<()> {
         let test = LLMRequest {
             messages: vec![Message::user("Hi")],
-            config: RequestConfig { max_tokens: Some(1), ..Default::default() },
+            config: RequestConfig {
+                max_tokens: Some(1),
+                ..Default::default()
+            },
         };
-        self.complete(test).await.map(|_| ()).map_err(|e| LLMError::Provider(format!("Health check: {}", e)))
+        self.complete(test)
+            .await
+            .map(|_| ())
+            .map_err(|e| LLMError::Provider(format!("Health check: {}", e)))
     }
 
     async fn list_models(&self) -> LLMResult<Vec<ModelInfo>> {
         Ok(vec![
             ModelInfo {
-                id: gemini_models::GEMINI_2_0_FLASH.to_string(), name: "Gemini 2.0 Flash".to_string(),
+                id: gemini_models::GEMINI_2_0_FLASH.to_string(),
+                name: "Gemini 2.0 Flash".to_string(),
                 description: Some("Fast multimodal model".to_string()),
-                context_window: 1_000_000, max_tokens: 8_192,
-                capabilities: ModelCapabilities { vision: true, function_calling: true, json_mode: true },
+                context_window: 1_000_000,
+                max_tokens: 8_192,
+                capabilities: ModelCapabilities {
+                    vision: true,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.0, 0.0)), // Currently free tier
             },
             ModelInfo {
-                id: gemini_models::GEMINI_1_5_PRO.to_string(), name: "Gemini 1.5 Pro".to_string(),
+                id: gemini_models::GEMINI_1_5_PRO.to_string(),
+                name: "Gemini 1.5 Pro".to_string(),
                 description: Some("High performance, 1M context".to_string()),
-                context_window: 2_000_000, max_tokens: 8_192,
-                capabilities: ModelCapabilities { vision: true, function_calling: true, json_mode: true },
+                context_window: 2_000_000,
+                max_tokens: 8_192,
+                capabilities: ModelCapabilities {
+                    vision: true,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.0035, 0.0105)),
             },
             ModelInfo {
-                id: gemini_models::GEMINI_1_5_FLASH.to_string(), name: "Gemini 1.5 Flash".to_string(),
+                id: gemini_models::GEMINI_1_5_FLASH.to_string(),
+                name: "Gemini 1.5 Flash".to_string(),
                 description: Some("Fast and cost-effective".to_string()),
-                context_window: 1_000_000, max_tokens: 8_192,
-                capabilities: ModelCapabilities { vision: true, function_calling: true, json_mode: true },
+                context_window: 1_000_000,
+                max_tokens: 8_192,
+                capabilities: ModelCapabilities {
+                    vision: true,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.00035, 0.00105)),
             },
         ])

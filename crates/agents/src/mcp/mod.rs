@@ -15,17 +15,19 @@ pub mod transport;
 pub mod types;
 
 // Internal helper modules
-mod tools;
 mod context;
+mod tools;
 
 pub use client::{ClientConfig, MCPClient};
-pub use server::{MCPServer, ServerConfig};
-pub use transport::{HttpTransport, HttpTransportConfig, StdioTransport, StdioTransportConfig, Transport, TransportBridge};
-pub use types::*;
-
 // Re-export internal types for backward compatibility
 pub use context::McpContext;
+pub use server::{MCPServer, ServerConfig};
 pub use tools::{McpTool, McpToolRegistry};
+pub use transport::{
+    HttpTransport, HttpTransportConfig, StdioTransport, StdioTransportConfig, Transport,
+    TransportBridge,
+};
+pub use types::*;
 
 /// MCP capability
 #[derive(Debug, Clone, Serialize, Deserialize)]

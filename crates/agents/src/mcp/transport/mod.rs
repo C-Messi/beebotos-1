@@ -5,8 +5,9 @@
 //! - stdio: local subprocess via stdin/stdout (JSON-RPC lines)
 //! - HTTP/SSE: remote server via HTTP POST + SSE event stream
 
-use async_trait::async_trait;
 use std::sync::Arc;
+
+use async_trait::async_trait;
 
 use super::types::{JsonRpcRequest, JsonRpcResponse};
 use super::MCPError;
@@ -37,11 +38,13 @@ pub trait Transport: Send + Sync {
     fn is_connected(&self) -> bool;
 }
 
-/// Transport bridge that wires MCPClient channels to a Transport implementation.
+/// Transport bridge that wires MCPClient channels to a Transport
+/// implementation.
 ///
 /// Spawns a background task that:
 /// 1. Reads outgoing requests from `request_rx` and sends them via transport
-/// 2. Reads incoming responses from transport and forwards them to `response_tx`
+/// 2. Reads incoming responses from transport and forwards them to
+///    `response_tx`
 pub struct TransportBridge {
     _handle: tokio::task::JoinHandle<()>,
 }
@@ -98,7 +101,9 @@ impl TransportBridge {
 /// Validate that a command path is safe (no path traversal).
 pub(crate) fn validate_command_path(path: &str) -> Result<(), MCPError> {
     if path.is_empty() {
-        return Err(MCPError::InvalidParams("Command path cannot be empty".to_string()));
+        return Err(MCPError::InvalidParams(
+            "Command path cannot be empty".to_string(),
+        ));
     }
     if path.contains("..") {
         return Err(MCPError::InvalidParams(format!(
@@ -111,9 +116,13 @@ pub(crate) fn validate_command_path(path: &str) -> Result<(), MCPError> {
 
 /// Validate that a command is in the allowed whitelist.
 ///
-/// If `allowed_commands` is empty, all commands are permitted (backward compatible).
-/// Otherwise, the command must match one of the allowed entries exactly.
-pub(crate) fn validate_command_whitelist(command: &str, allowed_commands: &[String]) -> Result<(), MCPError> {
+/// If `allowed_commands` is empty, all commands are permitted (backward
+/// compatible). Otherwise, the command must match one of the allowed entries
+/// exactly.
+pub(crate) fn validate_command_whitelist(
+    command: &str,
+    allowed_commands: &[String],
+) -> Result<(), MCPError> {
     if allowed_commands.is_empty() {
         return Ok(());
     }

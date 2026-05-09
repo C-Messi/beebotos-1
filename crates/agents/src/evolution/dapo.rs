@@ -76,19 +76,20 @@ impl TemperatureScheduler {
             self.entropy_history.pop_front();
         }
 
-        let avg_entropy: f32 = self.entropy_history.iter().sum::<f32>()
-            / self.entropy_history.len().max(1) as f32;
+        let avg_entropy: f32 =
+            self.entropy_history.iter().sum::<f32>() / self.entropy_history.len().max(1) as f32;
 
         if avg_entropy < self.config.entropy_collapse_threshold {
             // Entropy collapse detected → boost exploration
-            let boost = (self.config.target_entropy - avg_entropy)
-                * self.config.recovery_sampling_ratio;
-            self.current_temperature = (self.current_temperature + boost)
-                .min(self.config.max_temperature);
+            let boost =
+                (self.config.target_entropy - avg_entropy) * self.config.recovery_sampling_ratio;
+            self.current_temperature =
+                (self.current_temperature + boost).min(self.config.max_temperature);
 
             tracing::warn!(
                 "DAPO entropy collapse detected: {:.3} → boosting temperature to {:.3}",
-                avg_entropy, self.current_temperature
+                avg_entropy,
+                self.current_temperature
             );
         } else if avg_entropy > self.config.target_entropy * 1.2 {
             // Entropy too high → reduce exploration
@@ -101,7 +102,10 @@ impl TemperatureScheduler {
 
     /// Apply temperature to logits for sampling
     pub fn apply_temperature(&self, logits: &[f32]) -> Vec<f32> {
-        logits.iter().map(|&l| l / self.current_temperature).collect()
+        logits
+            .iter()
+            .map(|&l| l / self.current_temperature)
+            .collect()
     }
 
     pub fn current_temperature(&self) -> f32 {
@@ -187,7 +191,8 @@ impl DapoTrainer {
     /// Compute policy entropy from a batch
     pub fn compute_entropy(&self, batch: &TrajectoryBatch) -> f32 {
         // Simplified: estimate entropy from action diversity
-        let mut action_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut action_counts: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
         let mut total_actions = 0usize;
 
         for traj in &batch.trajectories {
@@ -212,30 +217,33 @@ impl DapoTrainer {
     }
 
     /// Sample actions with temperature-adjusted logits
-    pub fn sample_with_temperature(
-        &self,
-        logits: &[f32],
-        temperature: f32,
-    ) -> Vec<f32> {
+    pub fn sample_with_temperature(&self, logits: &[f32], temperature: f32) -> Vec<f32> {
         let scaled: Vec<f32> = logits.iter().map(|&l| l / temperature).collect();
         let max_logit = scaled.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
         let exp_sum: f32 = scaled.iter().map(|&l| (l - max_logit).exp()).sum();
-        scaled.iter().map(|&l| (l - max_logit).exp() / exp_sum).collect()
+        scaled
+            .iter()
+            .map(|&l| (l - max_logit).exp() / exp_sum)
+            .collect()
     }
 
     /// Compute advantages (simplified: reward-to-go baseline)
     pub fn compute_advantages(&self, batch: &TrajectoryBatch) -> Vec<Vec<f32>> {
-        batch.trajectories.iter().map(|traj| {
-            let n = traj.rewards.len();
-            let mut advantages = Vec::with_capacity(n);
-            let mut running_sum = 0.0;
-            for i in (0..n).rev() {
-                running_sum += traj.rewards[i];
-                advantages.push(running_sum);
-            }
-            advantages.reverse();
-            advantages
-        }).collect()
+        batch
+            .trajectories
+            .iter()
+            .map(|traj| {
+                let n = traj.rewards.len();
+                let mut advantages = Vec::with_capacity(n);
+                let mut running_sum = 0.0;
+                for i in (0..n).rev() {
+                    running_sum += traj.rewards[i];
+                    advantages.push(running_sum);
+                }
+                advantages.reverse();
+                advantages
+            })
+            .collect()
     }
 
     /// Update policy (simplified CLIP-like update)
@@ -257,7 +265,9 @@ impl DapoTrainer {
 
     /// Update value function (placeholder)
     pub fn update_critic(&mut self, batch: &TrajectoryBatch) -> f32 {
-        let total_reward: f32 = batch.trajectories.iter()
+        let total_reward: f32 = batch
+            .trajectories
+            .iter()
             .map(|t| t.rewards.iter().sum::<f32>())
             .sum();
         total_reward / batch.trajectories.len().max(1) as f32
@@ -273,7 +283,8 @@ impl DapoTrainer {
     fn estimate_policy(&self, batch: &TrajectoryBatch) -> Policy {
         let mut action_probs = Vec::new();
         for traj in &batch.trajectories {
-            let mut counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+            let mut counts: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::new();
             for &a in &traj.actions {
                 *counts.entry(a).or_insert(0) += 1;
             }
@@ -313,7 +324,9 @@ impl DapoTrainer {
         let value_loss = self.update_critic(&batch);
 
         // 7. KL divergence
-        let kl = if let (Some(ref current), Some(ref baseline)) = (&self.current_policy, &self.baseline_policy) {
+        let kl = if let (Some(ref current), Some(ref baseline)) =
+            (&self.current_policy, &self.baseline_policy)
+        {
             current.kl_divergence(baseline)
         } else {
             0.0
@@ -355,7 +368,10 @@ mod tests {
             scheduler.update(0.1);
         }
 
-        assert!(scheduler.current_temperature() > 1.0, "Temperature should boost after collapse");
+        assert!(
+            scheduler.current_temperature() > 1.0,
+            "Temperature should boost after collapse"
+        );
     }
 
     #[test]
@@ -374,16 +390,16 @@ mod tests {
             scheduler.update(2.0);
         }
 
-        assert!(scheduler.current_temperature() < 1.5, "Temperature should decay with high entropy");
+        assert!(
+            scheduler.current_temperature() < 1.5,
+            "Temperature should decay with high entropy"
+        );
     }
 
     #[test]
     fn test_policy_entropy() {
         let policy = Policy {
-            action_probs: vec![
-                vec![0.5, 0.5],
-                vec![0.9, 0.1],
-            ],
+            action_probs: vec![vec![0.5, 0.5], vec![0.9, 0.1]],
         };
         let entropy = policy.entropy();
         assert!(entropy > 0.0);
@@ -393,14 +409,12 @@ mod tests {
     fn test_dapo_train_step() {
         let mut trainer = DapoTrainer::new(DapoConfig::default());
         let batch = TrajectoryBatch {
-            trajectories: vec![
-                Trajectory {
-                    states: vec!["s1".to_string(), "s2".to_string()],
-                    actions: vec![0, 1],
-                    rewards: vec![0.5, 1.0],
-                    final_reward: 1.5,
-                },
-            ],
+            trajectories: vec![Trajectory {
+                states: vec!["s1".to_string(), "s2".to_string()],
+                actions: vec![0, 1],
+                rewards: vec![0.5, 1.0],
+                final_reward: 1.5,
+            }],
         };
 
         let metrics = trainer.train_step(batch);
@@ -413,6 +427,9 @@ mod tests {
         let trainer = DapoTrainer::new(DapoConfig::default());
         let low_bonus = trainer.entropy_bonus(2.0); // above target
         let high_bonus = trainer.entropy_bonus(0.1); // far below target
-        assert!(high_bonus > low_bonus, "Low entropy should get higher bonus");
+        assert!(
+            high_bonus > low_bonus,
+            "Low entropy should get higher bonus"
+        );
     }
 }

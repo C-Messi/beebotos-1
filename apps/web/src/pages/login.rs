@@ -1,14 +1,15 @@
 //! Login Page
 
-use crate::api::AuthService;
-use crate::i18n::I18nContext;
-use crate::state::{use_auth_state, Permission, Role, User};
 use gloo_storage::Storage;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::view;
 use leptos_router::components::A;
 use leptos_router::hooks::use_navigate;
+
+use crate::api::AuthService;
+use crate::i18n::I18nContext;
+use crate::state::{use_auth_state, Permission, Role, User};
 
 #[component]
 pub fn LoginPage() -> impl IntoView {
@@ -105,15 +106,12 @@ pub fn LoginPage() -> impl IntoView {
                             .flatten()
                             .filter(|p| !p.is_empty() && p != "/login" && p != "/register")
                             .unwrap_or_else(|| "/".to_string());
-                        let _ = gloo_storage::SessionStorage::raw().remove_item("redirect_after_login");
+                        let _ =
+                            gloo_storage::SessionStorage::raw().remove_item("redirect_after_login");
                         nav(&redirect_path, Default::default());
                     }
                     Err(e) => {
-                        set_error.set(Some(format!(
-                            "{}: {}",
-                            i18n.t("login-error-failed"),
-                            e
-                        )));
+                        set_error.set(Some(format!("{}: {}", i18n.t("login-error-failed"), e)));
                     }
                 }
 

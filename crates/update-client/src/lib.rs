@@ -1,6 +1,7 @@
 //! BeeBotOS Update Client
 //!
-//! Core library for remote software updates across Gateway, CLI, and Web applications.
+//! Core library for remote software updates across Gateway, CLI, and Web
+//! applications.
 
 pub mod config;
 pub mod error;
@@ -16,13 +17,11 @@ pub mod verify;
 pub mod web_client;
 
 // Re-exports
-pub use config::{UpdateConfig, default_platform};
+#[cfg(not(target_arch = "wasm32"))]
+pub use client::{ConsoleProgress, DownloadProgress, NativeUpdateClient, UpdateClient};
+pub use config::{default_platform, UpdateConfig};
 pub use error::UpdateError;
 pub use models::*;
 pub use utils::{matches_platform, select_package};
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use client::{ConsoleProgress, DownloadProgress, NativeUpdateClient, UpdateClient};
-
 #[cfg(target_arch = "wasm32")]
 pub use web_client::WebUpdater;

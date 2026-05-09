@@ -1,7 +1,8 @@
 //! LLM Intent Analyzer
 //!
 //! Pure LLM-driven intent understanding with zero hardcoded keyword rules.
-//! All semantic decisions (direct answer, skill need, planning need) are made by LLM.
+//! All semantic decisions (direct answer, skill need, planning need) are made
+//! by LLM.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,10 +22,12 @@ pub enum PlanningStrategyHint {
     MultiSkill,
 }
 
-/// 🆕 V2: Intent analysis result — all fields produced by LLM, zero hardcoded rules
+/// 🆕 V2: Intent analysis result — all fields produced by LLM, zero hardcoded
+/// rules
 #[derive(Debug, Clone)]
 pub struct IntentAnalysisV2 {
-    /// Whether this is a direct conversational response (greeting, chit-chat, simple Q&A)
+    /// Whether this is a direct conversational response (greeting, chit-chat,
+    /// simple Q&A)
     pub direct_answer: bool,
     /// Whether a specialized skill is needed
     pub needs_skill: bool,
@@ -104,8 +107,9 @@ impl LLMIntentAnalyzer {
         self
     }
 
-    /// Analyze user query using LLM. No keyword rules, no regex, no hardcoded mappings.
-    /// 🆕 FIX: Results are cached for 5 minutes to avoid repeated LLM calls for identical queries.
+    /// Analyze user query using LLM. No keyword rules, no regex, no hardcoded
+    /// mappings. 🆕 FIX: Results are cached for 5 minutes to avoid repeated
+    /// LLM calls for identical queries.
     pub async fn analyze(
         &self,
         user_message: &str,
@@ -117,7 +121,10 @@ impl LLMIntentAnalyzer {
             let cache = self.cache.read().await;
             if let Some((cached, timestamp)) = cache.get(&cache_key) {
                 if timestamp.elapsed() < self.cache_ttl {
-                    tracing::debug!("Intent analysis cache hit for: {}", &cache_key[..cache_key.len().min(50)]);
+                    tracing::debug!(
+                        "Intent analysis cache hit for: {}",
+                        &cache_key[..cache_key.len().min(50)]
+                    );
                     return Ok(cached.clone());
                 }
             }
@@ -125,13 +132,10 @@ impl LLMIntentAnalyzer {
 
         let (system_prompt, user_prompt) = self.build_analysis_prompts(user_message, history);
 
-        // 🆕 FIX: Send system + user as separate messages so gateway correctly identifies roles.
+        // 🆕 FIX: Send system + user as separate messages so gateway correctly
+        // identifies roles.
         let messages = vec![
-            Message::new(
-                uuid::Uuid::new_v4(),
-                PlatformType::Custom,
-                system_prompt,
-            ),
+            Message::new(uuid::Uuid::new_v4(), PlatformType::Custom, system_prompt),
             Message::new(
                 uuid::Uuid::new_v4(),
                 PlatformType::WebChat,
@@ -139,17 +143,16 @@ impl LLMIntentAnalyzer {
             ),
         ];
 
-        // 🆕 FIX: Limit max_tokens to 512 — intent analysis only needs a small JSON output.
+        // 🆕 FIX: Limit max_tokens to 512 — intent analysis only needs a small JSON
+        // output.
         let mut context = std::collections::HashMap::new();
         context.insert("max_tokens".to_string(), "512".to_string());
 
-        let response = tokio::time::timeout(
-            self.timeout,
-            self.llm.call_llm(messages, Some(context)),
-        )
-        .await
-        .map_err(|_| IntentAnalyzeError::Timeout(self.timeout.as_secs()))?
-        .map_err(|e| IntentAnalyzeError::LLMError(e.to_string()))?;
+        let response =
+            tokio::time::timeout(self.timeout, self.llm.call_llm(messages, Some(context)))
+                .await
+                .map_err(|_| IntentAnalyzeError::Timeout(self.timeout.as_secs()))?
+                .map_err(|e| IntentAnalyzeError::LLMError(e.to_string()))?;
 
         let result = self.parse_analysis_response(&response, user_message)?;
 
@@ -230,8 +233,7 @@ impl LLMIntentAnalyzer {
             .to_string();
 
         let user_prompt = format!(
-            "## User Message\n{}\n\n\
-            ## Conversation History (last 3 turns)\n{}",
+            "## User Message\n{}\n\n## Conversation History (last 3 turns)\n{}",
             user_message, history_text
         );
 
@@ -414,9 +416,15 @@ mod tests {
         assert!(!analysis.direct_answer);
         assert!(analysis.needs_skill);
         assert!(analysis.needs_planning);
-        assert_eq!(analysis.planning_strategy_hint, Some(PlanningStrategyHint::ReAct));
+        assert_eq!(
+            analysis.planning_strategy_hint,
+            Some(PlanningStrategyHint::ReAct)
+        );
         assert_eq!(analysis.entities.get("city"), Some(&"Beijing".to_string()));
-        assert_eq!(analysis.query_summary, "travel plan Beijing 5 days budget 5000");
+        assert_eq!(
+            analysis.query_summary,
+            "travel plan Beijing 5 days budget 5000"
+        );
         assert!((analysis.confidence - 0.92).abs() < 0.01);
     }
 

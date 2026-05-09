@@ -2,15 +2,16 @@
 //!
 //! REST API for managing MCP (Model Context Protocol) connections and tools.
 
+use std::sync::Arc;
+
 use axum::extract::{Path, State};
 use axum::Json;
+use gateway::middleware::{require_any_role, AuthUser};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::error::GatewayError;
 use crate::AppState;
-use gateway::middleware::{require_any_role, AuthUser};
 
 // ---------------------------------------------------------------------------
 // Request/Response types
@@ -119,7 +120,10 @@ pub async fn list_tools(
         .list_tools(None)
         .await
         .map_err(|e| GatewayError::Internal {
-            message: format!("Failed to list tools from MCP server '{}': {}", server_name, e),
+            message: format!(
+                "Failed to list tools from MCP server '{}': {}",
+                server_name, e
+            ),
             correlation_id: uuid::Uuid::new_v4().to_string(),
         })?;
 
@@ -209,14 +213,16 @@ pub async fn bridge(
         .as_ref()
         .ok_or_else(|| GatewayError::service_unavailable("MCP", "MCP manager not initialized"))?;
 
-    let registry = state
-        .skill_registry
-        .as_ref()
-        .ok_or_else(|| GatewayError::service_unavailable("SkillRegistry", "Skill registry not initialized"))?;
+    let registry = state.skill_registry.as_ref().ok_or_else(|| {
+        GatewayError::service_unavailable("SkillRegistry", "Skill registry not initialized")
+    })?;
 
     match beebotos_agents::mcp::skill_bridge::McpSkillBridge::bridge_all(manager, registry).await {
         Ok(count) => {
-            info!("MCP bridge triggered by admin '{}': {} tool(s) registered", user.claims.sub, count);
+            info!(
+                "MCP bridge triggered by admin '{}': {} tool(s) registered",
+                user.claims.sub, count
+            );
             Ok(Json(McpBridgeResponse {
                 success: true,
                 registered: count,

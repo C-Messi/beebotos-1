@@ -1,10 +1,12 @@
 //! Advanced API Client with retry, caching, and request deduplication
 
-use crate::api::TokenRefreshResponse;
-use gloo_net::http::Response;
-use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use gloo_net::http::Response;
+use parking_lot::RwLock;
+
+use crate::api::TokenRefreshResponse;
 
 const DEFAULT_TIMEOUT_MS: u32 = 30000;
 const DEFAULT_RETRY_ATTEMPTS: u32 = 3;
@@ -257,7 +259,10 @@ impl ApiClient {
         } else if api_response.status == 401 {
             Err(ApiError::Unauthorized)
         } else {
-            Err(ApiError::from_response(api_response.status, &api_response.body))
+            Err(ApiError::from_response(
+                api_response.status,
+                &api_response.body,
+            ))
         }
     }
 
@@ -579,7 +584,10 @@ impl ApiError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            ApiError::Network(_) | ApiError::ServerError(_, _) | ApiError::Timeout | ApiError::Unknown
+            ApiError::Network(_)
+                | ApiError::ServerError(_, _)
+                | ApiError::Timeout
+                | ApiError::Unknown
         )
     }
 
@@ -591,12 +599,12 @@ impl ApiError {
             ApiError::Forbidden => "You don't have permission to do this".to_string(),
             ApiError::NotFound => "Resource not found".to_string(),
             ApiError::Timeout => "Request timed out, please try again".to_string(),
-            ApiError::ServerError(code, msg) => {
-                msg.clone().unwrap_or_else(|| format!("Server error ({}), please try again later", code))
-            }
-            ApiError::ClientError(code, msg) => {
-                msg.clone().unwrap_or_else(|| format!("Request failed ({})", code))
-            }
+            ApiError::ServerError(code, msg) => msg
+                .clone()
+                .unwrap_or_else(|| format!("Server error ({}), please try again later", code)),
+            ApiError::ClientError(code, msg) => msg
+                .clone()
+                .unwrap_or_else(|| format!("Request failed ({})", code)),
             ApiError::Serialization(msg) => format!("Failed to parse response: {}", msg),
             ApiError::Cancelled => "Request was cancelled".to_string(),
             ApiError::Unknown => "An unexpected error occurred".to_string(),

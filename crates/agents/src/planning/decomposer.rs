@@ -3,9 +3,11 @@
 //! Provides strategies for breaking down complex goals into manageable steps.
 //! Supports hierarchical, parallel, and recursive decomposition.
 
-use super::plan::{Action, Plan, PlanStep, PlanningResult, StepType};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+
+use super::plan::{Action, Plan, PlanStep, PlanningResult, StepType};
 
 /// Task decomposer trait
 pub trait TaskDecomposer: Send + Sync {
@@ -62,7 +64,7 @@ impl DecompositionContext {
             capabilities: Vec::new(),
             patterns: Vec::new(),
             constraints: Vec::new(),
-            max_depth: 2,  // 🆕 FIX: Reduced from 5 to prevent exponential step explosion
+            max_depth: 2, // 🆕 FIX: Reduced from 5 to prevent exponential step explosion
             intent_entities: HashMap::new(),
             intent_constraints: Vec::new(),
             metadata: HashMap::new(),
@@ -138,11 +140,10 @@ impl HierarchicalDecomposer {
             )]);
         }
 
-
-
-        // 🔧 FIX: Only perform pattern-based decomposition at depth 0 (original user query).
-        // Sub-steps generated from decomposition should NOT be recursively decomposed
-        // to avoid exponential plan explosion (e.g. "plan" keyword matching sub-step descriptions).
+        // 🔧 FIX: Only perform pattern-based decomposition at depth 0 (original user
+        // query). Sub-steps generated from decomposition should NOT be
+        // recursively decomposed to avoid exponential plan explosion (e.g.
+        // "plan" keyword matching sub-step descriptions).
         let steps = if depth == 0 {
             self.identify_subgoals(goal, context)
         } else {
@@ -159,7 +160,8 @@ impl HierarchicalDecomposer {
                 goal.to_string(),
             )])
         } else {
-            // Recursively decompose each subgoal (only one level deep due to depth == 0 guard)
+            // Recursively decompose each subgoal (only one level deep due to depth == 0
+            // guard)
             let mut all_steps = Vec::new();
             for (i, subgoal) in steps.iter().enumerate() {
                 let sub_steps =
@@ -193,36 +195,58 @@ impl HierarchicalDecomposer {
             steps.push(PlanStep::new("analyze", "Perform analysis"));
             steps.push(PlanStep::new("compile", "Compile findings"));
             steps.push(PlanStep::new("format", "Format report"));
-        } else if goal_lower.contains("implement") || goal_lower.contains("build")
-            || goal_lower.contains("开发") || goal_lower.contains("实现") || goal_lower.contains("构建")
+        } else if goal_lower.contains("implement")
+            || goal_lower.contains("build")
+            || goal_lower.contains("开发")
+            || goal_lower.contains("实现")
+            || goal_lower.contains("构建")
         {
             steps.push(PlanStep::new("design", "Design solution"));
             steps.push(PlanStep::new("implement", "Implement solution"));
             steps.push(PlanStep::new("test", "Test implementation"));
             steps.push(PlanStep::new("deploy", "Deploy solution"));
-        } else if goal_lower.contains("research") || goal_lower.contains("investigate")
-            || goal_lower.contains("研究") || goal_lower.contains("调查") || goal_lower.contains("搜索")
+        } else if goal_lower.contains("research")
+            || goal_lower.contains("investigate")
+            || goal_lower.contains("研究")
+            || goal_lower.contains("调查")
+            || goal_lower.contains("搜索")
         {
             steps.push(PlanStep::new("search", "Search for information"));
             steps.push(PlanStep::new("evaluate", "Evaluate sources"));
             steps.push(PlanStep::new("synthesize", "Synthesize findings"));
-        } else if goal_lower.contains("compare") || goal_lower.contains("evaluate")
-            || goal_lower.contains("比较") || goal_lower.contains("评估") || goal_lower.contains("对比")
+        } else if goal_lower.contains("compare")
+            || goal_lower.contains("evaluate")
+            || goal_lower.contains("比较")
+            || goal_lower.contains("评估")
+            || goal_lower.contains("对比")
         {
             steps.push(PlanStep::new("identify", "Identify options"));
             steps.push(PlanStep::new("criteria", "Define evaluation criteria"));
             steps.push(PlanStep::new("compare", "Compare options"));
             steps.push(PlanStep::new("recommend", "Make recommendation"));
-        } else if goal_lower.contains("计划") || goal_lower.contains("规划")
-            || goal_lower.contains("安排") || goal_lower.contains("步骤")
-            || goal_lower.contains("攻略") || goal_lower.contains("行程")
-            || goal_lower.contains("plan") || goal_lower.contains("schedule")
+        } else if goal_lower.contains("计划")
+            || goal_lower.contains("规划")
+            || goal_lower.contains("安排")
+            || goal_lower.contains("步骤")
+            || goal_lower.contains("攻略")
+            || goal_lower.contains("行程")
+            || goal_lower.contains("plan")
+            || goal_lower.contains("schedule")
             || goal_lower.contains("itinerary")
         {
-            steps.push(PlanStep::new("gather_info", "Gather relevant information and constraints"));
-            steps.push(PlanStep::new("formulate", "Formulate detailed plan with timeline"));
+            steps.push(PlanStep::new(
+                "gather_info",
+                "Gather relevant information and constraints",
+            ));
+            steps.push(PlanStep::new(
+                "formulate",
+                "Formulate detailed plan with timeline",
+            ));
             steps.push(PlanStep::new("refine", "Refine and optimize the plan"));
-            steps.push(PlanStep::new("present", "Present the final plan with actionable steps"));
+            steps.push(PlanStep::new(
+                "present",
+                "Present the final plan with actionable steps",
+            ));
         }
 
         steps
@@ -498,9 +522,7 @@ impl TaskDecomposer for CompositeDecomposer {
     }
 
     fn can_handle(&self, goal: &str, context: &DecompositionContext) -> bool {
-        self.decomposers
-            .iter()
-            .any(|d| d.can_handle(goal, context))
+        self.decomposers.iter().any(|d| d.can_handle(goal, context))
     }
 }
 
@@ -548,16 +570,26 @@ impl Decomposer {
         // Write allocations into step metadata
         for (i, step) in plan.steps.iter_mut().enumerate() {
             if let Some(alloc) = allocations.get(i) {
-                step.metadata.insert("assigned_skills".to_string(), 
-                    serde_json::to_value(&alloc.assigned_skills).unwrap_or_default());
-                step.metadata.insert("assigned_tools".to_string(), 
-                    serde_json::to_value(&alloc.assigned_tools).unwrap_or_default());
-                step.metadata.insert("assigned_mcp_servers".to_string(), 
-                    serde_json::to_value(&alloc.assigned_mcp_servers).unwrap_or_default());
-                step.metadata.insert("estimated_tokens".to_string(), 
-                    serde_json::json!(alloc.estimated_tokens));
-                step.metadata.insert("estimated_time_secs".to_string(), 
-                    serde_json::json!(alloc.estimated_time_secs));
+                step.metadata.insert(
+                    "assigned_skills".to_string(),
+                    serde_json::to_value(&alloc.assigned_skills).unwrap_or_default(),
+                );
+                step.metadata.insert(
+                    "assigned_tools".to_string(),
+                    serde_json::to_value(&alloc.assigned_tools).unwrap_or_default(),
+                );
+                step.metadata.insert(
+                    "assigned_mcp_servers".to_string(),
+                    serde_json::to_value(&alloc.assigned_mcp_servers).unwrap_or_default(),
+                );
+                step.metadata.insert(
+                    "estimated_tokens".to_string(),
+                    serde_json::json!(alloc.estimated_tokens),
+                );
+                step.metadata.insert(
+                    "estimated_time_secs".to_string(),
+                    serde_json::json!(alloc.estimated_time_secs),
+                );
             }
         }
 
@@ -589,8 +621,12 @@ impl Decomposer {
         let mut mcp_servers = Vec::new();
 
         // Match step description to tools based on intent entities
-        if desc_lower.contains("order") || desc_lower.contains("buy") || desc_lower.contains("sell")
-            || desc_lower.contains("下单") || desc_lower.contains("买入") || desc_lower.contains("卖出")
+        if desc_lower.contains("order")
+            || desc_lower.contains("buy")
+            || desc_lower.contains("sell")
+            || desc_lower.contains("下单")
+            || desc_lower.contains("买入")
+            || desc_lower.contains("卖出")
         {
             if let Some(symbol) = context.intent_entities.get("symbol") {
                 if symbol.contains("BTC") || symbol.contains("ETH") {
@@ -605,8 +641,10 @@ impl Decomposer {
             skills.push("trading".to_string());
         }
 
-        if desc_lower.contains("price") || desc_lower.contains("quote")
-            || desc_lower.contains("价格") || desc_lower.contains("行情")
+        if desc_lower.contains("price")
+            || desc_lower.contains("quote")
+            || desc_lower.contains("价格")
+            || desc_lower.contains("行情")
         {
             if let Some(symbol) = context.intent_entities.get("symbol") {
                 if symbol.contains("BTC") || symbol.contains("ETH") {
@@ -621,22 +659,27 @@ impl Decomposer {
             skills.push("stock-data".to_string());
         }
 
-        if desc_lower.contains("search") || desc_lower.contains("find")
-            || desc_lower.contains("查") || desc_lower.contains("搜索")
+        if desc_lower.contains("search")
+            || desc_lower.contains("find")
+            || desc_lower.contains("查")
+            || desc_lower.contains("搜索")
         {
             tools.push("search".to_string());
             skills.push("research".to_string());
         }
 
-        if desc_lower.contains("analyze") || desc_lower.contains("analysis")
+        if desc_lower.contains("analyze")
+            || desc_lower.contains("analysis")
             || desc_lower.contains("分析")
         {
             tools.push("llm".to_string());
             skills.push("analysis".to_string());
         }
 
-        if desc_lower.contains("report") || desc_lower.contains("summary")
-            || desc_lower.contains("报告") || desc_lower.contains("总结")
+        if desc_lower.contains("report")
+            || desc_lower.contains("summary")
+            || desc_lower.contains("报告")
+            || desc_lower.contains("总结")
         {
             tools.push("llm".to_string());
             skills.push("reporting".to_string());
@@ -724,8 +767,14 @@ mod tests {
             .decompose("Fix the authentication bug", &context)
             .unwrap();
 
-        assert!(plan.steps.iter().any(|s| s.description.to_lowercase().contains("reproduce")));
-        assert!(plan.steps.iter().any(|s| s.description.to_lowercase().contains("fix")));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.description.to_lowercase().contains("reproduce")));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.description.to_lowercase().contains("fix")));
     }
 
     #[test]

@@ -1,12 +1,13 @@
 //! Memory Quality Evaluation & Active Consolidation
 //!
 //! Provides:
-//! - MemoryQualityEvaluator: scores candidates (0.0-1.0) for persistence worthiness
+//! - MemoryQualityEvaluator: scores candidates (0.0-1.0) for persistence
+//!   worthiness
 //! - ConsolidationEngine: compresses/deduplicates when L1/L2 approach capacity
 //! - RedundancyCheck: cosine similarity + BM25 hybrid redundancy detection
 
-use crate::memory::search::SearchResult;
 use super::memory_nudge::MemoryCandidate;
+use crate::memory::search::SearchResult;
 
 /// Quality evaluator for memory candidates
 #[derive(Debug, Clone)]
@@ -141,8 +142,8 @@ impl ConsolidationEngine {
         current_chars as f32 > self.l2_max_chars as f32 * 0.85
     }
 
-    /// Simple rule-based consolidation (LLM-based summarization can be added later)
-    /// Returns consolidated content and list of archived entries
+    /// Simple rule-based consolidation (LLM-based summarization can be added
+    /// later) Returns consolidated content and list of archived entries
     pub fn consolidate_l1(&self, entries: &[String]) -> (String, Vec<String>) {
         let total_len: usize = entries.iter().map(|e| e.len()).sum();
         if total_len <= self.l1_max_chars {
@@ -169,7 +170,11 @@ impl ConsolidationEngine {
         let mut result = kept.join("\n\n");
         if result.len() > self.l1_max_chars {
             let truncate_to = self.l1_max_chars.saturating_sub(100);
-            result = format!("{}\n\n[... {} characters truncated ...]", &result[..truncate_to], result.len() - truncate_to);
+            result = format!(
+                "{}\n\n[... {} characters truncated ...]",
+                &result[..truncate_to],
+                result.len() - truncate_to
+            );
         }
 
         (result, archived)
@@ -178,9 +183,9 @@ impl ConsolidationEngine {
     /// Generate consolidation prompt for LLM-based compression
     pub fn build_compression_prompt(&self, entries: &[String], target_chars: usize) -> String {
         format!(
-            "请将以下记忆条目压缩为不超过 {} 字符的精炼版本。\
-             保留关键事实、偏好和陷阱，去除冗余和临时状态。\
-             用简洁的 Markdown 列表格式输出。\n\n{}",
+            "请将以下记忆条目压缩为不超过 {} \
+             字符的精炼版本。保留关键事实、偏好和陷阱，去除冗余和临时状态。用简洁的 Markdown \
+             列表格式输出。\n\n{}",
             target_chars,
             entries.join("\n\n")
         )
@@ -235,7 +240,11 @@ impl RedundancyCheck {
 /// Parse embedding string (comma-separated floats)
 fn parse_embedding(s: &str) -> Result<Vec<f32>, String> {
     s.split(',')
-        .map(|v| v.trim().parse::<f32>().map_err(|e| format!("Parse error: {}", e)))
+        .map(|v| {
+            v.trim()
+                .parse::<f32>()
+                .map_err(|e| format!("Parse error: {}", e))
+        })
         .collect()
 }
 
@@ -262,7 +271,11 @@ mod tests {
         };
 
         let score = evaluator.evaluate(&candidate, &[]);
-        assert!(score >= 0.9, "High quality candidate should score >= 0.9, got {}", score);
+        assert!(
+            score >= 0.9,
+            "High quality candidate should score >= 0.9, got {}",
+            score
+        );
     }
 
     #[test]
@@ -280,7 +293,10 @@ mod tests {
 
         let score = evaluator.evaluate(&candidate, &[]);
         // Novelty gives 0.2 even for low-quality candidates (not redundant)
-        assert_eq!(score, 0.2, "Low quality candidate should score novelty only");
+        assert_eq!(
+            score, 0.2,
+            "Low quality candidate should score novelty only"
+        );
     }
 
     #[test]

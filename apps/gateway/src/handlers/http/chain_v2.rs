@@ -1,7 +1,8 @@
 //! Chain HTTP Handlers (V2 - Using split services)
 //!
 //! 🟢 P1 FIX: Migrated to use WalletService, DaoService, and IdentityService.
-//! This version separates concerns: wallet operations, DAO governance, and identity.
+//! This version separates concerns: wallet operations, DAO governance, and
+//! identity.
 
 use std::sync::Arc;
 
@@ -9,10 +10,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use gateway::{
-    error::GatewayError,
-    middleware::{require_any_role, AuthUser},
-};
+use gateway::error::GatewayError;
+use gateway::middleware::{require_any_role, AuthUser};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -61,7 +60,9 @@ pub async fn transfer(
 
     // Parse address
     let to_address = parse_address(&req.to)?;
-    let amount = req.amount_wei.parse::<u128>()
+    let amount = req
+        .amount_wei
+        .parse::<u128>()
         .map_err(|_| GatewayError::bad_request("Invalid amount"))?;
 
     let tx_hash = wallet_service
@@ -133,11 +134,14 @@ pub async fn get_agent_identity(
     _user: AuthUser,
     Path(agent_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    let info = state.identity()?
+    let info = state
+        .identity()?
         .get_identity(&agent_id)
         .await
         .map_err(|e| match e {
-            crate::error::AppError::NotFound(_) => GatewayError::not_found("agent identity", &agent_id),
+            crate::error::AppError::NotFound(_) => {
+                GatewayError::not_found("agent identity", &agent_id)
+            }
             _ => GatewayError::agent(format!("Failed to get identity: {}", e)),
         })?;
 
@@ -156,7 +160,8 @@ pub async fn has_agent_identity(
     _user: AuthUser,
     Path(agent_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    let has_identity = state.identity()?
+    let has_identity = state
+        .identity()?
         .has_identity(&agent_id)
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to check identity: {}", e)))?;
@@ -238,7 +243,9 @@ pub async fn cast_vote(
 
     let dao_service = state.dao()?;
 
-    let proposal_id = req.proposal_id.parse::<u64>()
+    let proposal_id = req
+        .proposal_id
+        .parse::<u64>()
         .map_err(|_| GatewayError::bad_request("Invalid proposal ID"))?;
 
     let vote_type = match req.vote_type.as_str() {
@@ -274,10 +281,13 @@ pub async fn get_proposal(
     _user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    let proposal_id = id.parse::<u64>()
+    let proposal_id = id
+        .parse::<u64>()
         .map_err(|_| GatewayError::bad_request("Invalid proposal ID"))?;
 
-    let info = state.dao()?.get_proposal(proposal_id)
+    let info = state
+        .dao()?
+        .get_proposal(proposal_id)
         .await
         .map_err(|e| match e {
             crate::error::AppError::NotFound(_) => GatewayError::not_found("proposal", &id),
@@ -299,7 +309,8 @@ pub async fn list_proposals(
     State(state): State<Arc<AppState>>,
     _user: AuthUser,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    let proposals = state.dao()?
+    let proposals = state
+        .dao()?
         .list_active_proposals()
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to list proposals: {}", e)))?;
@@ -344,8 +355,8 @@ fn parse_hex_32(hex_str: &str) -> Result<[u8; 32], GatewayError> {
         hex_str
     };
 
-    let bytes = hex::decode(hex_str)
-        .map_err(|_| GatewayError::bad_request("Invalid hex format"))?;
+    let bytes =
+        hex::decode(hex_str).map_err(|_| GatewayError::bad_request("Invalid hex format"))?;
 
     if bytes.len() != 32 {
         return Err(GatewayError::bad_request("Expected 32 bytes"));

@@ -1,14 +1,12 @@
 //! Self-update command for BeeBotOS CLI
 
-use clap::Args;
 use std::env;
 use std::path::Path;
 
-use beebotos_update_client::{
-    config::UpdateConfig,
-    models::{UpdateStatus, VersionInfo},
-    client::{ConsoleProgress, NativeUpdateClient, UpdateClient},
-};
+use beebotos_update_client::client::{ConsoleProgress, NativeUpdateClient, UpdateClient};
+use beebotos_update_client::config::UpdateConfig;
+use beebotos_update_client::models::{UpdateStatus, VersionInfo};
+use clap::Args;
 
 /// Update CLI arguments
 #[derive(Args)]
@@ -44,8 +42,7 @@ pub async fn execute(args: UpdateArgs) -> anyhow::Result<()> {
         return perform_rollback().await;
     }
 
-    let mut config = UpdateConfig::from_env()
-        .with_app_name("cli");
+    let mut config = UpdateConfig::from_env().with_app_name("cli");
 
     if let Some(server) = &args.server {
         config.server_url = server.clone();
@@ -91,10 +88,7 @@ fn print_update_info(info: &VersionInfo) {
     if info.mandatory {
         println!("⚠️  This is a MANDATORY update!");
     }
-    println!(
-        "Priority: {:?}",
-        info.priority
-    );
+    println!("Priority: {:?}", info.priority);
 }
 
 fn confirm_update(info: &VersionInfo) -> anyhow::Result<bool> {
@@ -104,13 +98,13 @@ fn confirm_update(info: &VersionInfo) -> anyhow::Result<bool> {
     } else {
         "Do you want to install this update?"
     };
-    Ok(Confirm::new().with_prompt(prompt).default(true).interact()?)
+    Ok(Confirm::new()
+        .with_prompt(prompt)
+        .default(true)
+        .interact()?)
 }
 
-async fn perform_self_update(
-    client: NativeUpdateClient,
-    info: VersionInfo,
-) -> anyhow::Result<()> {
+async fn perform_self_update(client: NativeUpdateClient, info: VersionInfo) -> anyhow::Result<()> {
     let package = select_package(&info.packages)?;
 
     // Download
@@ -140,12 +134,9 @@ async fn perform_self_update(
     let _ = tokio::fs::remove_file(&temp_path).await;
 
     // Report success
-    let _ = client.report_status(
-        &info.version.to_string(),
-        UpdateStatus::Completed,
-        0,
-        None,
-    ).await;
+    let _ = client
+        .report_status(&info.version.to_string(), UpdateStatus::Completed, 0, None)
+        .await;
 
     println!("Update completed successfully!");
     println!("New version: {}", info.version);

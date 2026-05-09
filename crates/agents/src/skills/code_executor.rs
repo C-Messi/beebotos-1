@@ -28,12 +28,9 @@ impl CodeSkillExecutor {
     }
 
     /// Execute a code skill
-    pub async fn execute(
-        &self,
-        skill_path: &Path,
-        user_input: &str,
-    ) -> Result<String, AgentError> {
-        // Normalize to absolute path so prompts and working directories are unambiguous.
+    pub async fn execute(&self, skill_path: &Path, user_input: &str) -> Result<String, AgentError> {
+        // Normalize to absolute path so prompts and working directories are
+        // unambiguous.
         let skill_path = if skill_path.is_absolute() {
             skill_path.to_path_buf()
         } else {
@@ -74,13 +71,21 @@ impl CodeSkillExecutor {
         };
 
         let skill_dir_str = skill_path.to_string_lossy().to_string();
-        // Replace {SKILL_DIR} placeholder with actual path so the LLM generates valid commands
+        // Replace {SKILL_DIR} placeholder with actual path so the LLM generates valid
+        // commands
         let skill_md = skill_md.replace("{SKILL_DIR}", &skill_dir_str);
 
         // 🟢 P1 OPTIMIZE: Try single-shot command generation first.
-        // For simple requests (e.g. "run hello.py") this avoids the expensive ReAct loop.
+        // For simple requests (e.g. "run hello.py") this avoids the expensive ReAct
+        // loop.
         match self
-            .try_single_shot(&skill_md, &scripts_info, &skill_dir_str, user_input, &skill_path)
+            .try_single_shot(
+                &skill_md,
+                &scripts_info,
+                &skill_dir_str,
+                user_input,
+                &skill_path,
+            )
             .await
         {
             Ok(result) => {
@@ -93,18 +98,17 @@ impl CodeSkillExecutor {
         }
 
         // Fallback: full ReAct loop
-        // 🆕 FIX: Strip SKILL.md down to essential script usage to prevent LLM from outputting
-        // skill self-introduction instead of executing the tool.
+        // 🆕 FIX: Strip SKILL.md down to essential script usage to prevent LLM from
+        // outputting skill self-introduction instead of executing the tool.
         let skill_instructions = extract_skill_usage(&skill_md);
         let system_prompt = format!(
-            "You are the '{}' skill executor. Your ONLY job is to run the appropriate script \
-            to fulfill the user's request. Do NOT introduce yourself, describe your capabilities, \
-            or explain what you are.\n\n\
-            {scripts_info}\n\n\
-            When constructing commands, use the absolute skill directory path: {skill_dir_str}\n\n\
-            Script usage instructions:\n{skill_instructions}\n\n\
-            IMPORTANT: If the user has provided enough information, execute the script immediately \
-            using the process_exec tool. Do not ask follow-up questions unless critical information is missing.",
+            "You are the '{}' skill executor. Your ONLY job is to run the appropriate script to \
+             fulfill the user's request. Do NOT introduce yourself, describe your capabilities, \
+             or explain what you are.\n\n{scripts_info}\n\nWhen constructing commands, use the \
+             absolute skill directory path: {skill_dir_str}\n\nScript usage \
+             instructions:\n{skill_instructions}\n\nIMPORTANT: If the user has provided enough \
+             information, execute the script immediately using the process_exec tool. Do not ask \
+             follow-up questions unless critical information is missing.",
             skill_path.file_name().unwrap_or_default().to_string_lossy(),
         );
 
@@ -128,19 +132,19 @@ impl CodeSkillExecutor {
         user_input: &str,
         skill_path: &Path,
     ) -> Result<String, AgentError> {
-        // 🆕 FIX: Use stripped skill usage to prevent LLM from generating intros instead of commands.
+        // 🆕 FIX: Use stripped skill usage to prevent LLM from generating intros
+        // instead of commands.
         let skill_instructions = extract_skill_usage(skill_md);
         let prompt = format!(
-            "You are a code-skill executor. Your job is to turn the user's request into a \
-            single shell command that fulfills it. Do NOT introduce yourself.\n\n\
-            Script usage:\n{skill_instructions}\n\n\
-            {scripts_info}\n\n\
-            When constructing commands, use the absolute skill directory path: {skill_dir_str}\n\n\
-            User request: {user_input}\n\n\
-            Respond with a JSON object ONLY — no markdown, no explanation outside the JSON:\n\
-            {{\"command\":\"the exact shell command to run\",\"working_dir\":\"{skill_dir_str}\",\"reasoning\":\"brief explanation\"}}\n\n\
-            If the request is unclear or missing critical information, respond with:\n\
-            {{\"needs_react\":true,\"reasoning\":\"why\"}}"
+            "You are a code-skill executor. Your job is to turn the user's request into a single \
+             shell command that fulfills it. Do NOT introduce yourself.\n\nScript \
+             usage:\n{skill_instructions}\n\n{scripts_info}\n\nWhen constructing commands, use \
+             the absolute skill directory path: {skill_dir_str}\n\nUser request: \
+             {user_input}\n\nRespond with a JSON object ONLY — no markdown, no explanation \
+             outside the JSON:\n{{\"command\":\"the exact shell command to \
+             run\",\"working_dir\":\"{skill_dir_str}\",\"reasoning\":\"brief \
+             explanation\"}}\n\nIf the request is unclear or missing critical information, \
+             respond with:\n{{\"needs_react\":true,\"reasoning\":\"why\"}}"
         );
 
         let messages = vec![CommMessage::new(
@@ -164,12 +168,15 @@ impl CodeSkillExecutor {
 
         // Try to extract JSON from the response (LLMs sometimes wrap it in markdown)
         let json_str = extract_json(&response);
-        let parsed: serde_json::Value =
-            serde_json::from_str(json_str).map_err(|e| {
-                AgentError::Execution(format!("Failed to parse single-shot JSON: {}", e))
-            })?;
+        let parsed: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
+            AgentError::Execution(format!("Failed to parse single-shot JSON: {}", e))
+        })?;
 
-        if parsed.get("needs_react").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if parsed
+            .get("needs_react")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return Err(AgentError::Execution(
                 "LLM indicated single-shot is insufficient".to_string(),
             ));
@@ -198,10 +205,7 @@ impl CodeSkillExecutor {
         });
 
         match tool.execute(&params).await {
-            Ok(output) => Ok(format!(
-                "Command executed successfully.\n\n{}",
-                output
-            )),
+            Ok(output) => Ok(format!("Command executed successfully.\n\n{}", output)),
             Err(e) => Err(AgentError::Execution(format!(
                 "Single-shot command failed: {}",
                 e
@@ -248,7 +252,15 @@ pub fn extract_skill_usage(skill_md: &str) -> String {
         // Skip feature lists, marketing copy, and empty lines outside usage sections
         if in_usage_section {
             // Skip emoji-only lines and decorative separators
-            if trimmed.chars().all(|c| c.is_whitespace() || c == '-' || c == '*' || c == '>' || c == '•' || c == '#' || c.is_ascii_punctuation()) {
+            if trimmed.chars().all(|c| {
+                c.is_whitespace()
+                    || c == '-'
+                    || c == '*'
+                    || c == '>'
+                    || c == '•'
+                    || c == '#'
+                    || c.is_ascii_punctuation()
+            }) {
                 continue;
             }
             lines.push(line.to_string());
@@ -301,7 +313,11 @@ async fn scan_dir_for_scripts(dir: &Path) -> Vec<(String, String)> {
         let path = entry.path();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             if matches!(ext, "py" | "js" | "sh" | "ts") {
-                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 let abs = path.to_string_lossy().to_string();
                 result.push((name, abs));
             }

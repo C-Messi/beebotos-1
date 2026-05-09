@@ -1,14 +1,16 @@
 //! Workflow Orchestration Integration Tests
 //!
-//! End-to-end tests covering: YAML loading → trigger matching → execution → status query.
+//! End-to-end tests covering: YAML loading → trigger matching → execution →
+//! status query.
 
 use std::collections::HashMap;
 
-use beebotos_agents::workflow::{
-    WorkflowDefinition, WorkflowEngine, WorkflowRegistry, WorkflowStatus, StepStatus,
-    TriggerEngine, TriggerType, definition::WorkflowStep,
-};
 use beebotos_agents::error::AgentError;
+use beebotos_agents::workflow::definition::WorkflowStep;
+use beebotos_agents::workflow::{
+    StepStatus, TriggerEngine, TriggerType, WorkflowDefinition, WorkflowEngine, WorkflowRegistry,
+    WorkflowStatus,
+};
 
 /// Mock step executor for testing without real skills
 struct MockStepExecutor {
@@ -29,7 +31,9 @@ impl beebotos_agents::workflow::StepExecutor for MockStepExecutor {
         input: &str,
         _params: HashMap<String, String>,
     ) -> Result<beebotos_agents::workflow::SkillStepResult, AgentError> {
-        let output = self.responses.get(skill_id)
+        let output = self
+            .responses
+            .get(skill_id)
             .cloned()
             .unwrap_or_else(|| format!("mock:{}:input={}", skill_id, input));
         Ok(beebotos_agents::workflow::SkillStepResult {
@@ -75,14 +79,19 @@ steps:
     assert_eq!(def.id, "test_pipeline");
     assert_eq!(def.steps.len(), 2);
     assert_eq!(def.steps[1].depends_on.as_ref().unwrap()[0], "fetch_data");
-    assert!(matches!(&def.triggers[1].trigger_type, TriggerType::Cron { .. }));
+    assert!(matches!(
+        &def.triggers[1].trigger_type,
+        TriggerType::Cron { .. }
+    ));
 }
 
 #[tokio::test]
 async fn test_workflow_registry_load_from_dir() {
     let temp_dir = tempfile::tempdir().unwrap();
     let workflow_path = temp_dir.path().join("test_workflow.yaml");
-    std::fs::write(&workflow_path, r#"
+    std::fs::write(
+        &workflow_path,
+        r#"
 id: registry_test
 name: "Registry Test"
 description: "Test"
@@ -92,12 +101,16 @@ steps:
     skill: echo
     params:
       input: "hello"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let mut registry = WorkflowRegistry::new();
     registry.load_from_dir(temp_dir.path()).await.unwrap();
 
-    let wf = registry.get("registry_test").expect("Workflow should be loaded");
+    let wf = registry
+        .get("registry_test")
+        .expect("Workflow should be loaded");
     assert_eq!(wf.name, "Registry Test");
 }
 
@@ -112,7 +125,9 @@ async fn test_trigger_engine_match() {
         tags: vec![],
         triggers: vec![
             beebotos_agents::workflow::TriggerDefinition {
-                trigger_type: TriggerType::Manual { allowed_users: vec![] },
+                trigger_type: TriggerType::Manual {
+                    allowed_users: vec![],
+                },
             },
             beebotos_agents::workflow::TriggerDefinition {
                 trigger_type: TriggerType::Webhook {
@@ -139,7 +154,10 @@ async fn test_trigger_engine_match() {
 #[tokio::test]
 async fn test_workflow_engine_end_to_end() {
     let mut responses = HashMap::new();
-    responses.insert("fetch_data".to_string(), r#"{"items": [1, 2, 3]}"#.to_string());
+    responses.insert(
+        "fetch_data".to_string(),
+        r#"{"items": [1, 2, 3]}"#.to_string(),
+    );
     responses.insert("process_data".to_string(), "processed: 3 items".to_string());
 
     let executor = MockStepExecutor::new(responses);
@@ -181,18 +199,30 @@ async fn test_workflow_engine_end_to_end() {
         ],
     };
 
-    let instance = engine.execute(&definition, &executor, serde_json::Value::Null, None).await.unwrap();
+    let instance = engine
+        .execute(&definition, &executor, serde_json::Value::Null, None)
+        .await
+        .unwrap();
 
     assert_eq!(instance.status, WorkflowStatus::Completed);
     assert_eq!(instance.step_states.len(), 2);
-    assert_eq!(instance.step_states.get("step1").unwrap().status, StepStatus::Completed);
-    assert_eq!(instance.step_states.get("step2").unwrap().status, StepStatus::Completed);
+    assert_eq!(
+        instance.step_states.get("step1").unwrap().status,
+        StepStatus::Completed
+    );
+    assert_eq!(
+        instance.step_states.get("step2").unwrap().status,
+        StepStatus::Completed
+    );
 }
 
 #[tokio::test]
 async fn test_workflow_with_condition_and_retry() {
     let mut responses = HashMap::new();
-    responses.insert("check_status".to_string(), r#"{"status": "ok"}"#.to_string());
+    responses.insert(
+        "check_status".to_string(),
+        r#"{"status": "ok"}"#.to_string(),
+    );
     responses.insert("notify".to_string(), "notification sent".to_string());
 
     let executor = MockStepExecutor::new(responses);
@@ -234,7 +264,10 @@ async fn test_workflow_with_condition_and_retry() {
         ],
     };
 
-    let instance = engine.execute(&definition, &executor, serde_json::Value::Null, None).await.unwrap();
+    let instance = engine
+        .execute(&definition, &executor, serde_json::Value::Null, None)
+        .await
+        .unwrap();
     assert_eq!(instance.status, WorkflowStatus::Completed);
     assert_eq!(instance.step_states.get("check").unwrap().retry_count, 0);
 }
@@ -242,7 +275,10 @@ async fn test_workflow_with_condition_and_retry() {
 #[tokio::test]
 async fn test_workflow_template_resolution() {
     let mut responses = HashMap::new();
-    responses.insert("fetch_news".to_string(), r#"{"articles": [{"title": "Hello"}]}"#.to_string());
+    responses.insert(
+        "fetch_news".to_string(),
+        r#"{"articles": [{"title": "Hello"}]}"#.to_string(),
+    );
     responses.insert("summarize".to_string(), "Summary: Hello".to_string());
 
     let executor = MockStepExecutor::new(responses);
@@ -284,6 +320,9 @@ async fn test_workflow_template_resolution() {
         ],
     };
 
-    let instance = engine.execute(&definition, &executor, serde_json::Value::Null, None).await.unwrap();
+    let instance = engine
+        .execute(&definition, &executor, serde_json::Value::Null, None)
+        .await
+        .unwrap();
     assert_eq!(instance.status, WorkflowStatus::Completed);
 }

@@ -1,18 +1,20 @@
 //! Cron Job Service
 //!
 //! Manages scheduled tasks using tokio-cron-scheduler with SQLite persistence.
-//! Supports three schedule types: at (one-shot), every (interval), cron (expression).
+//! Supports three schedule types: at (one-shot), every (interval), cron
+//! (expression).
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::error::AppError;
-use tracing::{info, warn};
 
 /// Schedule type for cron jobs
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -104,7 +106,7 @@ impl CronJobRequest {
             let parts: Vec<&str> = self.schedule_expr.split_whitespace().collect();
             if parts.len() != 5 {
                 return Err(AppError::bad_request(
-                    "Cron expression must have exactly 5 fields (min hour day month dow)"
+                    "Cron expression must have exactly 5 fields (min hour day month dow)",
                 ));
             }
         }
@@ -136,7 +138,7 @@ impl CronJobService {
                    max_runs, run_count, last_run_at, next_run_at, created_by, created_at, updated_at
             FROM cron_jobs
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .fetch_all(&self.db)
         .await
@@ -153,7 +155,7 @@ impl CronJobService {
                    prompt, enabled, context_mode, delivery_channel, delivery_target,
                    max_runs, run_count, last_run_at, next_run_at, created_by, created_at, updated_at
             FROM cron_jobs WHERE id = ?1
-            "#
+            "#,
         )
         .bind(id)
         .fetch_optional(&self.db)
@@ -165,7 +167,11 @@ impl CronJobService {
     }
 
     /// Create a new cron job
-    pub async fn create_job(&self, req: CronJobRequest, created_by: &str) -> Result<CronJob, AppError> {
+    pub async fn create_job(
+        &self,
+        req: CronJobRequest,
+        created_by: &str,
+    ) -> Result<CronJob, AppError> {
         req.validate()?;
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
@@ -178,7 +184,11 @@ impl CronJobService {
             ContextMode::Main => "main",
             ContextMode::Isolated => "isolated",
         };
-        let next_run = self.compute_next_run(&req.schedule_type, &req.schedule_expr, req.timezone.as_deref().unwrap_or("UTC"));
+        let next_run = self.compute_next_run(
+            &req.schedule_type,
+            &req.schedule_expr,
+            req.timezone.as_deref().unwrap_or("UTC"),
+        );
 
         sqlx::query(
             r#"
@@ -187,7 +197,7 @@ impl CronJobService {
                 prompt, enabled, context_mode, delivery_channel, delivery_target,
                 max_runs, next_run_at, created_by, created_at, updated_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
-            "#
+            "#,
         )
         .bind(&id)
         .bind(&req.name)
@@ -224,7 +234,11 @@ impl CronJobService {
             ContextMode::Main => "main",
             ContextMode::Isolated => "isolated",
         };
-        let next_run = self.compute_next_run(&req.schedule_type, &req.schedule_expr, req.timezone.as_deref().unwrap_or("UTC"));
+        let next_run = self.compute_next_run(
+            &req.schedule_type,
+            &req.schedule_expr,
+            req.timezone.as_deref().unwrap_or("UTC"),
+        );
 
         let result = sqlx::query(
             r#"
@@ -234,7 +248,7 @@ impl CronJobService {
                 delivery_channel = ?9, delivery_target = ?10, max_runs = ?11,
                 next_run_at = ?12, updated_at = ?13
             WHERE id = ?14
-            "#
+            "#,
         )
         .bind(&req.name)
         .bind(req.description.as_deref().unwrap_or(""))
@@ -286,7 +300,7 @@ impl CronJobService {
         };
 
         sqlx::query(
-            "UPDATE cron_jobs SET enabled = ?1, next_run_at = ?2, updated_at = ?3 WHERE id = ?4"
+            "UPDATE cron_jobs SET enabled = ?1, next_run_at = ?2, updated_at = ?3 WHERE id = ?4",
         )
         .bind(if new_enabled { 1 } else { 0 })
         .bind(next_run.as_ref().map(|d| d.to_rfc3339()))
@@ -305,7 +319,8 @@ impl CronJobService {
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
-            "INSERT INTO cron_job_runs (id, job_id, status, started_at) VALUES (?1, ?2, 'running', ?3)"
+            "INSERT INTO cron_job_runs (id, job_id, status, started_at) VALUES (?1, ?2, \
+             'running', ?3)",
         )
         .bind(&run_id)
         .bind(job_id)
@@ -316,7 +331,8 @@ impl CronJobService {
 
         // Update job last_run and run_count
         sqlx::query(
-            "UPDATE cron_jobs SET last_run_at = ?1, run_count = run_count + 1, updated_at = ?1 WHERE id = ?2"
+            "UPDATE cron_jobs SET last_run_at = ?1, run_count = run_count + 1, updated_at = ?1 \
+             WHERE id = ?2",
         )
         .bind(&now)
         .bind(job_id)
@@ -337,7 +353,8 @@ impl CronJobService {
     ) -> Result<(), AppError> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
-            "UPDATE cron_job_runs SET status = ?1, output = ?2, error = ?3, completed_at = ?4 WHERE id = ?5"
+            "UPDATE cron_job_runs SET status = ?1, output = ?2, error = ?3, completed_at = ?4 \
+             WHERE id = ?5",
         )
         .bind(status)
         .bind(output)
@@ -356,7 +373,7 @@ impl CronJobService {
             r#"
             SELECT id, job_id, status, output, error, started_at, completed_at, triggered_by
             FROM cron_job_runs WHERE job_id = ?1 ORDER BY started_at DESC LIMIT ?2
-            "#
+            "#,
         )
         .bind(job_id)
         .bind(limit)
@@ -376,7 +393,7 @@ impl CronJobService {
                    max_runs, run_count, last_run_at, next_run_at, created_by, created_at, updated_at
             FROM cron_jobs WHERE enabled = 1
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .fetch_all(&self.db)
         .await
@@ -386,11 +403,16 @@ impl CronJobService {
     }
 
     /// Compute next run time (simplified)
-    fn compute_next_run(&self, schedule_type: &ScheduleType, expr: &str, _tz: &str) -> Option<DateTime<Utc>> {
+    fn compute_next_run(
+        &self,
+        schedule_type: &ScheduleType,
+        expr: &str,
+        _tz: &str,
+    ) -> Option<DateTime<Utc>> {
         match schedule_type {
-            ScheduleType::At => {
-                DateTime::parse_from_rfc3339(expr).ok().map(|d| d.with_timezone(&Utc))
-            }
+            ScheduleType::At => DateTime::parse_from_rfc3339(expr)
+                .ok()
+                .map(|d| d.with_timezone(&Utc)),
             ScheduleType::Every => {
                 // Parse duration like "30m", "1h", "1d"
                 let dur = parse_duration(expr).unwrap_or(chrono::Duration::minutes(5));
@@ -413,7 +435,7 @@ impl CronJobService {
             WHERE enabled = 0
               AND schedule_type = 'at'
               AND updated_at < datetime('now', '-30 days')
-            "#
+            "#,
         )
         .execute(&self.db)
         .await
@@ -421,7 +443,10 @@ impl CronJobService {
 
         let deleted = result.rows_affected();
         if deleted > 0 {
-            info!("Cleaned up {} completed one-shot at-jobs older than 30 days", deleted);
+            info!(
+                "Cleaned up {} completed one-shot at-jobs older than 30 days",
+                deleted
+            );
         }
         Ok(deleted)
     }
@@ -442,7 +467,7 @@ impl CronJobService {
             WHERE enabled = 1 AND schedule_type = 'at' AND next_run_at <= ?1
             ORDER BY next_run_at ASC
             LIMIT 50
-            "#
+            "#,
         )
         .bind(&now)
         .fetch_all(&self.db)
@@ -455,7 +480,7 @@ impl CronJobService {
     /// Disable a job (typically after a one-shot at-job completes)
     pub async fn disable_job(&self, id: &str) -> Result<(), AppError> {
         sqlx::query(
-            "UPDATE cron_jobs SET enabled = 0, next_run_at = NULL, updated_at = ?1 WHERE id = ?2"
+            "UPDATE cron_jobs SET enabled = 0, next_run_at = NULL, updated_at = ?1 WHERE id = ?2",
         )
         .bind(Utc::now().to_rfc3339())
         .bind(id)
@@ -469,7 +494,8 @@ impl CronJobService {
     pub async fn get_recent_failure_count(&self, job_id: &str) -> Result<i64, AppError> {
         let since = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM cron_job_runs WHERE job_id = ?1 AND status = 'failed' AND started_at > ?2"
+            "SELECT COUNT(*) FROM cron_job_runs WHERE job_id = ?1 AND status = 'failed' AND \
+             started_at > ?2",
         )
         .bind(job_id)
         .bind(&since)
@@ -483,21 +509,22 @@ impl CronJobService {
     pub async fn schedule_retry(&self, job_id: &str, retry_count: i64) -> Result<(), AppError> {
         let backoff_minutes = (2i64.pow(retry_count.min(5) as u32)).min(60);
         let next_run = Utc::now() + chrono::Duration::minutes(backoff_minutes);
-        sqlx::query(
-            "UPDATE cron_jobs SET next_run_at = ?1, updated_at = ?2 WHERE id = ?3"
-        )
-        .bind(next_run.to_rfc3339())
-        .bind(Utc::now().to_rfc3339())
-        .bind(job_id)
-        .execute(&self.db)
-        .await
-        .map_err(AppError::database)?;
+        sqlx::query("UPDATE cron_jobs SET next_run_at = ?1, updated_at = ?2 WHERE id = ?3")
+            .bind(next_run.to_rfc3339())
+            .bind(Utc::now().to_rfc3339())
+            .bind(job_id)
+            .execute(&self.db)
+            .await
+            .map_err(AppError::database)?;
         Ok(())
     }
 
     /// Track scheduler job UUID
     pub async fn track_scheduler_uuid(&self, job_id: &str, uuid: uuid::Uuid) {
-        self.scheduler_jobs.write().await.insert(job_id.to_string(), uuid);
+        self.scheduler_jobs
+            .write()
+            .await
+            .insert(job_id.to_string(), uuid);
     }
 
     /// Remove tracked scheduler UUID
@@ -589,7 +616,8 @@ impl From<CronJobRow> for CronJob {
     }
 }
 
-/// 🆕 FIX (P2): Lightweight row for pending at-jobs query — only fetches necessary fields
+/// 🆕 FIX (P2): Lightweight row for pending at-jobs query — only fetches
+/// necessary fields
 #[derive(sqlx::FromRow)]
 struct PendingAtJobRow {
     id: String,

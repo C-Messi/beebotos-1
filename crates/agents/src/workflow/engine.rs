@@ -14,11 +14,9 @@ use tracing::{info, warn};
 
 use crate::agent_impl::Agent;
 use crate::error::AgentError;
-use crate::workflow::{
-    definition::{WorkflowDefinition, WorkflowStep},
-    state::{StepState, WorkflowInstance},
-    template::{resolve_value_templates, TemplateContext},
-};
+use crate::workflow::definition::{WorkflowDefinition, WorkflowStep};
+use crate::workflow::state::{StepState, WorkflowInstance};
+use crate::workflow::template::{resolve_value_templates, TemplateContext};
 
 /// Result of executing a single workflow step
 #[derive(Debug, Clone)]
@@ -58,7 +56,9 @@ impl StepExecutor for Agent {
         input: &str,
         params: HashMap<String, String>,
     ) -> Result<SkillStepResult, AgentError> {
-        let result = self.execute_skill_by_id(skill_id, input, Some(params)).await?;
+        let result = self
+            .execute_skill_by_id(skill_id, input, Some(params))
+            .await?;
         Ok(SkillStepResult {
             output: result.output,
             execution_time_ms: result.execution_time_ms,
@@ -73,9 +73,20 @@ impl StepExecutor for Agent {
 /// Internal result of executing a single step (used for parallel merge)
 #[derive(Debug)]
 enum StepResult {
-    Success { step_id: String, state: StepState, output: serde_json::Value },
-    Failed { step_id: String, state: StepState, error: String },
-    Skipped { step_id: String, state: StepState },
+    Success {
+        step_id: String,
+        state: StepState,
+        output: serde_json::Value,
+    },
+    Failed {
+        step_id: String,
+        state: StepState,
+        error: String,
+    },
+    Skipped {
+        step_id: String,
+        state: StepState,
+    },
 }
 
 /// Workflow execution engine
@@ -91,7 +102,8 @@ impl WorkflowEngine {
     /// Execute a workflow definition using the provided step executor
     ///
     /// Returns the final workflow instance with all step states populated.
-    /// If `progress_reporter` is provided, it is called after each step completes.
+    /// If `progress_reporter` is provided, it is called after each step
+    /// completes.
     ///
     /// Steps with no mutual dependencies are executed in parallel within each
     /// topological layer (using `join_all`).
@@ -102,7 +114,14 @@ impl WorkflowEngine {
         trigger_context: serde_json::Value,
         progress_reporter: Option<&dyn StepProgressReporter>,
     ) -> Result<WorkflowInstance, AgentError> {
-        self.execute_with_cancel(definition, executor, trigger_context, progress_reporter, None).await
+        self.execute_with_cancel(
+            definition,
+            executor,
+            trigger_context,
+            progress_reporter,
+            None,
+        )
+        .await
     }
 
     /// Execute a workflow with optional cancellation signal.
@@ -118,14 +137,23 @@ impl WorkflowEngine {
         progress_reporter: Option<&dyn StepProgressReporter>,
         cancel_signal: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<WorkflowInstance, AgentError> {
-        self.execute_with_cancel_and_id(definition, executor, trigger_context, progress_reporter, cancel_signal, None).await
+        self.execute_with_cancel_and_id(
+            definition,
+            executor,
+            trigger_context,
+            progress_reporter,
+            cancel_signal,
+            None,
+        )
+        .await
     }
 
-    /// Execute a workflow with optional cancellation signal and a pre-generated instance ID.
+    /// Execute a workflow with optional cancellation signal and a pre-generated
+    /// instance ID.
     ///
-    /// This variant allows the caller to specify the instance ID upfront, which is required
-    /// when external systems (e.g., HTTP cancel endpoints) need to reference the instance
-    /// before execution completes.
+    /// This variant allows the caller to specify the instance ID upfront, which
+    /// is required when external systems (e.g., HTTP cancel endpoints) need
+    /// to reference the instance before execution completes.
     pub async fn execute_with_cancel_and_id(
         &self,
         definition: &WorkflowDefinition,
@@ -160,11 +188,8 @@ impl WorkflowEngine {
         };
 
         // Build step lookup
-        let step_map: HashMap<String, &WorkflowStep> = definition
-            .steps
-            .iter()
-            .map(|s| (s.id.clone(), s))
-            .collect();
+        let step_map: HashMap<String, &WorkflowStep> =
+            definition.steps.iter().map(|s| (s.id.clone(), s)).collect();
 
         let mut template_ctx = TemplateContext::with_trigger(trigger_context);
 
@@ -175,7 +200,10 @@ impl WorkflowEngine {
             // Check cancellation before starting a new layer
             if let Some(ref sig) = cancel_signal {
                 if sig.load(std::sync::atomic::Ordering::Relaxed) {
-                    info!("Workflow '{}' cancelled before layer execution", definition.id);
+                    info!(
+                        "Workflow '{}' cancelled before layer execution",
+                        definition.id
+                    );
                     instance.mark_cancelled();
                     break 'layer_loop;
                 }
@@ -192,10 +220,13 @@ impl WorkflowEngine {
                     None => continue,
                 };
 
-                // Check dependencies upfront for this layer (previous layers guarantee completion)
+                // Check dependencies upfront for this layer (previous layers guarantee
+                // completion)
                 let deps_satisfied = if let Some(ref deps) = step.depends_on {
                     deps.iter().all(|dep_id| {
-                        instance.step_states.get(dep_id)
+                        instance
+                            .step_states
+                            .get(dep_id)
                             .map(|s| s.status.is_completed())
                             .unwrap_or(false)
                     })
@@ -209,36 +240,65 @@ impl WorkflowEngine {
                     skipped_state.mark_ready();
                     skipped_state.mark_skipped();
                     futures.push(Box::pin(async move {
-                        StepResult::Skipped { step_id: step.id.clone(), state: skipped_state }
-                    }) as std::pin::Pin<Box<dyn std::future::Future<Output = StepResult> + Send>>);
+                        StepResult::Skipped {
+                            step_id: step.id.clone(),
+                            state: skipped_state,
+                        }
+                    })
+                        as std::pin::Pin<
+                            Box<dyn std::future::Future<Output = StepResult> + Send>,
+                        >);
                     continue;
                 }
 
                 // Evaluate condition upfront
                 if let Some(ref condition) = step.condition {
-                    let resolved = match crate::workflow::template::resolve_template(condition, &template_ctx) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            let mut failed_state = StepState::new(&step.id);
-                            failed_state.mark_ready();
-                            failed_state.mark_failed(format!("Condition template resolution: {}", e));
-                            futures.push(Box::pin(async move {
-                                StepResult::Failed { step_id: step.id.clone(), state: failed_state, error: format!("Condition template resolution: {}", e) }
-                            }) as std::pin::Pin<Box<dyn std::future::Future<Output = StepResult> + Send>>);
-                            continue;
-                        }
-                    };
+                    let resolved =
+                        match crate::workflow::template::resolve_template(condition, &template_ctx)
+                        {
+                            Ok(r) => r,
+                            Err(e) => {
+                                let mut failed_state = StepState::new(&step.id);
+                                failed_state.mark_ready();
+                                failed_state
+                                    .mark_failed(format!("Condition template resolution: {}", e));
+                                futures.push(Box::pin(async move {
+                                    StepResult::Failed {
+                                        step_id: step.id.clone(),
+                                        state: failed_state,
+                                        error: format!("Condition template resolution: {}", e),
+                                    }
+                                })
+                                    as std::pin::Pin<
+                                        Box<dyn std::future::Future<Output = StepResult> + Send>,
+                                    >);
+                                continue;
+                            }
+                        };
                     let condition_met = if Self::evaluate_condition_expression(&resolved) {
                         true
-                    } else if !resolved.trim().is_empty() && !Self::looks_like_comparison(&resolved) {
+                    } else if !resolved.trim().is_empty() && !Self::looks_like_comparison(&resolved)
+                    {
                         // Fallback: try LLM judgment for natural-language conditions
-                        match executor.judge_condition(&resolved, &format!("Workflow step '{}' condition evaluation", step.id)).await {
+                        match executor
+                            .judge_condition(
+                                &resolved,
+                                &format!("Workflow step '{}' condition evaluation", step.id),
+                            )
+                            .await
+                        {
                             Ok(result) => {
-                                info!("Step '{}' LlmJudge condition evaluated to {}", step.id, result);
+                                info!(
+                                    "Step '{}' LlmJudge condition evaluated to {}",
+                                    step.id, result
+                                );
                                 result
                             }
                             Err(e) => {
-                                warn!("Step '{}' LlmJudge failed: {}, treating as false", step.id, e);
+                                warn!(
+                                    "Step '{}' LlmJudge failed: {}, treating as false",
+                                    step.id, e
+                                );
                                 false
                             }
                         }
@@ -246,18 +306,28 @@ impl WorkflowEngine {
                         false
                     };
                     if !condition_met {
-                        info!("Step '{}' condition not met ('{}'), skipping", step.id, resolved);
+                        info!(
+                            "Step '{}' condition not met ('{}'), skipping",
+                            step.id, resolved
+                        );
                         let mut skipped_state = StepState::new(&step.id);
                         skipped_state.mark_ready();
                         skipped_state.mark_skipped();
                         futures.push(Box::pin(async move {
-                            StepResult::Skipped { step_id: step.id.clone(), state: skipped_state }
-                        }) as std::pin::Pin<Box<dyn std::future::Future<Output = StepResult> + Send>>);
+                            StepResult::Skipped {
+                                step_id: step.id.clone(),
+                                state: skipped_state,
+                            }
+                        })
+                            as std::pin::Pin<
+                                Box<dyn std::future::Future<Output = StepResult> + Send>,
+                            >);
                         continue;
                     }
                 }
 
-                // Clone context for this step's execution (independent steps don't share mutable state)
+                // Clone context for this step's execution (independent steps don't share
+                // mutable state)
                 let step_ctx = template_ctx.clone();
                 let cancel_clone = cancel_signal.clone();
                 futures.push(Box::pin(Self::execute_single_step(
@@ -266,7 +336,10 @@ impl WorkflowEngine {
                     executor,
                     definition,
                     cancel_clone,
-                )) as std::pin::Pin<Box<dyn std::future::Future<Output = StepResult> + Send>>);
+                ))
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = StepResult> + Send>,
+                    >);
             }
 
             // Execute all steps in this layer in parallel
@@ -275,12 +348,20 @@ impl WorkflowEngine {
             // Merge results back into shared state
             for result in results {
                 match result {
-                    StepResult::Success { step_id, state, output } => {
+                    StepResult::Success {
+                        step_id,
+                        state,
+                        output,
+                    } => {
                         template_ctx.add_step_output(&step_id, output);
                         template_ctx.add_step_status(&step_id, "completed");
                         instance.step_states.insert(step_id, state);
                     }
-                    StepResult::Failed { step_id, state, error } => {
+                    StepResult::Failed {
+                        step_id,
+                        state,
+                        error,
+                    } => {
                         template_ctx.add_step_status(&step_id, "failed");
                         instance.add_error(Some(step_id.clone()), error.clone());
                         instance.step_states.insert(step_id.clone(), state);
@@ -306,12 +387,15 @@ impl WorkflowEngine {
             }
         }
 
-        // Mark any remaining unprocessed steps as cancelled (e.g. after break on failure)
+        // Mark any remaining unprocessed steps as cancelled (e.g. after break on
+        // failure)
         for step_id in &sorted_step_ids {
             if !instance.step_states.contains_key(step_id) {
                 let mut cancelled_state = StepState::new(step_id);
                 cancelled_state.mark_cancelled();
-                instance.step_states.insert(step_id.clone(), cancelled_state);
+                instance
+                    .step_states
+                    .insert(step_id.clone(), cancelled_state);
             }
         }
 
@@ -328,7 +412,10 @@ impl WorkflowEngine {
             if let Some(ref error_handler) = definition.error_handler {
                 let should_handle = error_handler.step == "any"
                     || instance.error_log.iter().any(|e| {
-                        e.step_id.as_ref().map(|s| s == &error_handler.step).unwrap_or(false)
+                        e.step_id
+                            .as_ref()
+                            .map(|s| s == &error_handler.step)
+                            .unwrap_or(false)
                     });
                 if should_handle {
                     info!(
@@ -340,17 +427,26 @@ impl WorkflowEngine {
                         let mut fallback_ctx = template_ctx.clone();
                         fallback_ctx.workflow_failed = true;
                         let _ = resolve_value_templates(&mut fallback_params, &fallback_ctx);
-                        let (fallback_input, fallback_skill_params) = Self::extract_input_and_params(&fallback_params);
+                        let (fallback_input, fallback_skill_params) =
+                            Self::extract_input_and_params(&fallback_params);
                         let timeout_sec = definition.config.timeout_sec.unwrap_or(300);
 
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(timeout_sec),
-                            executor.execute_skill(&fallback.skill, &fallback_input, fallback_skill_params),
-                        ).await {
+                            executor.execute_skill(
+                                &fallback.skill,
+                                &fallback_input,
+                                fallback_skill_params,
+                            ),
+                        )
+                        .await
+                        {
                             Ok(Ok(result)) => {
                                 info!(
                                     "Workflow '{}' global fallback skill '{}' completed: {} chars",
-                                    definition.id, fallback.skill, result.output.len()
+                                    definition.id,
+                                    fallback.skill,
+                                    result.output.len()
                                 );
                             }
                             Ok(Err(e)) => {
@@ -382,13 +478,18 @@ impl WorkflowEngine {
         // 🆕 P2 FIX: Wire notify_on_complete config
         if definition.config.notify_on_complete {
             let summary = format!(
-                "Workflow '{}' completed with status: {} ({} steps, {}% complete, {}s). Errors: {:?}",
+                "Workflow '{}' completed with status: {} ({} steps, {}% complete, {}s). Errors: \
+                 {:?}",
                 definition.id,
                 instance.status,
                 instance.step_states.len(),
                 instance.completion_pct(),
                 instance.duration_secs(),
-                instance.error_log.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+                instance
+                    .error_log
+                    .iter()
+                    .map(|e| e.message.clone())
+                    .collect::<Vec<_>>()
             );
             info!("[notify_on_complete] {}", summary);
         }
@@ -432,10 +533,21 @@ impl WorkflowEngine {
         );
 
         // Execute skill with timeout and step-level retries
-        let timeout_sec = step.timeout_sec.or(definition.config.timeout_sec).unwrap_or(300);
+        let timeout_sec = step
+            .timeout_sec
+            .or(definition.config.timeout_sec)
+            .unwrap_or(300);
         // OpenClaw on_error.max_retries overrides step.retries when present
-        let max_retries = step.on_error.as_ref()
-            .and_then(|oe| if oe.action == "retry" { oe.max_retries } else { None })
+        let max_retries = step
+            .on_error
+            .as_ref()
+            .and_then(|oe| {
+                if oe.action == "retry" {
+                    oe.max_retries
+                } else {
+                    None
+                }
+            })
             .or(step.retries)
             .or(definition.config.max_retries)
             .unwrap_or(0);
@@ -494,11 +606,17 @@ impl WorkflowEngine {
                     };
                 }
                 Ok(Err(e)) => {
-                    warn!("Step '{}' execution failed (attempt {}): {}", step.id, attempt, e);
+                    warn!(
+                        "Step '{}' execution failed (attempt {}): {}",
+                        step.id, attempt, e
+                    );
                     last_error = Some(format!("{}", e));
                 }
                 Err(_) => {
-                    warn!("Step '{}' timed out after {}s (attempt {})", step.id, timeout_sec, attempt);
+                    warn!(
+                        "Step '{}' timed out after {}s (attempt {})",
+                        step.id, timeout_sec, attempt
+                    );
                     last_error = Some(format!("Timeout after {}s", timeout_sec));
                 }
             }
@@ -510,7 +628,10 @@ impl WorkflowEngine {
         if let Some(ref on_error) = step.on_error {
             match on_error.action.as_str() {
                 "skip" => {
-                    info!("Step '{}' on_error action=skip, marking as skipped", step.id);
+                    info!(
+                        "Step '{}' on_error action=skip, marking as skipped",
+                        step.id
+                    );
                     step_state.mark_skipped();
                     return StepResult::Skipped {
                         step_id: step.id.clone(),
@@ -523,28 +644,43 @@ impl WorkflowEngine {
                 }
                 "retry" => {
                     // Already exhausted retries above, proceed to fallback or fail
-                    info!("Step '{}' on_error action=retry exhausted all {} retries", step.id, max_retries);
+                    info!(
+                        "Step '{}' on_error action=retry exhausted all {} retries",
+                        step.id, max_retries
+                    );
                 }
                 other => {
-                    warn!("Step '{}' unknown on_error action '{}', treating as fail", step.id, other);
+                    warn!(
+                        "Step '{}' unknown on_error action '{}', treating as fail",
+                        step.id, other
+                    );
                 }
             }
 
             // OpenClaw fallback skill execution
             if let Some(ref fallback) = on_error.fallback {
-                info!("Step '{}' executing fallback skill '{}'", step.id, fallback.skill);
+                info!(
+                    "Step '{}' executing fallback skill '{}'",
+                    step.id, fallback.skill
+                );
                 let mut fallback_params = fallback.params.clone();
                 let mut fallback_ctx = template_ctx.clone();
                 fallback_ctx.error_log.push(error_msg.clone());
                 let _ = resolve_value_templates(&mut fallback_params, &fallback_ctx);
-                let (fallback_input, fallback_skill_params) = Self::extract_input_and_params(&fallback_params);
+                let (fallback_input, fallback_skill_params) =
+                    Self::extract_input_and_params(&fallback_params);
 
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(timeout_sec),
                     executor.execute_skill(&fallback.skill, &fallback_input, fallback_skill_params),
-                ).await {
+                )
+                .await
+                {
                     Ok(Ok(result)) => {
-                        info!("Step '{}' fallback skill '{}' completed", step.id, fallback.skill);
+                        info!(
+                            "Step '{}' fallback skill '{}' completed",
+                            step.id, fallback.skill
+                        );
                         let output = serde_json::from_str(&result.output)
                             .unwrap_or_else(|_| serde_json::Value::String(result.output.clone()));
                         step_state.mark_completed(output.clone());
@@ -555,10 +691,16 @@ impl WorkflowEngine {
                         };
                     }
                     Ok(Err(e)) => {
-                        warn!("Step '{}' fallback skill '{}' failed: {}", step.id, fallback.skill, e);
+                        warn!(
+                            "Step '{}' fallback skill '{}' failed: {}",
+                            step.id, fallback.skill, e
+                        );
                     }
                     Err(_) => {
-                        warn!("Step '{}' fallback skill '{}' timed out", step.id, fallback.skill);
+                        warn!(
+                            "Step '{}' fallback skill '{}' timed out",
+                            step.id, fallback.skill
+                        );
                     }
                 }
             }
@@ -620,15 +762,13 @@ impl WorkflowEngine {
         for step in steps {
             if let Some(ref deps) = step.depends_on {
                 for dep_id in deps {
-                    let dep_idx = node_map
-                        .get(dep_id)
-                        .ok_or_else(|| AgentError::InvalidConfig(format!(
+                    let dep_idx = node_map.get(dep_id).ok_or_else(|| {
+                        AgentError::InvalidConfig(format!(
                             "Step '{}' depends on unknown step '{}'",
                             step.id, dep_id
-                        )))?;
-                    let step_idx = node_map
-                        .get(&step.id)
-                        .expect("Step must exist in node map");
+                        ))
+                    })?;
+                    let step_idx = node_map.get(&step.id).expect("Step must exist in node map");
                     graph.add_edge(*dep_idx, *step_idx, ());
                 }
             }
@@ -672,8 +812,9 @@ impl WorkflowEngine {
         }
 
         // Topological sort
-        let sorted = petgraph::algo::toposort(&graph, None)
-            .map_err(|_| AgentError::InvalidConfig("Workflow dependency cycle detected".to_string()))?;
+        let sorted = petgraph::algo::toposort(&graph, None).map_err(|_| {
+            AgentError::InvalidConfig("Workflow dependency cycle detected".to_string())
+        })?;
 
         Ok(sorted.into_iter().map(|idx| graph[idx].clone()).collect())
     }
@@ -690,7 +831,9 @@ impl WorkflowEngine {
         scheduler: Arc<crate::queue::dag_scheduler::DagScheduler>,
         trigger_context: serde_json::Value,
     ) -> Result<WorkflowInstance, AgentError> {
-        use crate::workflow::dag_bridge::{to_dag_workflow, WorkflowDagExecutor, poll_scheduler_workflow};
+        use crate::workflow::dag_bridge::{
+            poll_scheduler_workflow, to_dag_workflow, WorkflowDagExecutor,
+        };
 
         info!(
             "Executing workflow '{}' on DagScheduler ({} steps)",
@@ -706,7 +849,9 @@ impl WorkflowEngine {
         let dag_workflow = to_dag_workflow(definition, trigger_context.clone())?;
 
         // Submit to scheduler
-        let scheduler_instance = scheduler.submit_workflow(dag_workflow).await
+        let scheduler_instance = scheduler
+            .submit_workflow(dag_workflow)
+            .await
             .map_err(|e| AgentError::Execution(format!("Scheduler submission failed: {}", e)))?;
 
         let scheduler_instance_id = scheduler_instance.instance_id.clone();
@@ -722,7 +867,8 @@ impl WorkflowEngine {
             &scheduler_instance_id,
             &definition.id,
             trigger_context,
-        ).await?;
+        )
+        .await?;
 
         info!(
             "Workflow '{}' (instance {}) completed with status: {}",
@@ -732,8 +878,8 @@ impl WorkflowEngine {
         Ok(instance)
     }
 
-    /// Evaluate a condition expression supporting booleans, numeric comparisons,
-    /// string equality, and non-empty truthiness.
+    /// Evaluate a condition expression supporting booleans, numeric
+    /// comparisons, string equality, and non-empty truthiness.
     pub fn evaluate_condition_expression(expr: &str) -> bool {
         let expr = expr.trim();
         if expr.eq_ignore_ascii_case("true") {
@@ -745,9 +891,7 @@ impl WorkflowEngine {
 
         // Regex for binary comparisons: left OP right
         // Supports operators: ==, !=, <=, >=, <, >
-        let re = regex::Regex::new(
-            r"^(?P<left>.+?)(?P<op>==|!=|<=|>=|<|>)(?P<right>.+)$"
-        ).unwrap();
+        let re = regex::Regex::new(r"^(?P<left>.+?)(?P<op>==|!=|<=|>=|<|>)(?P<right>.+)$").unwrap();
 
         if let Some(caps) = re.captures(expr) {
             let left = caps.name("left").unwrap().as_str().trim();
@@ -855,7 +999,9 @@ mod tests {
             input: &str,
             _params: HashMap<String, String>,
         ) -> Result<SkillStepResult, AgentError> {
-            let output = self.responses.get(skill_id)
+            let output = self
+                .responses
+                .get(skill_id)
                 .cloned()
                 .unwrap_or_else(|| format!("mock:{}:input={}", skill_id, input));
             Ok(SkillStepResult {
@@ -962,7 +1108,9 @@ mod tests {
         assert!(WorkflowEngine::evaluate_condition_expression("foo != bar"));
 
         // Fallback truthiness
-        assert!(WorkflowEngine::evaluate_condition_expression("some non-empty string"));
+        assert!(WorkflowEngine::evaluate_condition_expression(
+            "some non-empty string"
+        ));
     }
 
     #[test]
@@ -1015,7 +1163,8 @@ mod tests {
         ];
 
         let sorted = WorkflowEngine::topological_sort(&steps).unwrap();
-        let step_map: HashMap<String, &WorkflowStep> = steps.iter().map(|s| (s.id.clone(), s)).collect();
+        let step_map: HashMap<String, &WorkflowStep> =
+            steps.iter().map(|s| (s.id.clone(), s)).collect();
         let layers = WorkflowEngine::compute_layers(&sorted, &step_map);
 
         assert_eq!(layers.len(), 3);
@@ -1045,7 +1194,7 @@ mod tests {
             triggers: vec![],
             config: crate::workflow::definition::WorkflowGlobalConfig::default(),
             error_handler: None,
-                        steps: vec![
+            steps: vec![
                 WorkflowStep {
                     id: "step_a".to_string(),
                     name: "A".to_string(),
@@ -1055,7 +1204,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
                 WorkflowStep {
                     id: "step_b".to_string(),
@@ -1066,7 +1215,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
                 WorkflowStep {
                     id: "step_merge".to_string(),
@@ -1080,18 +1229,30 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
             ],
         };
 
-        let instance = engine.execute(&definition, &executor, serde_json::Value::Null, None).await.unwrap();
+        let instance = engine
+            .execute(&definition, &executor, serde_json::Value::Null, None)
+            .await
+            .unwrap();
 
         assert_eq!(instance.status, WorkflowStatus::Completed);
         assert_eq!(instance.step_states.len(), 3);
-        assert_eq!(instance.step_states.get("step_a").unwrap().status, StepStatus::Completed);
-        assert_eq!(instance.step_states.get("step_b").unwrap().status, StepStatus::Completed);
-        assert_eq!(instance.step_states.get("step_merge").unwrap().status, StepStatus::Completed);
+        assert_eq!(
+            instance.step_states.get("step_a").unwrap().status,
+            StepStatus::Completed
+        );
+        assert_eq!(
+            instance.step_states.get("step_b").unwrap().status,
+            StepStatus::Completed
+        );
+        assert_eq!(
+            instance.step_states.get("step_merge").unwrap().status,
+            StepStatus::Completed
+        );
     }
 
     #[test]
@@ -1110,7 +1271,10 @@ mod tests {
     #[tokio::test]
     async fn test_workflow_execution_with_mock_executor() {
         let mut responses = HashMap::new();
-        responses.insert("fetch_data".to_string(), "{\"items\": [1, 2, 3]}".to_string());
+        responses.insert(
+            "fetch_data".to_string(),
+            "{\"items\": [1, 2, 3]}".to_string(),
+        );
         responses.insert("process_data".to_string(), "processed: 3 items".to_string());
         responses.insert("notify".to_string(), "notification sent".to_string());
 
@@ -1127,7 +1291,7 @@ mod tests {
             triggers: vec![],
             config: crate::workflow::definition::WorkflowGlobalConfig::default(),
             error_handler: None,
-                        steps: vec![
+            steps: vec![
                 WorkflowStep {
                     id: "step1".to_string(),
                     name: "Fetch".to_string(),
@@ -1137,7 +1301,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
                 WorkflowStep {
                     id: "step2".to_string(),
@@ -1148,7 +1312,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
                 WorkflowStep {
                     id: "step3".to_string(),
@@ -1159,12 +1323,15 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
             ],
         };
 
-        let instance = engine.execute(&definition, &executor, serde_json::Value::Null, None).await.unwrap();
+        let instance = engine
+            .execute(&definition, &executor, serde_json::Value::Null, None)
+            .await
+            .unwrap();
 
         assert_eq!(instance.status, WorkflowStatus::Completed);
         assert_eq!(instance.step_states.len(), 3);
@@ -1212,7 +1379,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
                 WorkflowStep {
                     id: "s2".to_string(),
@@ -1223,7 +1390,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
                 WorkflowStep {
                     id: "s3".to_string(),
@@ -1234,18 +1401,27 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
             ],
         };
 
-        let instance = engine.execute(&definition, &executor, serde_json::Value::Null, None).await.unwrap();
+        let instance = engine
+            .execute(&definition, &executor, serde_json::Value::Null, None)
+            .await
+            .unwrap();
 
         // With continue_on_failure, all steps should be attempted
         assert_eq!(instance.step_states.len(), 3);
-        assert_eq!(instance.step_states.get("s1").unwrap().status, StepStatus::Completed);
+        assert_eq!(
+            instance.step_states.get("s1").unwrap().status,
+            StepStatus::Completed
+        );
         // s2 and s3 depend on s2, but since s2 succeeds with mock, s3 also completes
-        assert_eq!(instance.step_states.get("s3").unwrap().status, StepStatus::Completed);
+        assert_eq!(
+            instance.step_states.get("s3").unwrap().status,
+            StepStatus::Completed
+        );
     }
 
     #[test]
@@ -1256,7 +1432,9 @@ mod tests {
         assert!(WorkflowEngine::looks_like_comparison("foo == bar"));
         assert!(WorkflowEngine::looks_like_comparison("count <= 10"));
         assert!(!WorkflowEngine::looks_like_comparison("摘要质量是否合格"));
-        assert!(!WorkflowEngine::looks_like_comparison("Does the output look good?"));
+        assert!(!WorkflowEngine::looks_like_comparison(
+            "Does the output look good?"
+        ));
         assert!(!WorkflowEngine::looks_like_comparison(""));
     }
 
@@ -1264,10 +1442,13 @@ mod tests {
     async fn test_workflow_failure_marks_remaining_steps_cancelled() {
         let mut responses = HashMap::new();
         responses.insert("s1".to_string(), "ok".to_string());
-        // s2 will fail (not in responses -> default output, but we need explicit failure)
-        // Actually MockStepExecutor returns default output for missing skills, so we need a different approach.
-        // We'll use a custom executor that fails on s2.
-        let executor = FailingStepExecutor { fail_on: vec!["s2".to_string()] };
+        // s2 will fail (not in responses -> default output, but we need explicit
+        // failure) Actually MockStepExecutor returns default output for missing
+        // skills, so we need a different approach. We'll use a custom executor
+        // that fails on s2.
+        let executor = FailingStepExecutor {
+            fail_on: vec!["s2".to_string()],
+        };
         let engine = WorkflowEngine::new();
 
         let definition = WorkflowDefinition {
@@ -1293,7 +1474,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
                 WorkflowStep {
                     id: "s2".to_string(),
@@ -1304,7 +1485,7 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
                 WorkflowStep {
                     id: "s3".to_string(),
@@ -1315,18 +1496,30 @@ mod tests {
                     condition: None,
                     timeout_sec: None,
                     retries: None,
-                on_error: None,
+                    on_error: None,
                 },
             ],
         };
 
-        let instance = engine.execute(&definition, &executor, serde_json::Value::Null, None).await.unwrap();
+        let instance = engine
+            .execute(&definition, &executor, serde_json::Value::Null, None)
+            .await
+            .unwrap();
 
         assert_eq!(instance.status, WorkflowStatus::Failed);
-        assert_eq!(instance.step_states.get("s1").unwrap().status, StepStatus::Completed);
-        assert_eq!(instance.step_states.get("s2").unwrap().status, StepStatus::Failed);
+        assert_eq!(
+            instance.step_states.get("s1").unwrap().status,
+            StepStatus::Completed
+        );
+        assert_eq!(
+            instance.step_states.get("s2").unwrap().status,
+            StepStatus::Failed
+        );
         // s3 should be marked as cancelled because workflow failed before reaching it
-        assert_eq!(instance.step_states.get("s3").unwrap().status, StepStatus::Cancelled);
+        assert_eq!(
+            instance.step_states.get("s3").unwrap().status,
+            StepStatus::Cancelled
+        );
     }
 
     #[tokio::test]
@@ -1344,25 +1537,29 @@ mod tests {
             triggers: vec![],
             config: crate::workflow::definition::WorkflowGlobalConfig::default(),
             error_handler: None,
-                        steps: vec![
-                WorkflowStep {
-                    id: "s1".to_string(),
-                    name: "A".to_string(),
-                    skill: "s1".to_string(),
-                    params: serde_json::Value::Null,
-                    depends_on: None,
-                    condition: Some("摘要质量是否合格".to_string()),
-                    timeout_sec: None,
-                    retries: None,
+            steps: vec![WorkflowStep {
+                id: "s1".to_string(),
+                name: "A".to_string(),
+                skill: "s1".to_string(),
+                params: serde_json::Value::Null,
+                depends_on: None,
+                condition: Some("摘要质量是否合格".to_string()),
+                timeout_sec: None,
+                retries: None,
                 on_error: None,
-                },
-            ],
+            }],
         };
 
-        let instance = engine.execute(&definition, &executor, serde_json::Value::Null, None).await.unwrap();
+        let instance = engine
+            .execute(&definition, &executor, serde_json::Value::Null, None)
+            .await
+            .unwrap();
         // LlmJudgeMockExecutor always returns true for judge_condition,
         // so the step should execute (and complete with default mock output)
-        assert_eq!(instance.step_states.get("s1").unwrap().status, StepStatus::Completed);
+        assert_eq!(
+            instance.step_states.get("s1").unwrap().status,
+            StepStatus::Completed
+        );
     }
 
     /// Mock executor that fails on specific skill IDs
@@ -1379,9 +1576,15 @@ mod tests {
             _params: HashMap<String, String>,
         ) -> Result<SkillStepResult, AgentError> {
             if self.fail_on.contains(&skill_id.to_string()) {
-                Err(AgentError::Execution(format!("Forced failure for {}", skill_id)))
+                Err(AgentError::Execution(format!(
+                    "Forced failure for {}",
+                    skill_id
+                )))
             } else {
-                Ok(SkillStepResult { output: "ok".to_string(), execution_time_ms: 1 })
+                Ok(SkillStepResult {
+                    output: "ok".to_string(),
+                    execution_time_ms: 1,
+                })
             }
         }
     }
@@ -1397,7 +1600,10 @@ mod tests {
             _input: &str,
             _params: HashMap<String, String>,
         ) -> Result<SkillStepResult, AgentError> {
-            Ok(SkillStepResult { output: "ok".to_string(), execution_time_ms: 1 })
+            Ok(SkillStepResult {
+                output: "ok".to_string(),
+                execution_time_ms: 1,
+            })
         }
 
         async fn judge_condition(&self, _prompt: &str, _output: &str) -> Result<bool, AgentError> {

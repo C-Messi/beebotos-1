@@ -15,12 +15,12 @@ pub mod registry;
 
 pub use conditional::{Condition, SkillConditional};
 pub use definition::{
-    CompositionConfig, CompositionDefinition, ConditionDef, InputMappingDef,
-    LoopConditionDef, MergeStrategyDef, ParallelBranchDef, PipelineStepDef,
+    CompositionConfig, CompositionDefinition, ConditionDef, InputMappingDef, LoopConditionDef,
+    MergeStrategyDef, ParallelBranchDef, PipelineStepDef,
 };
-pub use r#loop::{LoopCondition, SkillLoop};
 pub use parallel::{MergeStrategy, ParallelBranch, SkillParallel};
 pub use pipeline::{InputMapping, PipelineStep, SkillPipeline};
+pub use r#loop::{LoopCondition, SkillLoop};
 pub use registry::{CompositionRegistry, RegistryError};
 
 use crate::agent_impl::Agent;

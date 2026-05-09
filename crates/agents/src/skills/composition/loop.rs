@@ -1,6 +1,7 @@
 //! Skill Loop — Repeat execution with condition checking
 
 use std::time::Duration;
+
 use tracing::{info, warn};
 
 use crate::agent_impl::Agent;
@@ -57,20 +58,14 @@ impl SkillLoop {
         loop {
             iteration += 1;
             if iteration > self.max_iterations {
-                warn!(
-                    "Loop max iterations ({}) reached",
-                    self.max_iterations
-                );
+                warn!("Loop max iterations ({}) reached", self.max_iterations);
                 return Ok(format!(
                     "[Loop exceeded max iterations ({})] Last output: {}",
                     self.max_iterations, last_output
                 ));
             }
 
-            info!(
-                "Loop iteration {}/{}",
-                iteration, self.max_iterations
-            );
+            info!("Loop iteration {}/{}", iteration, self.max_iterations);
 
             // Execute body and update output for next iteration's condition check
             match self.body.execute(&last_output, agent).await {
@@ -78,20 +73,18 @@ impl SkillLoop {
                     last_output = result;
                 }
                 Err(e) => {
-                    warn!(
-                        "Loop iteration {} failed: {}",
-                        iteration, e
-                    );
+                    warn!("Loop iteration {} failed: {}", iteration, e);
                     last_output = format!("[ERROR: {}]", e);
                 }
             }
 
             // Check termination condition
-            if self.until.is_met_async(&last_output, iteration, agent).await {
-                info!(
-                    "Loop condition met at iteration {}",
-                    iteration
-                );
+            if self
+                .until
+                .is_met_async(&last_output, iteration, agent)
+                .await
+            {
+                info!("Loop condition met at iteration {}", iteration);
                 return Ok(format!(
                     "[Loop completed after {} iterations] Output: {}",
                     iteration, last_output
@@ -100,7 +93,9 @@ impl SkillLoop {
 
             // Exponential backoff before next iteration (cap at 30s)
             if self.backoff_ms > 0 {
-                let delay = self.backoff_ms.saturating_mul(1u64 << (iteration - 1).min(10));
+                let delay = self
+                    .backoff_ms
+                    .saturating_mul(1u64 << (iteration - 1).min(10));
                 let capped = delay.min(30000);
                 tokio::time::sleep(Duration::from_millis(capped)).await;
             }
@@ -137,7 +132,8 @@ impl LoopCondition {
             }
             LoopCondition::LlmJudge { prompt } => {
                 warn!(
-                    "LlmJudge loop condition requires LLM context to evaluate; returning false. Prompt: {}",
+                    "LlmJudge loop condition requires LLM context to evaluate; returning false. \
+                     Prompt: {}",
                     prompt
                 );
                 false
@@ -146,17 +142,24 @@ impl LoopCondition {
         }
     }
 
-    /// Check if the loop should stop with Agent context (supports LlmJudge via LLM)
+    /// Check if the loop should stop with Agent context (supports LlmJudge via
+    /// LLM)
     pub async fn is_met_async(&self, output: &str, iteration: usize, agent: &Agent) -> bool {
         match self {
             LoopCondition::LlmJudge { prompt } => {
                 match agent.judge_condition(prompt, output).await {
                     Ok(result) => {
-                        info!("LlmJudge loop condition evaluated to {} for prompt: {}", result, prompt);
+                        info!(
+                            "LlmJudge loop condition evaluated to {} for prompt: {}",
+                            result, prompt
+                        );
                         result
                     }
                     Err(e) => {
-                        warn!("LlmJudge loop evaluation failed: {}, defaulting to false", e);
+                        warn!(
+                            "LlmJudge loop evaluation failed: {}, defaulting to false",
+                            e
+                        );
                         false
                     }
                 }
@@ -168,10 +171,12 @@ impl LoopCondition {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Stateful mock composition node that returns different output on each call
+    use super::*;
+
+    /// Stateful mock composition node that returns different output on each
+    /// call
     #[derive(Debug)]
     struct CountingMockNode {
         counter: AtomicUsize,
@@ -182,7 +187,11 @@ mod tests {
     impl super::super::CompositionNode for CountingMockNode {
         async fn execute(&self, _input: &str, _agent: &Agent) -> Result<String, AgentError> {
             let idx = self.counter.fetch_add(1, Ordering::SeqCst);
-            Ok(self.outputs.get(idx).cloned().unwrap_or_else(|| "default".to_string()))
+            Ok(self
+                .outputs
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| "default".to_string()))
         }
     }
 

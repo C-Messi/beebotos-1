@@ -2,8 +2,9 @@
 //!
 //! Frontend API client for Gateway cron job endpoints
 
-use super::client::{ApiClient, ApiError};
 use serde::{Deserialize, Serialize};
+
+use super::client::{ApiClient, ApiError};
 
 /// Schedule type for cron jobs
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -145,7 +146,11 @@ impl CronJobApiService {
     }
 
     /// Update a job
-    pub async fn update_job(&self, id: &str, req: &CronJobRequest) -> Result<CronJobResponse, ApiError> {
+    pub async fn update_job(
+        &self,
+        id: &str,
+        req: &CronJobRequest,
+    ) -> Result<CronJobResponse, ApiError> {
         self.client
             .put(
                 &format!("/cron/jobs/{}", js_sys::encode_uri_component(id)),
@@ -184,7 +189,10 @@ impl CronJobApiService {
     /// List execution history
     pub async fn list_runs(&self, id: &str) -> Result<Vec<CronJobRun>, ApiError> {
         self.client
-            .get(&format!("/cron/jobs/{}/runs", js_sys::encode_uri_component(id)))
+            .get(&format!(
+                "/cron/jobs/{}/runs",
+                js_sys::encode_uri_component(id)
+            ))
             .await
     }
 }

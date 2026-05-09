@@ -1,10 +1,11 @@
 //! Skill Distiller — Automatic Skill Extraction from Tool Trails
 //!
 //! Converts successful task execution trails into reusable SKILL.md artifacts.
-//! Pipeline: trail ingestion → sanitization → abstraction → validation → output.
+//! Pipeline: trail ingestion → sanitization → abstraction → validation →
+//! output.
 
 use crate::error::Result;
-use crate::planning::{ToolTrail, TrailStatus, ToolCallRecord};
+use crate::planning::{ToolCallRecord, ToolTrail, TrailStatus};
 use crate::skills::registry::RegisteredSkill;
 
 /// Trigger conditions for skill distillation
@@ -105,9 +106,7 @@ impl SkillDistiller {
             return false;
         }
 
-        let tool_call_count: usize = trail.steps.iter()
-            .map(|s| s.tool_calls.len())
-            .sum();
+        let tool_call_count: usize = trail.steps.iter().map(|s| s.tool_calls.len()).sum();
 
         match trigger {
             DistillTrigger::ToolCallThreshold { count } => tool_call_count >= *count,
@@ -171,7 +170,11 @@ impl SkillDistiller {
                 steps.push(WorkflowStep {
                     step_number: step_num,
                     tool_name: call.tool_name.clone(),
-                    description: format!("{}: {}", call.tool_name, call.result_summary.chars().take(80).collect::<String>()),
+                    description: format!(
+                        "{}: {}",
+                        call.tool_name,
+                        call.result_summary.chars().take(80).collect::<String>()
+                    ),
                     params_template,
                     validation_hint: self.infer_validation(&call),
                 });
@@ -195,7 +198,10 @@ impl SkillDistiller {
         for step in &trail.steps {
             for call in &step.tool_calls {
                 if !call.success {
-                    last_failure = Some(format!("{} failed: {}", call.tool_name, call.result_summary));
+                    last_failure = Some(format!(
+                        "{} failed: {}",
+                        call.tool_name, call.result_summary
+                    ));
                 } else if let Some(ref failure) = last_failure {
                     pitfalls.push(Pitfall {
                         error_description: failure.clone(),
@@ -214,12 +220,14 @@ impl SkillDistiller {
             return "unknown_workflow".to_string();
         }
 
-        let tool_names: Vec<String> = steps.iter()
-            .map(|s| s.tool_name.clone())
-            .collect();
+        let tool_names: Vec<String> = steps.iter().map(|s| s.tool_name.clone()).collect();
 
         // Simple heuristic: name based on first and last tool
-        format!("{}_to_{}_workflow", tool_names.first().unwrap(), tool_names.last().unwrap())
+        format!(
+            "{}_to_{}_workflow",
+            tool_names.first().unwrap(),
+            tool_names.last().unwrap()
+        )
     }
 
     fn infer_validation(&self, call: &ToolCallRecord) -> String {
@@ -232,7 +240,12 @@ impl SkillDistiller {
         }
     }
 
-    fn compute_quality(&self, steps: &[WorkflowStep], pitfalls: &[Pitfall], trail: &ToolTrail) -> f32 {
+    fn compute_quality(
+        &self,
+        steps: &[WorkflowStep],
+        pitfalls: &[Pitfall],
+        trail: &ToolTrail,
+    ) -> f32 {
         let mut score = 5.0; // baseline
 
         // +1 for each step (up to +3)
@@ -254,7 +267,8 @@ impl SkillDistiller {
         score.clamp(0.0, 10.0)
     }
 
-    /// Compare distilled skill to existing skills for patch/deduplicate decision
+    /// Compare distilled skill to existing skills for patch/deduplicate
+    /// decision
     pub fn compare_to_existing(
         &self,
         distilled: &DistilledSkill,
@@ -264,11 +278,13 @@ impl SkillDistiller {
             return DistillDecision::CreateNew;
         }
 
-        // Simple text similarity: compare applicable_scenario to existing skill names/descriptions
+        // Simple text similarity: compare applicable_scenario to existing skill
+        // names/descriptions
         let mut best_match: Option<(String, f32)> = None;
 
         for skill in existing {
-            let existing_text = format!("{} {}", skill.skill.name, skill.skill.manifest.description);
+            let existing_text =
+                format!("{} {}", skill.skill.name, skill.skill.manifest.description);
             let sim = text_similarity(&distilled.applicable_scenario, &existing_text);
 
             if best_match.as_ref().map(|(_, s)| sim > *s).unwrap_or(true) {
@@ -297,8 +313,14 @@ impl SkillDistiller {
         md.push_str("## 元信息\n");
         md.push_str(&format!("- **version**: 1.0.0\n"));
         md.push_str(&format!("- **auto_generated**: true\n"));
-        md.push_str(&format!("- **quality_score**: {:.1}\n", distilled.quality_score));
-        md.push_str(&format!("- **source_trail**: {}\n", distilled.source_trail_id));
+        md.push_str(&format!(
+            "- **quality_score**: {:.1}\n",
+            distilled.quality_score
+        ));
+        md.push_str(&format!(
+            "- **source_trail**: {}\n",
+            distilled.source_trail_id
+        ));
         md.push_str("\n");
 
         md.push_str("## 适用场景\n");
@@ -308,7 +330,11 @@ impl SkillDistiller {
         for step in &distilled.steps {
             md.push_str(&format!(
                 "{}. {}\n   - 工具: `{}`\n   - 参数模板: `{}`\n   - 验证: {}\n",
-                step.step_number, step.description, step.tool_name, step.params_template, step.validation_hint
+                step.step_number,
+                step.description,
+                step.tool_name,
+                step.params_template,
+                step.validation_hint
             ));
         }
         md.push_str("\n");
@@ -316,7 +342,10 @@ impl SkillDistiller {
         if !distilled.decisions.is_empty() {
             md.push_str("## 关键决策点\n");
             for d in &distilled.decisions {
-                md.push_str(&format!("- **IF** {} **THEN** {}\n", d.condition, d.if_branch));
+                md.push_str(&format!(
+                    "- **IF** {} **THEN** {}\n",
+                    d.condition, d.if_branch
+                ));
             }
             md.push_str("\n");
         }
@@ -324,13 +353,19 @@ impl SkillDistiller {
         if !distilled.pitfalls.is_empty() {
             md.push_str("## 已知陷阱 (Pitfalls)\n");
             for p in &distilled.pitfalls {
-                md.push_str(&format!("- **{}**: {}\n", p.error_description, p.recovery_action));
+                md.push_str(&format!(
+                    "- **{}**: {}\n",
+                    p.error_description, p.recovery_action
+                ));
             }
             md.push_str("\n");
         }
 
         md.push_str("## 谱系历史\n");
-        md.push_str(&format!("- v1.0.0: 自动从轨迹 {} 提炼\n", distilled.source_trail_id));
+        md.push_str(&format!(
+            "- v1.0.0: 自动从轨迹 {} 提炼\n",
+            distilled.source_trail_id
+        ));
 
         md
     }
@@ -358,7 +393,13 @@ fn generalize_params(params: &serde_json::Value) -> String {
                         if looks_like_symbol(s) {
                             serde_json::json!(format!("{{{}}}", key))
                         } else if looks_like_path(s) {
-                            serde_json::json!(format!("{{project_root}}/{}", std::path::Path::new(s).file_name().map(|f| f.to_string_lossy()).unwrap_or_default()))
+                            serde_json::json!(format!(
+                                "{{project_root}}/{}",
+                                std::path::Path::new(s)
+                                    .file_name()
+                                    .map(|f| f.to_string_lossy())
+                                    .unwrap_or_default()
+                            ))
                         } else {
                             serde_json::json!(format!("{{{}}}", key))
                         }
@@ -374,7 +415,8 @@ fn generalize_params(params: &serde_json::Value) -> String {
 }
 
 fn looks_like_symbol(s: &str) -> bool {
-    s.chars().all(|c| c.is_alphanumeric() || c == '/' || c == '-' || c == '_')
+    s.chars()
+        .all(|c| c.is_alphanumeric() || c == '/' || c == '-' || c == '_')
         && s.len() <= 10
         && s.to_uppercase() == s.to_uppercase() // not all lowercase words
 }
@@ -385,12 +427,14 @@ fn looks_like_path(s: &str) -> bool {
 
 /// Simple text similarity: Jaccard index on word sets
 fn text_similarity(a: &str, b: &str) -> f32 {
-    let words_a: std::collections::HashSet<String> = a.to_lowercase()
+    let words_a: std::collections::HashSet<String> = a
+        .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() >= 3)
         .map(|w| w.to_string())
         .collect();
-    let words_b: std::collections::HashSet<String> = b.to_lowercase()
+    let words_b: std::collections::HashSet<String> = b
+        .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() >= 3)
         .map(|w| w.to_string())
@@ -426,7 +470,10 @@ mod tests {
         };
 
         // No existing skills → CreateNew
-        assert_eq!(distiller.compare_to_existing(&dummy, &[]), DistillDecision::CreateNew);
+        assert_eq!(
+            distiller.compare_to_existing(&dummy, &[]),
+            DistillDecision::CreateNew
+        );
     }
 
     #[test]
@@ -444,10 +491,18 @@ mod tests {
     #[test]
     fn test_text_similarity() {
         let sim = text_similarity("deploy flask to kubernetes", "flask k8s deployment");
-        assert!(sim > 0.15, "Similar texts should have similarity > 0.15, got {}", sim);
+        assert!(
+            sim > 0.15,
+            "Similar texts should have similarity > 0.15, got {}",
+            sim
+        );
 
         let diff = text_similarity("deploy flask", "analyze stock data");
-        assert!(diff < 0.15, "Different texts should have similarity < 0.15, got {}", diff);
+        assert!(
+            diff < 0.15,
+            "Different texts should have similarity < 0.15, got {}",
+            diff
+        );
     }
 
     #[test]
@@ -455,9 +510,27 @@ mod tests {
         let distiller = SkillDistiller::new(DistillerConfig::default());
         let trail = ToolTrail::new("test".to_string());
         let steps = vec![
-            WorkflowStep { step_number: 1, tool_name: "fetch".to_string(), description: "Fetch data".to_string(), params_template: "{}".to_string(), validation_hint: "".to_string() },
-            WorkflowStep { step_number: 2, tool_name: "process".to_string(), description: "Process".to_string(), params_template: "{}".to_string(), validation_hint: "".to_string() },
-            WorkflowStep { step_number: 3, tool_name: "save".to_string(), description: "Save".to_string(), params_template: "{}".to_string(), validation_hint: "".to_string() },
+            WorkflowStep {
+                step_number: 1,
+                tool_name: "fetch".to_string(),
+                description: "Fetch data".to_string(),
+                params_template: "{}".to_string(),
+                validation_hint: "".to_string(),
+            },
+            WorkflowStep {
+                step_number: 2,
+                tool_name: "process".to_string(),
+                description: "Process".to_string(),
+                params_template: "{}".to_string(),
+                validation_hint: "".to_string(),
+            },
+            WorkflowStep {
+                step_number: 3,
+                tool_name: "save".to_string(),
+                description: "Save".to_string(),
+                params_template: "{}".to_string(),
+                validation_hint: "".to_string(),
+            },
         ];
         let quality = distiller.compute_quality(&steps, &[], &trail);
         assert!(quality >= 5.0, "3-step workflow should score >= 5.0");

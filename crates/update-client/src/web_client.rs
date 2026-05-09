@@ -6,10 +6,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{window, ServiceWorkerRegistration};
 
-use crate::{
-    error::UpdateError,
-    models::{UpdateCheckRequest, UpdateCheckResponse, VersionInfo},
-};
+use crate::error::UpdateError;
+use crate::models::{UpdateCheckRequest, UpdateCheckResponse, VersionInfo};
 
 /// Web application updater
 pub struct WebUpdater {
@@ -20,7 +18,8 @@ pub struct WebUpdater {
 
 impl WebUpdater {
     pub async fn new(server_url: String) -> Result<Self, UpdateError> {
-        let window = window().ok_or_else(|| UpdateError::Network("No window available".to_string()))?;
+        let window =
+            window().ok_or_else(|| UpdateError::Network("No window available".to_string()))?;
         let navigator = window.navigator();
 
         let sw = navigator.service_worker();
@@ -90,9 +89,11 @@ impl WebUpdater {
     pub async fn precache_update(&self, info: &VersionInfo) -> Result<(), UpdateError> {
         if let Some(reg) = &self.registration {
             if let Some(sw) = reg.active() {
-                let msg = JSON::stringify(&JsValue::from_str(
-                    &format!("{{\"action\":\"precache\",\"version\":\"{}\"}}", info.version)
-                )).unwrap_or_default();
+                let msg = JSON::stringify(&JsValue::from_str(&format!(
+                    "{{\"action\":\"precache\",\"version\":\"{}\"}}",
+                    info.version
+                )))
+                .unwrap_or_default();
                 let _ = sw.post_message(&msg);
             }
         }

@@ -6,14 +6,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::workflow::{
-    definition::{WorkflowDefinition, WorkflowStep},
-    engine::{SkillStepResult, StepExecutor, WorkflowEngine},
-    state::{StepStatus, WorkflowStatus},
-    template::{resolve_template, TemplateContext},
-    trigger::TriggerEngine,
-    WorkflowRegistry,
-};
+use crate::workflow::definition::{WorkflowDefinition, WorkflowStep};
+use crate::workflow::engine::{SkillStepResult, StepExecutor, WorkflowEngine};
+use crate::workflow::state::{StepStatus, WorkflowStatus};
+use crate::workflow::template::{resolve_template, TemplateContext};
+use crate::workflow::trigger::TriggerEngine;
+use crate::workflow::WorkflowRegistry;
 
 /// Mock step executor for integration tests
 struct TestStepExecutor {
@@ -93,7 +91,10 @@ steps:
     assert_eq!(step2.depends_on.as_ref().unwrap()[0], "fetch_data");
 
     let step3 = &def.steps[2];
-    assert_eq!(step3.condition.as_ref().unwrap(), "{{workflow.any_failed}} == false");
+    assert_eq!(
+        step3.condition.as_ref().unwrap(),
+        "{{workflow.any_failed}} == false"
+    );
 }
 
 #[test]
@@ -120,8 +121,14 @@ fn test_template_resolution_pipeline() {
 #[tokio::test]
 async fn test_engine_executes_dag_with_dependencies() {
     let mut outputs = HashMap::new();
-    outputs.insert("fetch_data".to_string(), r#"{"items": [1, 2, 3]}"#.to_string());
-    outputs.insert("process_data".to_string(), r#"{"result": "ok"}"#.to_string());
+    outputs.insert(
+        "fetch_data".to_string(),
+        r#"{"items": [1, 2, 3]}"#.to_string(),
+    );
+    outputs.insert(
+        "process_data".to_string(),
+        r#"{"result": "ok"}"#.to_string(),
+    );
     outputs.insert("notify".to_string(), "sent".to_string());
 
     let executor = TestStepExecutor { outputs };
@@ -302,7 +309,7 @@ fn test_trigger_engine_event_filtering() {
             condition: None,
             timeout_sec: None,
             retries: None,
-                on_error: None,
+            on_error: None,
         }],
     };
 
@@ -350,7 +357,7 @@ fn test_trigger_engine_jsonpath_truthiness() {
             condition: None,
             timeout_sec: None,
             retries: None,
-                on_error: None,
+            on_error: None,
         }],
     };
 
@@ -386,7 +393,7 @@ async fn test_workflow_registry_and_execution() {
             condition: None,
             timeout_sec: None,
             retries: None,
-                on_error: None,
+            on_error: None,
         }],
     };
 
@@ -405,7 +412,6 @@ async fn test_workflow_registry_and_execution() {
 
     assert_eq!(instance.status, WorkflowStatus::Completed);
 }
-
 
 // ============================================================================
 // YAML Example Workflow Validation Tests
@@ -496,7 +502,8 @@ fn validate_workflow(def: &WorkflowDefinition) -> Result<(), String> {
         }
     }
 
-    // 5. Validate that step references only point to earlier steps in topological order
+    // 5. Validate that step references only point to earlier steps in topological
+    //    order
     let step_order: std::collections::HashMap<String, usize> = sorted
         .iter()
         .enumerate()
@@ -511,7 +518,8 @@ fn validate_workflow(def: &WorkflowDefinition) -> Result<(), String> {
             let ref_idx = step_order.get(ref_id).copied().unwrap_or(0);
             if ref_idx >= step_idx {
                 return Err(format!(
-                    "Step '{}' (order {}) references step '{}' (order {}) which is not before it in DAG",
+                    "Step '{}' (order {}) references step '{}' (order {}) which is not before it \
+                     in DAG",
                     step.id, step_idx, ref_id, ref_idx
                 ));
             }
@@ -523,7 +531,8 @@ fn validate_workflow(def: &WorkflowDefinition) -> Result<(), String> {
                 let ref_idx = step_order.get(ref_id).copied().unwrap_or(0);
                 if ref_idx >= step_idx {
                     return Err(format!(
-                        "Step '{}' (order {}) condition references step '{}' (order {}) which is not before it",
+                        "Step '{}' (order {}) condition references step '{}' (order {}) which is \
+                         not before it",
                         step.id, step_idx, ref_id, ref_idx
                     ));
                 }
@@ -540,16 +549,14 @@ fn validate_workflow(def: &WorkflowDefinition) -> Result<(), String> {
                 if parts.len() != 5 {
                     return Err(format!(
                         "Invalid cron schedule '{}': expected 5 fields, got {}",
-                        schedule, parts.len()
+                        schedule,
+                        parts.len()
                     ));
                 }
             }
             crate::workflow::definition::TriggerType::Webhook { path, .. } => {
                 if !path.starts_with('/') {
-                    return Err(format!(
-                        "Webhook path '{}' must start with '/'",
-                        path
-                    ));
+                    return Err(format!("Webhook path '{}' must start with '/'", path));
                 }
             }
             _ => {}
@@ -576,28 +583,68 @@ fn test_content_factory_yaml_valid() {
     assert_eq!(def.triggers.len(), 2);
 
     // Trigger checks
-    let has_manual = def.triggers.iter().any(|t| matches!(t.trigger_type, crate::workflow::definition::TriggerType::Manual { .. }));
+    let has_manual = def.triggers.iter().any(|t| {
+        matches!(
+            t.trigger_type,
+            crate::workflow::definition::TriggerType::Manual { .. }
+        )
+    });
     let has_webhook = def.triggers.iter().any(|t| matches!(t.trigger_type, crate::workflow::definition::TriggerType::Webhook { path: ref p, .. } if p == "/webhook/content-factory"));
     assert!(has_manual, "Should have manual trigger");
-    assert!(has_webhook, "Should have webhook trigger at /webhook/content-factory");
+    assert!(
+        has_webhook,
+        "Should have webhook trigger at /webhook/content-factory"
+    );
 
     // Step structure checks
-    let plan_step = def.steps.iter().find(|s| s.id == "plan_tasks").expect("plan_tasks step exists");
-    assert!(plan_step.depends_on.is_none(), "plan_tasks should have no dependencies");
+    let plan_step = def
+        .steps
+        .iter()
+        .find(|s| s.id == "plan_tasks")
+        .expect("plan_tasks step exists");
+    assert!(
+        plan_step.depends_on.is_none(),
+        "plan_tasks should have no dependencies"
+    );
 
-    let research_step = def.steps.iter().find(|s| s.id == "research_parallel").expect("research_parallel step exists");
+    let research_step = def
+        .steps
+        .iter()
+        .find(|s| s.id == "research_parallel")
+        .expect("research_parallel step exists");
     assert_eq!(research_step.depends_on.as_ref().unwrap(), &["plan_tasks"]);
     assert_eq!(research_step.skill, "parallel_delegate");
 
-    let draft_step = def.steps.iter().find(|s| s.id == "draft_content").expect("draft_content step exists");
-    assert_eq!(draft_step.depends_on.as_ref().unwrap(), &["research_parallel"]);
+    let draft_step = def
+        .steps
+        .iter()
+        .find(|s| s.id == "draft_content")
+        .expect("draft_content step exists");
+    assert_eq!(
+        draft_step.depends_on.as_ref().unwrap(),
+        &["research_parallel"]
+    );
 
-    let review_step = def.steps.iter().find(|s| s.id == "review_content").expect("review_content step exists");
+    let review_step = def
+        .steps
+        .iter()
+        .find(|s| s.id == "review_content")
+        .expect("review_content step exists");
     assert_eq!(review_step.depends_on.as_ref().unwrap(), &["draft_content"]);
 
-    let publish_step = def.steps.iter().find(|s| s.id == "publish_or_revise").expect("publish_or_revise step exists");
-    assert_eq!(publish_step.depends_on.as_ref().unwrap(), &["review_content"]);
-    assert_eq!(publish_step.condition.as_ref().unwrap(), "{{steps.review_content.output.score}} >= 80");
+    let publish_step = def
+        .steps
+        .iter()
+        .find(|s| s.id == "publish_or_revise")
+        .expect("publish_or_revise step exists");
+    assert_eq!(
+        publish_step.depends_on.as_ref().unwrap(),
+        &["review_content"]
+    );
+    assert_eq!(
+        publish_step.condition.as_ref().unwrap(),
+        "{{steps.review_content.output.score}} >= 80"
+    );
 
     // Full structural validation
     validate_workflow(&def).expect("content_factory workflow should be structurally valid");
@@ -621,7 +668,12 @@ fn test_manga_pipeline_yaml_valid() {
 
     // Trigger checks
     let has_cron = def.triggers.iter().any(|t| matches!(t.trigger_type, crate::workflow::definition::TriggerType::Cron { schedule: ref s, .. } if s == "0 2 * * *"));
-    let has_manual = def.triggers.iter().any(|t| matches!(t.trigger_type, crate::workflow::definition::TriggerType::Manual { .. }));
+    let has_manual = def.triggers.iter().any(|t| {
+        matches!(
+            t.trigger_type,
+            crate::workflow::definition::TriggerType::Manual { .. }
+        )
+    });
     assert!(has_cron, "Should have cron trigger at 0 2 * * *");
     assert!(has_manual, "Should have manual trigger");
 
@@ -629,8 +681,14 @@ fn test_manga_pipeline_yaml_valid() {
     let expected_deps: Vec<(&str, Option<Vec<String>>)> = vec![
         ("generate_idea", None),
         ("generate_script", Some(vec!["generate_idea".to_string()])),
-        ("storyboard_design", Some(vec!["generate_script".to_string()])),
-        ("generate_assets", Some(vec!["storyboard_design".to_string()])),
+        (
+            "storyboard_design",
+            Some(vec!["generate_script".to_string()]),
+        ),
+        (
+            "generate_assets",
+            Some(vec!["storyboard_design".to_string()]),
+        ),
         ("video_compose", Some(vec!["generate_assets".to_string()])),
         ("post_process", Some(vec!["video_compose".to_string()])),
         ("publish", Some(vec!["post_process".to_string()])),
@@ -638,23 +696,52 @@ fn test_manga_pipeline_yaml_valid() {
     ];
 
     for (step_id, expected_dep) in expected_deps {
-        let step = def.steps.iter().find(|s| s.id == step_id).expect(&format!("{} step exists", step_id));
-        assert_eq!(step.depends_on, expected_dep, "Step {} dependencies mismatch", step_id);
+        let step = def
+            .steps
+            .iter()
+            .find(|s| s.id == step_id)
+            .expect(&format!("{} step exists", step_id));
+        assert_eq!(
+            step.depends_on, expected_dep,
+            "Step {} dependencies mismatch",
+            step_id
+        );
     }
 
     // Template reference checks
-    let script_step = def.steps.iter().find(|s| s.id == "generate_script").unwrap();
+    let script_step = def
+        .steps
+        .iter()
+        .find(|s| s.id == "generate_script")
+        .unwrap();
     let refs = collect_step_refs_from_value(&script_step.params);
-    assert!(refs.contains(&"generate_idea".to_string()), "generate_script should reference generate_idea");
+    assert!(
+        refs.contains(&"generate_idea".to_string()),
+        "generate_script should reference generate_idea"
+    );
 
-    let storyboard_step = def.steps.iter().find(|s| s.id == "storyboard_design").unwrap();
+    let storyboard_step = def
+        .steps
+        .iter()
+        .find(|s| s.id == "storyboard_design")
+        .unwrap();
     let refs = collect_step_refs_from_value(&storyboard_step.params);
     assert!(refs.contains(&"generate_script".to_string()));
 
-    let notify_step = def.steps.iter().find(|s| s.id == "notify_complete").unwrap();
+    let notify_step = def
+        .steps
+        .iter()
+        .find(|s| s.id == "notify_complete")
+        .unwrap();
     let refs = collect_step_refs_from_value(&notify_step.params);
-    assert!(refs.contains(&"generate_script".to_string()), "notify_complete should reference generate_script for title");
-    assert!(refs.contains(&"publish".to_string()), "notify_complete should reference publish for urls");
+    assert!(
+        refs.contains(&"generate_script".to_string()),
+        "notify_complete should reference generate_script for title"
+    );
+    assert!(
+        refs.contains(&"publish".to_string()),
+        "notify_complete should reference publish for urls"
+    );
 
     // Full structural validation
     validate_workflow(&def).expect("manga_pipeline workflow should be structurally valid");
@@ -674,20 +761,38 @@ fn test_content_factory_dag_execution_order() {
 
     // research_parallel must come after plan_tasks
     let plan_idx = sorted.iter().position(|s| s == "plan_tasks").unwrap();
-    let research_idx = sorted.iter().position(|s| s == "research_parallel").unwrap();
-    assert!(research_idx > plan_idx, "research_parallel must come after plan_tasks");
+    let research_idx = sorted
+        .iter()
+        .position(|s| s == "research_parallel")
+        .unwrap();
+    assert!(
+        research_idx > plan_idx,
+        "research_parallel must come after plan_tasks"
+    );
 
     // draft_content must come after research_parallel
     let draft_idx = sorted.iter().position(|s| s == "draft_content").unwrap();
-    assert!(draft_idx > research_idx, "draft_content must come after research_parallel");
+    assert!(
+        draft_idx > research_idx,
+        "draft_content must come after research_parallel"
+    );
 
     // review_content must come after draft_content
     let review_idx = sorted.iter().position(|s| s == "review_content").unwrap();
-    assert!(review_idx > draft_idx, "review_content must come after draft_content");
+    assert!(
+        review_idx > draft_idx,
+        "review_content must come after draft_content"
+    );
 
     // publish_or_revise must come after review_content
-    let publish_idx = sorted.iter().position(|s| s == "publish_or_revise").unwrap();
-    assert!(publish_idx > review_idx, "publish_or_revise must come after review_content");
+    let publish_idx = sorted
+        .iter()
+        .position(|s| s == "publish_or_revise")
+        .unwrap();
+    assert!(
+        publish_idx > review_idx,
+        "publish_or_revise must come after review_content"
+    );
 }
 
 #[test]
@@ -700,14 +805,17 @@ fn test_manga_pipeline_dag_execution_order() {
     let sorted = WorkflowEngine::topological_sort(&def.steps).unwrap();
 
     // Linear pipeline: order must be exact
-    assert_eq!(sorted, vec![
-        "generate_idea",
-        "generate_script",
-        "storyboard_design",
-        "generate_assets",
-        "video_compose",
-        "post_process",
-        "publish",
-        "notify_complete",
-    ]);
+    assert_eq!(
+        sorted,
+        vec![
+            "generate_idea",
+            "generate_script",
+            "storyboard_design",
+            "generate_assets",
+            "video_compose",
+            "post_process",
+            "publish",
+            "notify_complete",
+        ]
+    );
 }

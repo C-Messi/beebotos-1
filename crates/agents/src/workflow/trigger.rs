@@ -59,7 +59,9 @@ impl TriggerEngine {
                     // TriggerEngine only tracks non-cron triggers for matching purposes.
                     info!(
                         "Registered cron trigger for workflow {}: {} ({})",
-                        def.id, schedule, timezone.as_deref().unwrap_or("UTC")
+                        def.id,
+                        schedule,
+                        timezone.as_deref().unwrap_or("UTC")
                     );
                 }
                 crate::workflow::definition::TriggerType::Event { source, filter } => {
@@ -90,7 +92,8 @@ impl TriggerEngine {
                     );
                 }
                 crate::workflow::definition::TriggerType::Manual { .. } => {
-                    self.manual_triggers.insert(def.name.clone(), def.id.clone());
+                    self.manual_triggers
+                        .insert(def.name.clone(), def.id.clone());
                     self.manual_triggers.insert(def.id.clone(), def.id.clone());
                     info!("Registered manual trigger for workflow {}", def.id);
                 }
@@ -104,17 +107,20 @@ impl TriggerEngine {
             subs.retain(|s| s.workflow_id != workflow_id);
             !subs.is_empty()
         });
-        self.webhook_routes.retain(|_, route| route.workflow_id != workflow_id);
+        self.webhook_routes
+            .retain(|_, route| route.workflow_id != workflow_id);
         self.manual_triggers.retain(|_, id| id != workflow_id);
     }
 
     /// Match a manual trigger by name or ID
     pub fn match_manual(&self, name: &str) -> Option<TriggerMatch> {
-        self.manual_triggers.get(name).map(|workflow_id| TriggerMatch {
-            workflow_id: workflow_id.clone(),
-            trigger_context: serde_json::json!({"trigger_type": "manual", "name": name}),
-            auth: None,
-        })
+        self.manual_triggers
+            .get(name)
+            .map(|workflow_id| TriggerMatch {
+                workflow_id: workflow_id.clone(),
+                trigger_context: serde_json::json!({"trigger_type": "manual", "name": name}),
+                auth: None,
+            })
     }
 
     /// Match a webhook request
@@ -175,13 +181,17 @@ impl TriggerEngine {
 
         // Try JSONPath expression: $.path op value
         // Match operators: ==, !=, <, >, <=, >=
-        let re = regex::Regex::new(r"^\$\.(?P<path>[\w.\[\]]+)\s*(?P<op>==|!=|<=|>=|<|>)\s*(?P<value>.+)$").unwrap();
+        let re = regex::Regex::new(
+            r"^\$\.(?P<path>[\w.\[\]]+)\s*(?P<op>==|!=|<=|>=|<|>)\s*(?P<value>.+)$",
+        )
+        .unwrap();
         if let Some(caps) = re.captures(trimmed) {
             let path = caps.name("path").unwrap().as_str();
             let op = caps.name("op").unwrap().as_str();
             let value = caps.name("value").unwrap().as_str().trim();
 
-            let actual = match crate::workflow::template::resolve_json_path_internal(payload, path) {
+            let actual = match crate::workflow::template::resolve_json_path_internal(payload, path)
+            {
                 Ok(v) => v,
                 Err(_) => return false,
             };
@@ -225,14 +235,22 @@ impl TriggerEngine {
     pub fn webhook_paths(&self) -> Vec<(String, String, WorkflowId)> {
         self.webhook_routes
             .iter()
-            .map(|(path, route)| (path.clone(), route.method.clone(), route.workflow_id.clone()))
+            .map(|(path, route)| {
+                (
+                    path.clone(),
+                    route.method.clone(),
+                    route.workflow_id.clone(),
+                )
+            })
             .collect()
     }
 
-    /// Start an async event listener that receives events from the AgentEventBus
-    /// and returns trigger matches for workflows that should be executed.
+    /// Start an async event listener that receives events from the
+    /// AgentEventBus and returns trigger matches for workflows that should
+    /// be executed.
     ///
-    /// The caller should `.await` on the returned receiver and execute matched workflows.
+    /// The caller should `.await` on the returned receiver and execute matched
+    /// workflows.
     pub async fn listen_events(
         &self,
         event_bus: crate::events::AgentEventBus,
@@ -259,36 +277,46 @@ impl TriggerEngine {
     /// Convert a core Event to (source, payload) for match_event
     fn event_to_source_payload(&self, event: &beebotos_core::event::Event) -> (String, Value) {
         match event {
-            beebotos_core::event::Event::AgentLifecycle { .. } => {
-                ("agent.lifecycle".to_string(), serde_json::to_value(event).unwrap_or_default())
-            }
-            beebotos_core::event::Event::AgentSpawned { .. } => {
-                ("agent.spawned".to_string(), serde_json::to_value(event).unwrap_or_default())
-            }
-            beebotos_core::event::Event::MemoryConsolidated { .. } => {
-                ("memory.consolidated".to_string(), serde_json::to_value(event).unwrap_or_default())
-            }
-            beebotos_core::event::Event::BlockchainTx { .. } => {
-                ("blockchain.tx".to_string(), serde_json::to_value(event).unwrap_or_default())
-            }
-            beebotos_core::event::Event::DaoProposalCreated { .. } => {
-                ("dao.proposal_created".to_string(), serde_json::to_value(event).unwrap_or_default())
-            }
-            beebotos_core::event::Event::DaoVoteCast { .. } => {
-                ("dao.vote_cast".to_string(), serde_json::to_value(event).unwrap_or_default())
-            }
-            beebotos_core::event::Event::SkillExecuted { .. } => {
-                ("skill.executed".to_string(), serde_json::to_value(event).unwrap_or_default())
-            }
-            beebotos_core::event::Event::Metric { .. } => {
-                ("system.metric".to_string(), serde_json::to_value(event).unwrap_or_default())
-            }
-            beebotos_core::event::Event::TaskStarted { .. } => {
-                ("task.started".to_string(), serde_json::to_value(event).unwrap_or_default())
-            }
-            beebotos_core::event::Event::TaskCompleted { .. } => {
-                ("task.completed".to_string(), serde_json::to_value(event).unwrap_or_default())
-            }
+            beebotos_core::event::Event::AgentLifecycle { .. } => (
+                "agent.lifecycle".to_string(),
+                serde_json::to_value(event).unwrap_or_default(),
+            ),
+            beebotos_core::event::Event::AgentSpawned { .. } => (
+                "agent.spawned".to_string(),
+                serde_json::to_value(event).unwrap_or_default(),
+            ),
+            beebotos_core::event::Event::MemoryConsolidated { .. } => (
+                "memory.consolidated".to_string(),
+                serde_json::to_value(event).unwrap_or_default(),
+            ),
+            beebotos_core::event::Event::BlockchainTx { .. } => (
+                "blockchain.tx".to_string(),
+                serde_json::to_value(event).unwrap_or_default(),
+            ),
+            beebotos_core::event::Event::DaoProposalCreated { .. } => (
+                "dao.proposal_created".to_string(),
+                serde_json::to_value(event).unwrap_or_default(),
+            ),
+            beebotos_core::event::Event::DaoVoteCast { .. } => (
+                "dao.vote_cast".to_string(),
+                serde_json::to_value(event).unwrap_or_default(),
+            ),
+            beebotos_core::event::Event::SkillExecuted { .. } => (
+                "skill.executed".to_string(),
+                serde_json::to_value(event).unwrap_or_default(),
+            ),
+            beebotos_core::event::Event::Metric { .. } => (
+                "system.metric".to_string(),
+                serde_json::to_value(event).unwrap_or_default(),
+            ),
+            beebotos_core::event::Event::TaskStarted { .. } => (
+                "task.started".to_string(),
+                serde_json::to_value(event).unwrap_or_default(),
+            ),
+            beebotos_core::event::Event::TaskCompleted { .. } => (
+                "task.completed".to_string(),
+                serde_json::to_value(event).unwrap_or_default(),
+            ),
         }
     }
 }
@@ -307,7 +335,9 @@ mod tests {
             tags: vec![],
             triggers: vec![
                 crate::workflow::definition::TriggerDefinition {
-                    trigger_type: crate::workflow::definition::TriggerType::Manual { allowed_users: vec![] },
+                    trigger_type: crate::workflow::definition::TriggerType::Manual {
+                        allowed_users: vec![],
+                    },
                 },
                 crate::workflow::definition::TriggerDefinition {
                     trigger_type: crate::workflow::definition::TriggerType::Webhook {
@@ -319,7 +349,7 @@ mod tests {
             ],
             config: crate::workflow::definition::WorkflowGlobalConfig::default(),
             error_handler: None,
-                        steps: vec![],
+            steps: vec![],
         }
     }
 
@@ -352,12 +382,13 @@ mod tests {
     fn test_event_filter_jsonpath_equality() {
         let mut engine = TriggerEngine::new();
         let mut def = sample_def();
-        def.triggers.push(crate::workflow::definition::TriggerDefinition {
-            trigger_type: crate::workflow::definition::TriggerType::Event {
-                source: "skill.executed".to_string(),
-                filter: Some("$.status == \"completed\"".to_string()),
-            },
-        });
+        def.triggers
+            .push(crate::workflow::definition::TriggerDefinition {
+                trigger_type: crate::workflow::definition::TriggerType::Event {
+                    source: "skill.executed".to_string(),
+                    filter: Some("$.status == \"completed\"".to_string()),
+                },
+            });
         engine.register(&def);
 
         let payload = serde_json::json!({"status": "completed", "skill": "test"});
@@ -373,12 +404,13 @@ mod tests {
     fn test_event_filter_jsonpath_numeric() {
         let mut engine = TriggerEngine::new();
         let mut def = sample_def();
-        def.triggers.push(crate::workflow::definition::TriggerDefinition {
-            trigger_type: crate::workflow::definition::TriggerType::Event {
-                source: "system.metric".to_string(),
-                filter: Some("$.value > 100".to_string()),
-            },
-        });
+        def.triggers
+            .push(crate::workflow::definition::TriggerDefinition {
+                trigger_type: crate::workflow::definition::TriggerType::Event {
+                    source: "system.metric".to_string(),
+                    filter: Some("$.value > 100".to_string()),
+                },
+            });
         engine.register(&def);
 
         let payload = serde_json::json!({"value": 150, "name": "cpu"});
@@ -392,12 +424,13 @@ mod tests {
     fn test_event_filter_jsonpath_truthiness() {
         let mut engine = TriggerEngine::new();
         let mut def = sample_def();
-        def.triggers.push(crate::workflow::definition::TriggerDefinition {
-            trigger_type: crate::workflow::definition::TriggerType::Event {
-                source: "agent.lifecycle".to_string(),
-                filter: Some("$.enabled".to_string()),
-            },
-        });
+        def.triggers
+            .push(crate::workflow::definition::TriggerDefinition {
+                trigger_type: crate::workflow::definition::TriggerType::Event {
+                    source: "agent.lifecycle".to_string(),
+                    filter: Some("$.enabled".to_string()),
+                },
+            });
         engine.register(&def);
 
         let payload = serde_json::json!({"enabled": true});
@@ -411,12 +444,13 @@ mod tests {
     fn test_event_filter_plain_contains() {
         let mut engine = TriggerEngine::new();
         let mut def = sample_def();
-        def.triggers.push(crate::workflow::definition::TriggerDefinition {
-            trigger_type: crate::workflow::definition::TriggerType::Event {
-                source: "test.source".to_string(),
-                filter: Some("alert".to_string()),
-            },
-        });
+        def.triggers
+            .push(crate::workflow::definition::TriggerDefinition {
+                trigger_type: crate::workflow::definition::TriggerType::Event {
+                    source: "test.source".to_string(),
+                    filter: Some("alert".to_string()),
+                },
+            });
         engine.register(&def);
 
         let payload = serde_json::json!({"message": "critical alert triggered"});

@@ -6,13 +6,12 @@
 //! - POST /api/v1/system/updates/apply
 //! - POST /api/v1/system/updates/rollback
 
-use axum::{
-    extract::State,
-    response::IntoResponse,
-    Json,
-};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use axum::extract::State;
+use axum::response::IntoResponse;
+use axum::Json;
+use serde::{Deserialize, Serialize};
 
 use crate::updater::service::GatewayUpdateService;
 
@@ -68,9 +67,7 @@ pub struct RollbackResponse {
 }
 
 /// GET /api/v1/system/updates/status
-pub async fn get_update_status(
-    State(state): State<UpdaterState>,
-) -> impl IntoResponse {
+pub async fn get_update_status(State(state): State<UpdaterState>) -> impl IntoResponse {
     let update_state = state.updater.get_state().await;
     Json(UpdateStatusResponse {
         status: format!("{:?}", update_state.status).to_lowercase(),
@@ -83,20 +80,19 @@ pub async fn get_update_status(
 }
 
 /// POST /api/v1/system/updates/check
-pub async fn check_update(
-    State(state): State<UpdaterState>,
-) -> impl IntoResponse {
+pub async fn check_update(State(state): State<UpdaterState>) -> impl IntoResponse {
     match state.updater.trigger_check().await {
         Ok(info) => {
             let has_update = info.is_some();
-            Json(CheckUpdateResponse { has_update, version_info: info })
-        }
-        Err(_e) => {
             Json(CheckUpdateResponse {
-                has_update: false,
-                version_info: None,
+                has_update,
+                version_info: info,
             })
         }
+        Err(_e) => Json(CheckUpdateResponse {
+            has_update: false,
+            version_info: None,
+        }),
     }
 }
 
@@ -136,12 +132,15 @@ pub async fn apply_update(
     let path = match state.updater.download_update(&info).await {
         Ok(p) => p,
         Err(e) => {
-            let _ = state.updater.report_status(
-                &info.version.to_string(),
-                beebotos_update_client::models::UpdateStatus::Failed,
-                start.elapsed().as_secs(),
-                Some(format!("Download failed: {}", e)),
-            ).await;
+            let _ = state
+                .updater
+                .report_status(
+                    &info.version.to_string(),
+                    beebotos_update_client::models::UpdateStatus::Failed,
+                    start.elapsed().as_secs(),
+                    Some(format!("Download failed: {}", e)),
+                )
+                .await;
             return Json(ApplyUpdateResponse {
                 success: false,
                 message: format!("Download failed: {}", e),
@@ -153,24 +152,30 @@ pub async fn apply_update(
     match state.updater.verify_package(&path, &info).await {
         Ok(true) => {}
         Ok(false) => {
-            let _ = state.updater.report_status(
-                &info.version.to_string(),
-                beebotos_update_client::models::UpdateStatus::Failed,
-                start.elapsed().as_secs(),
-                Some("Verification failed".to_string()),
-            ).await;
+            let _ = state
+                .updater
+                .report_status(
+                    &info.version.to_string(),
+                    beebotos_update_client::models::UpdateStatus::Failed,
+                    start.elapsed().as_secs(),
+                    Some("Verification failed".to_string()),
+                )
+                .await;
             return Json(ApplyUpdateResponse {
                 success: false,
                 message: "Package verification failed".to_string(),
             });
         }
         Err(e) => {
-            let _ = state.updater.report_status(
-                &info.version.to_string(),
-                beebotos_update_client::models::UpdateStatus::Failed,
-                start.elapsed().as_secs(),
-                Some(format!("Verification error: {}", e)),
-            ).await;
+            let _ = state
+                .updater
+                .report_status(
+                    &info.version.to_string(),
+                    beebotos_update_client::models::UpdateStatus::Failed,
+                    start.elapsed().as_secs(),
+                    Some(format!("Verification error: {}", e)),
+                )
+                .await;
             return Json(ApplyUpdateResponse {
                 success: false,
                 message: format!("Verification error: {}", e),
@@ -184,17 +189,21 @@ pub async fn apply_update(
     // 2. Restart service
     // 3. Run post-install health check (via /health endpoint)
     // 4. If health check fails, trigger rollback
-    let _ = state.updater.report_status(
-        &info.version.to_string(),
-        beebotos_update_client::models::UpdateStatus::Installing,
-        start.elapsed().as_secs(),
-        None,
-    ).await;
+    let _ = state
+        .updater
+        .report_status(
+            &info.version.to_string(),
+            beebotos_update_client::models::UpdateStatus::Installing,
+            start.elapsed().as_secs(),
+            None,
+        )
+        .await;
 
     Json(ApplyUpdateResponse {
         success: true,
         message: format!(
-            "Update {} downloaded and verified (took {}s). Restart gateway to apply. Health check will run post-restart.",
+            "Update {} downloaded and verified (took {}s). Restart gateway to apply. Health check \
+             will run post-restart.",
             info.version,
             start.elapsed().as_secs()
         ),
@@ -202,11 +211,10 @@ pub async fn apply_update(
 }
 
 /// POST /api/v1/system/updates/rollback
-pub async fn rollback_update(
-    State(_state): State<UpdaterState>,
-) -> impl IntoResponse {
+pub async fn rollback_update(State(_state): State<UpdaterState>) -> impl IntoResponse {
     Json(RollbackResponse {
         success: true,
-        message: "Rollback requested. This requires manual intervention or orchestrator restart.".to_string(),
+        message: "Rollback requested. This requires manual intervention or orchestrator restart."
+            .to_string(),
     })
 }

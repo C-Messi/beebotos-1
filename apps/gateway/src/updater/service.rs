@@ -1,13 +1,11 @@
 //! Gateway update service
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
-use beebotos_update_client::{
-    config::UpdateConfig,
-    models::{UpdateState, UpdateStatus, VersionInfo},
-    client::{ConsoleProgress, NativeUpdateClient, UpdateClient},
-};
+use beebotos_update_client::client::{ConsoleProgress, NativeUpdateClient, UpdateClient};
+use beebotos_update_client::config::UpdateConfig;
+use beebotos_update_client::models::{UpdateState, UpdateStatus, VersionInfo};
+use tokio::sync::RwLock;
 
 /// Gateway update service
 #[derive(Clone)]
@@ -48,7 +46,10 @@ impl GatewayUpdateService {
                     Ok(Some(info)) => {
                         tracing::info!("Update available: {}", info.version);
                         if info.mandatory || client.config().auto_install {
-                            tracing::info!("Auto-install enabled, would install {} (requires restart)", info.version);
+                            tracing::info!(
+                                "Auto-install enabled, would install {} (requires restart)",
+                                info.version
+                            );
                         }
                     }
                     Ok(None) => {
@@ -66,7 +67,9 @@ impl GatewayUpdateService {
     }
 
     /// Check for available updates
-    pub async fn check_update(&self) -> Result<Option<VersionInfo>, beebotos_update_client::error::UpdateError> {
+    pub async fn check_update(
+        &self,
+    ) -> Result<Option<VersionInfo>, beebotos_update_client::error::UpdateError> {
         let result = self.client.check_update().await;
         if let Ok(Some(ref info)) = result {
             let mut state = self.state.write().await;
@@ -85,19 +88,28 @@ impl GatewayUpdateService {
     }
 
     /// Trigger an update check (can be called from scheduler or API)
-    pub async fn trigger_check(&self) -> Result<Option<VersionInfo>, beebotos_update_client::error::UpdateError> {
+    pub async fn trigger_check(
+        &self,
+    ) -> Result<Option<VersionInfo>, beebotos_update_client::error::UpdateError> {
         self.check_update().await
     }
 
     /// Download the update package
-    pub async fn download_update(&self, info: &VersionInfo) -> Result<std::path::PathBuf, beebotos_update_client::error::UpdateError> {
+    pub async fn download_update(
+        &self,
+        info: &VersionInfo,
+    ) -> Result<std::path::PathBuf, beebotos_update_client::error::UpdateError> {
         let package = select_package(&info.packages)?;
         let progress = ConsoleProgress;
         self.client.download(&package, &progress).await
     }
 
     /// Verify the downloaded package
-    pub async fn verify_package(&self, path: &std::path::Path, info: &VersionInfo) -> Result<bool, beebotos_update_client::error::UpdateError> {
+    pub async fn verify_package(
+        &self,
+        path: &std::path::Path,
+        info: &VersionInfo,
+    ) -> Result<bool, beebotos_update_client::error::UpdateError> {
         let package = select_package(&info.packages)?;
         self.client.verify(path, &package).await
     }
@@ -110,7 +122,9 @@ impl GatewayUpdateService {
         duration_secs: u64,
         error: Option<String>,
     ) -> Result<(), beebotos_update_client::error::UpdateError> {
-        self.client.report_status(target_version, status, duration_secs, error).await
+        self.client
+            .report_status(target_version, status, duration_secs, error)
+            .await
     }
 
     /// Health check: verify gateway is running properly
@@ -126,7 +140,10 @@ impl GatewayUpdateService {
 }
 
 /// Select the best package for current platform
-fn select_package(packages: &[beebotos_update_client::models::PackageInfo]) -> Result<beebotos_update_client::models::PackageInfo, beebotos_update_client::error::UpdateError> {
+fn select_package(
+    packages: &[beebotos_update_client::models::PackageInfo],
+) -> Result<beebotos_update_client::models::PackageInfo, beebotos_update_client::error::UpdateError>
+{
     beebotos_update_client::select_package(packages)
 }
 

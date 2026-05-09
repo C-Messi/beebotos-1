@@ -38,7 +38,7 @@ impl Default for ZhipuConfig {
 impl ZhipuConfig {
     pub fn from_env() -> Result<Self, String> {
         use std::env;
-        
+
         let api_key = env::var("ZHIPU_API_KEY")
             .or_else(|_| env::var("CHATGLM_API_KEY"))
             .map_err(|_| "ZHIPU_API_KEY not set".to_string())?;
@@ -46,8 +46,8 @@ impl ZhipuConfig {
         let base_url = env::var("ZHIPU_BASE_URL")
             .unwrap_or_else(|_| "https://open.bigmodel.cn/api/paas/v4".to_string());
 
-        let default_model = env::var("ZHIPU_DEFAULT_MODEL")
-            .unwrap_or_else(|_| zhipu_models::GLM_4.to_string());
+        let default_model =
+            env::var("ZHIPU_DEFAULT_MODEL").unwrap_or_else(|_| zhipu_models::GLM_4.to_string());
 
         Ok(Self {
             base_url,
@@ -87,7 +87,10 @@ impl ProviderConfig for ZhipuConfig {
             HeaderValue::from_str(&format!("Bearer {}", self.api_key))
                 .map_err(|e| LLMError::InvalidRequest(e.to_string()))?,
         );
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
         Ok(headers)
     }
 }
@@ -116,7 +119,10 @@ impl ZhipuProvider {
             max_output_tokens: 4_096,
         };
 
-        info!("Zhipu provider initialized with model: {}", config.default_model);
+        info!(
+            "Zhipu provider initialized with model: {}",
+            config.default_model
+        );
 
         Ok(Self {
             config,
@@ -126,20 +132,19 @@ impl ZhipuProvider {
     }
 
     pub fn from_env() -> Result<Self, LLMError> {
-        let config = ZhipuConfig::from_env()
-            .map_err(|e| LLMError::InvalidRequest(e))?;
+        let config = ZhipuConfig::from_env().map_err(|e| LLMError::InvalidRequest(e))?;
         Self::new(config)
     }
 }
 
 #[async_trait]
 impl LLMProvider for ZhipuProvider {
-    fn name(&self) -> &str { 
-        "zhipu" 
+    fn name(&self) -> &str {
+        "zhipu"
     }
 
-    fn capabilities(&self) -> ProviderCapabilities { 
-        self.capabilities.clone() 
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.capabilities.clone()
     }
 
     async fn complete(&self, request: LLMRequest) -> LLMResult<LLMResponse> {
@@ -150,33 +155,43 @@ impl LLMProvider for ZhipuProvider {
             req.config.model = self.config.default_model.clone();
         }
 
-        let body = serde_json::to_value(&req).map_err(|e| LLMError::Serialization(e.to_string()))?;
-        let response = self.http_client.execute_with_retry(
-            &self.config,
-            "/chat/completions",
-            body
-        ).await?;
-        
-        let zhipu_resp: ZhipuResponse = response.json().await
+        let body =
+            serde_json::to_value(&req).map_err(|e| LLMError::Serialization(e.to_string()))?;
+        let response = self
+            .http_client
+            .execute_with_retry(&self.config, "/chat/completions", body)
+            .await?;
+
+        let zhipu_resp: ZhipuResponse = response
+            .json()
+            .await
             .map_err(|e| LLMError::Serialization(e.to_string()))?;
 
-        let choice = zhipu_resp.choices.into_iter().next().ok_or_else(|| {
-            LLMError::Api { code: 500, message: "No choices in response".to_string() }
-        })?;
+        let choice = zhipu_resp
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| LLMError::Api {
+                code: 500,
+                message: "No choices in response".to_string(),
+            })?;
 
-        debug!("Received response from Zhipu: {} tokens used", 
+        debug!(
+            "Received response from Zhipu: {} tokens used",
             zhipu_resp.usage.total_tokens
         );
 
         let tool_calls = choice.message.tool_calls.map(|tcs| {
-            tcs.into_iter().map(|tc| ToolCall {
-                id: tc.id,
-                r#type: tc.r#type,
-                function: FunctionCall {
-                    name: tc.function.name,
-                    arguments: tc.function.arguments,
-                },
-            }).collect()
+            tcs.into_iter()
+                .map(|tc| ToolCall {
+                    id: tc.id,
+                    r#type: tc.r#type,
+                    function: FunctionCall {
+                        name: tc.function.name,
+                        arguments: tc.function.arguments,
+                    },
+                })
+                .collect()
         });
 
         Ok(LLMResponse {
@@ -204,44 +219,48 @@ impl LLMProvider for ZhipuProvider {
 
     async fn complete_stream(&self, request: LLMRequest) -> LLMResult<mpsc::Receiver<StreamChunk>> {
         let (tx, rx) = mpsc::channel(100);
-        
+
         let mut req = request;
         req.config.stream = Some(true);
         if req.config.model.is_empty() {
             req.config.model = self.config.default_model.clone();
         }
 
-        let body = serde_json::to_value(&req).map_err(|e| LLMError::Serialization(e.to_string()))?;
-        let response = self.http_client.stream_with_retry(
-            &self.config,
-            "/chat/completions",
-            body
-        ).await?;
-        
+        let body =
+            serde_json::to_value(&req).map_err(|e| LLMError::Serialization(e.to_string()))?;
+        let response = self
+            .http_client
+            .stream_with_retry(&self.config, "/chat/completions", body)
+            .await?;
+
         let mut stream = response.bytes_stream();
-        
+
         tokio::spawn(async move {
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(bytes) => {
                         let text = String::from_utf8_lossy(&bytes);
-                        
+
                         for line in text.lines() {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
-                                if data == "[DONE]" { break; }
-                                
+                                if data == "[DONE]" {
+                                    break;
+                                }
+
                                 match serde_json::from_str::<ZhipuStreamChunk>(data) {
                                     Ok(chunk) => {
-                                        let content = chunk.choices
+                                        let content = chunk
+                                            .choices
                                             .first()
                                             .and_then(|c| c.delta.content.clone())
                                             .unwrap_or_default();
-                                        
-                                        let finish_reason = chunk.choices
+
+                                        let finish_reason = chunk
+                                            .choices
                                             .first()
                                             .and_then(|c| c.finish_reason.clone());
-                                        
+
                                         let stream_chunk = StreamChunk {
                                             id: chunk.id,
                                             object: "chat.completion.chunk".to_string(),
@@ -257,8 +276,10 @@ impl LLMProvider for ZhipuProvider {
                                                 finish_reason: finish_reason.clone(),
                                             }],
                                         };
-                                        
-                                        if tx.send(stream_chunk).await.is_err() { return; }
+
+                                        if tx.send(stream_chunk).await.is_err() {
+                                            return;
+                                        }
                                     }
                                     Err(e) => {
                                         trace!("Failed to parse Zhipu stream chunk: {}", e);
@@ -279,7 +300,8 @@ impl LLMProvider for ZhipuProvider {
     }
 
     async fn health_check(&self) -> LLMResult<()> {
-        let _response = self.http_client
+        let _response = self
+            .http_client
             .get_with_retry(&self.config, "/models")
             .await?;
         Ok(())
@@ -288,30 +310,42 @@ impl LLMProvider for ZhipuProvider {
     async fn list_models(&self) -> LLMResult<Vec<ModelInfo>> {
         Ok(vec![
             ModelInfo {
-                id: zhipu_models::GLM_4.to_string(), 
+                id: zhipu_models::GLM_4.to_string(),
                 name: "GLM-4".to_string(),
                 description: Some("Zhipu AI's most powerful model".to_string()),
-                context_window: 128_000, 
+                context_window: 128_000,
                 max_tokens: 4_096,
-                capabilities: ModelCapabilities { vision: false, function_calling: true, json_mode: true },
+                capabilities: ModelCapabilities {
+                    vision: false,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.0001, 0.0001)),
             },
             ModelInfo {
-                id: zhipu_models::GLM_4V.to_string(), 
+                id: zhipu_models::GLM_4V.to_string(),
                 name: "GLM-4V".to_string(),
                 description: Some("Zhipu AI's vision model".to_string()),
-                context_window: 8_192, 
+                context_window: 8_192,
                 max_tokens: 4_096,
-                capabilities: ModelCapabilities { vision: true, function_calling: true, json_mode: true },
+                capabilities: ModelCapabilities {
+                    vision: true,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.0001, 0.0001)),
             },
             ModelInfo {
-                id: zhipu_models::GLM_3_TURBO.to_string(), 
+                id: zhipu_models::GLM_3_TURBO.to_string(),
                 name: "GLM-3 Turbo".to_string(),
                 description: Some("Zhipu AI's fast and efficient model".to_string()),
-                context_window: 128_000, 
+                context_window: 128_000,
                 max_tokens: 4_096,
-                capabilities: ModelCapabilities { vision: false, function_calling: true, json_mode: true },
+                capabilities: ModelCapabilities {
+                    vision: false,
+                    function_calling: true,
+                    json_mode: true,
+                },
                 pricing: Some((0.000005, 0.000005)),
             },
         ])
