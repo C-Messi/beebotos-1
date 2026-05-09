@@ -316,6 +316,9 @@ impl LlmService {
 
         match name {
             "kimi" => {
+                let thinking = provider_config.thinking.as_ref()
+                    .and_then(|t| beebotos_agents::llm::providers::ThinkingMode::from_str(t))
+                    .unwrap_or_default();
                 let kimi_config = KimiConfig {
                     base_url: Self::get_base_url(name, &provider_config),
                     api_key: api_key.unwrap_or_default(),
@@ -323,6 +326,7 @@ impl LlmService {
                     timeout,
                     retry_policy: beebotos_agents::llm::traits::RetryPolicy::default(),
                     mode: beebotos_agents::llm::providers::ProviderMode::Merge,
+                    thinking,
                 };
 
                 let provider = KimiProvider::new(kimi_config)

@@ -9,10 +9,10 @@
 //! 🆕 FIX: Supports both directory-based skills (SKILL.md) and legacy flat .md files.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::skills::discovery::SkillDiscovery;
+use crate::skills::discovery::{SkillDiscovery, SkillKind, SkillMetadata};
 use crate::skills::loader::{LoadedSkill, SkillManifest};
 use crate::skills::registry::SkillRegistry;
 
@@ -60,6 +60,24 @@ fn parse_capabilities(text: &str) -> Vec<String> {
                 Some(trimmed[2..].trim().to_string())
             } else if trimmed.starts_with("• ") {
                 Some(trimmed[2..].trim().to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// 🆕 SKILL MATCHING V2: Extract bullet-point examples from an examples text block.
+fn parse_examples(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+                Some(trimmed[2..].trim().to_string())
+            } else if trimmed.starts_with("• ") {
+                Some(trimmed[2..].trim().to_string())
+            } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                Some(trimmed.to_string())
             } else {
                 None
             }
@@ -116,6 +134,125 @@ fn build_tags(content: &str) -> Vec<String> {
     tags
 }
 
+/// Build a LoadedSkill from SkillMetadata and markdown content.
+/// Shared logic used by both load_builtin_skills and load_markdown_skill_from_dir.
+fn build_loaded_skill(meta: &SkillMetadata, content: &str) -> LoadedSkill {
+    // Parse deep markdown sections
+    let sections = parse_markdown_sections(content);
+
+    let description = sections
+        .get("description")
+        .cloned()
+        .unwrap_or_else(|| {
+            content
+                .lines()
+                .skip(1)
+                .skip_while(|l| l.trim().is_empty() || l.trim().starts_with('#'))
+                .take_while(|l| !l.trim().starts_with('#') && !l.trim().starts_with("```"))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim()
+                .to_string()
+        });
+
+    let description = if description.is_empty() {
+        meta.description.clone()
+    } else {
+        description
+    };
+
+    let prompt_template = sections.get("prompt_template").cloned().unwrap_or_default();
+    let examples = sections.get("examples").cloned().unwrap_or_default();
+    let capabilities = sections
+        .get("capabilities")
+        .map(|text| parse_capabilities(text))
+        .unwrap_or_default();
+
+    // 🆕 SKILL MATCHING V2: Parse activation examples from markdown sections
+    let when_to_use = sections
+        .get("when_to_use")
+        .cloned()
+        .unwrap_or_else(|| description.clone());
+    let when_not_to_use = sections.get("when_not_to_use").cloned();
+    let activation_examples = sections
+        .get("activation_examples")
+        .map(|text| parse_examples(text))
+        .unwrap_or_default();
+    let activation_negative_examples = sections
+        .get("activation_negative_examples")
+        .map(|text| parse_examples(text))
+        .unwrap_or_default();
+    let dependencies = sections
+        .get("dependencies")
+        .map(|text| parse_capabilities(text))
+        .unwrap_or_default();
+
+    let tags = if meta.tags.is_empty() {
+        build_tags(content)
+    } else {
+        meta.tags.clone()
+    };
+
+    // 🆕 FIX: Set wasm_path for Wasm-kind skills so agent_impl.rs routes correctly
+    let wasm_path = if meta.kind == SkillKind::Wasm {
+        meta.path.join("skill.wasm")
+    } else {
+        PathBuf::new()
+    };
+
+    LoadedSkill {
+        id: meta.id.clone(),
+        name: meta.name.clone(),
+        version: meta.version.clone(),
+        wasm_path,
+        source_path: meta.path.clone(),
+        manifest: SkillManifest {
+            id: meta.id.clone(),
+            name: meta.name.clone(),
+            version: meta.version.clone(),
+            description: description.clone(),
+            author: "BeeBotOS".to_string(),
+            capabilities: if capabilities.is_empty() {
+                tags.clone()
+            } else {
+                capabilities
+            },
+            permissions: vec!["llm:chat".to_string()],
+            entry_point: "run".to_string(),
+            license: "MIT".to_string(),
+            functions: vec![],
+            prompt_template,
+            examples,
+            when_to_use,
+            when_not_to_use,
+            activation_examples,
+            activation_negative_examples,
+            dependencies,
+        },
+    }
+}
+
+/// Load a single markdown-defined skill from a directory.
+/// The directory must contain a SKILL.md file (for directory-based skills)
+/// or be a flat .md file.
+/// Supports all three skill kinds: Knowledge, Code (with scripts), and Wasm.
+pub async fn load_markdown_skill_from_dir(path: &Path) -> Option<LoadedSkill> {
+    let meta = SkillDiscovery::inspect_directory(path).await?;
+
+    let content = if meta.path.is_dir() {
+        let md_path = meta.path.join("SKILL.md");
+        if md_path.exists() {
+            tokio::fs::read_to_string(&md_path).await.ok()?
+        } else {
+            return None;
+        }
+    } else {
+        tokio::fs::read_to_string(&meta.path).await.ok()?
+    };
+
+    Some(build_loaded_skill(&meta, &content))
+}
+
 /// Scan `skills/` directory and register all skills into the given registry.
 pub async fn load_builtin_skills(registry: &Arc<SkillRegistry>) {
     let mut discovery = SkillDiscovery::new();
@@ -136,68 +273,7 @@ pub async fn load_builtin_skills(registry: &Arc<SkillRegistry>) {
             tokio::fs::read_to_string(&meta.path).await.unwrap_or_default()
         };
 
-        // Parse deep markdown sections
-        let sections = parse_markdown_sections(&content);
-
-        let description = sections
-            .get("description")
-            .cloned()
-            .unwrap_or_else(|| {
-                content
-                    .lines()
-                    .skip(1)
-                    .skip_while(|l| l.trim().is_empty() || l.trim().starts_with('#'))
-                    .take_while(|l| !l.trim().starts_with('#') && !l.trim().starts_with("```"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .trim()
-                    .to_string()
-            });
-
-        let description = if description.is_empty() {
-            meta.description.clone()
-        } else {
-            description
-        };
-
-        let prompt_template = sections.get("prompt_template").cloned().unwrap_or_default();
-        let examples = sections.get("examples").cloned().unwrap_or_default();
-        let capabilities = sections
-            .get("capabilities")
-            .map(|text| parse_capabilities(text))
-            .unwrap_or_default();
-
-        let tags = if meta.tags.is_empty() {
-            build_tags(&content)
-        } else {
-            meta.tags.clone()
-        };
-
-        let skill = LoadedSkill {
-            id: meta.id.clone(),
-            name: meta.name.clone(),
-            version: meta.version.clone(),
-            wasm_path: PathBuf::new(),
-            source_path: meta.path.clone(),
-            manifest: SkillManifest {
-                id: meta.id.clone(),
-                name: meta.name.clone(),
-                version: meta.version.clone(),
-                description: description.clone(),
-                author: "BeeBotOS".to_string(),
-                capabilities: if capabilities.is_empty() {
-                    tags.clone()
-                } else {
-                    capabilities
-                },
-                permissions: vec!["llm:chat".to_string()],
-                entry_point: "run".to_string(),
-                license: "MIT".to_string(),
-                functions: vec![],
-                prompt_template,
-                examples,
-            },
-        };
+        let skill = build_loaded_skill(&meta, &content);
 
         let category = if meta.category.is_empty() {
             if meta.path.is_dir() {
@@ -207,6 +283,12 @@ pub async fn load_builtin_skills(registry: &Arc<SkillRegistry>) {
             }
         } else {
             &meta.category
+        };
+
+        let tags = if meta.tags.is_empty() {
+            build_tags(&content)
+        } else {
+            meta.tags.clone()
         };
 
         registry.register(skill, category, tags).await;

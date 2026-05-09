@@ -96,6 +96,11 @@ mod tests {
                 functions: vec![],
                 prompt_template: String::new(),
                 examples: String::new(),
+                when_to_use: "test".to_string(),
+                when_not_to_use: None,
+                activation_examples: vec![],
+                activation_negative_examples: vec![],
+                dependencies: vec![],
             },
         }
     }

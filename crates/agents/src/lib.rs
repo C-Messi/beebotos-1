@@ -68,6 +68,8 @@ pub mod events;
 pub mod health;
 // 🆕 OPTIMIZATION: Intent engine for pre-LLM classification
 pub mod intent;
+// 🆕 SKILL MATCHING V2: Pure LLM-driven skill matching
+pub mod skill_matching;
 pub mod llm;
 pub mod mcp;
 pub mod media;

@@ -212,29 +212,11 @@ impl PromptBuilder {
         prompt
     }
 
-    fn filter_memories_by_intent<'a>(memories: &'a [MemoryEntry], intent: &UserIntent) -> Vec<&'a MemoryEntry> {
-        // Simple relevance filtering: for trading intents, prefer trading memories
-        let intent_keywords: Vec<&str> = match intent {
-            UserIntent::DirectAnswer => vec![],
-            UserIntent::SingleToolCall => vec!["tool", "skill"],
-            UserIntent::MultiStepPlanning => vec!["plan", "步骤", "流程"],
-            UserIntent::WorkflowTrigger => vec!["workflow", "流程"],
-            UserIntent::MetaQuestion => vec!["skill", "capability"],
-            UserIntent::Correction => vec![],
-        };
-
-        if intent_keywords.is_empty() {
-            return memories.iter().take(3).collect();
-        }
-
-        memories
-            .iter()
-            .filter(|m| {
-                let lower = m.content.to_lowercase();
-                intent_keywords.iter().any(|kw| lower.contains(kw))
-            })
-            .take(3)
-            .collect()
+    fn filter_memories_by_intent<'a>(memories: &'a [MemoryEntry], _intent: &UserIntent) -> Vec<&'a MemoryEntry> {
+        // 🆕 SKILL MATCHING V2: Removed hardcoded intent keyword filtering.
+        // Memory relevance is now handled by the memory system's own retrieval logic.
+        // This function simply returns the top 3 most recent/relevant memories.
+        memories.iter().take(3).collect()
     }
 
     fn build_skills_section(skills: &[SkillLevelDesc], intent: &UserIntent) -> String {

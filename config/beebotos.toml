@@ -60,7 +60,8 @@ system_prompt = "You are a helpful assistant."
 [models.kimi]
 base_url = "https://api.moonshot.cn/v1"
 model = "kimi-k2.6"
-temperature = 1.0
+temperature = 0.6
+thinking = "disabled"
 
 [models.zhipu]
 base_url = "https://open.bigmodel.cn/api/paas/v4"

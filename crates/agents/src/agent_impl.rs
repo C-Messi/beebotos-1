@@ -65,8 +65,18 @@ pub struct Agent {
     pub(crate) workflow_registry: Option<Arc<crate::workflow::WorkflowRegistry>>,
     // 🆕 OPTIMIZATION PHASE 1: Intent engine for pre-LLM classification
     pub(crate) intent_engine: Option<crate::intent::IntentEngine>,
+    // 🆕 SKILL MATCHING V2: Pure LLM-driven intent analyzer
+    pub(crate) llm_intent_analyzer: Option<Arc<crate::skill_matching::LLMIntentAnalyzer>>,
+    // 🆕 SKILL MATCHING V2: Pure LLM-driven skill selector
+    pub(crate) skill_selector: Option<Arc<crate::skill_matching::SkillSelector>>,
+    // 🆕 SKILL MATCHING V2: Activation trace store for observability
+    pub(crate) trace_store: Option<Arc<dyn crate::skill_matching::TraceStore>>,
     // 🆕 OPTIMIZATION PHASE 1: Approval gate for destructive operations
     pub(crate) approval_gate: Option<crate::security::ApprovalGate>,
+    // 🆕 FIX (Plan C): Pending approvals for multi-step user confirmation
+    pub(crate) pending_approvals: Arc<RwLock<HashMap<String, crate::security::ApprovalRequest>>>,
+    // 🆕 FIX (Plan C): Temporary flag to skip approval for confirmed operations
+    pub(crate) skip_approval: std::sync::atomic::AtomicBool,
     // 🆕 OPTIMIZATION PHASE 2: Prompt cache for repeated prompt assembly
     pub(crate) prompt_cache: Option<Arc<crate::prompt::PromptCache>>,
     // 🆕 OPTIMIZATION PHASE 4: Max rounds limit to prevent infinite loops
@@ -111,7 +121,13 @@ impl Agent {
             workflow_registry: None,
             // 🆕 OPTIMIZATION: Initialize new components
             intent_engine: Some(crate::intent::IntentEngine::new()),
+            // 🆕 SKILL MATCHING V2: Initialize as None — will be built lazily when LLM is available
+            llm_intent_analyzer: None,
+            skill_selector: None,
+            trace_store: None,
             approval_gate: Some(crate::security::ApprovalGate::with_paper_trading_rules()),
+            pending_approvals: Arc::new(RwLock::new(HashMap::new())),
+            skip_approval: std::sync::atomic::AtomicBool::new(false),
             prompt_cache: Some(Arc::new(crate::prompt::PromptCache::new())),
             max_rounds: 10,
             skill_feedback_collector: Some(crate::skills::feedback::SkillImprovementEngine::new()),
@@ -202,7 +218,23 @@ impl Agent {
         mut self,
         interface: Arc<dyn communication::LLMCallInterface>,
     ) -> Self {
-        self.llm_interface = Some(interface);
+        self.llm_interface = Some(interface.clone());
+        // 🆕 SKILL MATCHING V2: Auto-build LLM intent analyzer when LLM interface is set
+        self.llm_intent_analyzer = Some(Arc::new(
+            crate::skill_matching::LLMIntentAnalyzer::new(interface.clone()),
+        ));
+        self
+    }
+
+    /// 🆕 SKILL MATCHING V2: Set skill selector (auto-built if skill_registry is also set)
+    pub fn with_skill_selector(mut self, selector: Arc<crate::skill_matching::SkillSelector>) -> Self {
+        self.skill_selector = Some(selector);
+        self
+    }
+
+    /// 🆕 SKILL MATCHING V2: Set trace store for activation observability
+    pub fn with_trace_store(mut self, store: Arc<dyn crate::skill_matching::TraceStore>) -> Self {
+        self.trace_store = Some(store);
         self
     }
 
@@ -1023,10 +1055,285 @@ impl Agent {
     /// 
     /// 🆕 PLANNING FIX: Enhanced with automatic complexity detection and planning integration
     /// 🆕 OPTIMIZATION: Intent-based routing for efficient task handling
+    /// 🆕 SKILL MATCHING V2: Pure LLM-driven intent + skill selection (zero hardcoded rules)
     async fn process_task(&self, task: Task) -> Result<TaskResult, AgentError> {
         info!("Processing task {} of type {}", task.id, task.task_type);
 
         let start_time = std::time::Instant::now();
+        let task_id = task.id.clone();
+
+        // 🆕 SKILL MATCHING V2: Check if V2 components are available
+        let use_v2 = self.llm_intent_analyzer.is_some() 
+            && self.skill_selector.is_some()
+            && matches!(task.task_type, TaskType::LlmChat | TaskType::Custom(_));
+
+        let result = if use_v2 {
+            // V2 Path: Pure LLM-driven intent + skill matching
+            self.process_task_v2(task).await
+        } else {
+            // Legacy Path: Keep existing behavior for backward compatibility
+            self.process_task_legacy(task).await
+        };
+
+        let execution_time_ms = start_time.elapsed().as_millis() as u64;
+
+        match result {
+            Ok((output, artifacts)) => {
+                info!(
+                    "Task {} completed successfully in {}ms",
+                    task_id, execution_time_ms
+                );
+                Ok(TaskResult {
+                    task_id,
+                    success: true,
+                    output,
+                    artifacts,
+                    execution_time_ms,
+                })
+            }
+            Err(e) => {
+                error!(
+                    "Task {} failed after {}ms: {}",
+                    task_id, execution_time_ms, e
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// 🆕 SKILL MATCHING V2: Pure LLM-driven task processing
+    /// 
+    /// Graceful degradation: if V2 analysis times out or fails, falls back to legacy path.
+    async fn process_task_v2(&self, task: Task) -> Result<(String, Vec<Artifact>), AgentError> {
+        let task_id = task.id.clone();
+        let message_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+            json.get("message").and_then(|m| m.as_str()).unwrap_or(&task.input).to_string()
+        } else {
+            task.input.clone()
+        };
+
+        // 🆕 FIX (Plan C): Check for pending approval confirmations BEFORE intent analysis.
+        // If user says "confirm"/"同意"/"yes"/"ok", execute the pending operation.
+        let confirmation_words = ["确认", "同意", "yes", "y", "ok", "好", "可以", "执行"];
+        let is_confirmation = message_text.trim().len() <= 20 
+            && confirmation_words.iter().any(|w| message_text.to_lowercase().contains(w));
+        
+        if is_confirmation {
+            let mut approvals = self.pending_approvals.write().await;
+            if !approvals.is_empty() {
+                // Take the most recent pending approval
+                if let Some((req_id, request)) = approvals.iter().next().map(|(k, v)| (k.clone(), v.clone())) {
+                    approvals.remove(&req_id);
+                    drop(approvals);
+                    info!("Plan C: User confirmed pending approval {} for skill '{}'", req_id, request.skill_id);
+                    
+                    // Re-execute the skill with approval bypassed
+                    if let Some(ref registry) = self.skill_registry {
+                        if let Some(skill) = registry.get(&request.skill_id).await {
+                            // 🆕 FIX: Temporarily bypass approval gate for confirmed operation
+                            self.skip_approval.store(true, std::sync::atomic::Ordering::SeqCst);
+                            let skill_result = self.execute_registered_skill(&skill, &request.params.to_string(), None).await;
+                            self.skip_approval.store(false, std::sync::atomic::Ordering::SeqCst);
+                            
+                            match skill_result {
+                                Ok(result) => {
+                                    let _ = registry.record_usage(&request.skill_id).await;
+                                    let output = self.synthesize_skill_output(&message_text, &result.output, &request.skill_id);
+                                    return Ok((output, vec![]));
+                                }
+                                Err(e) => {
+                                    return Ok((format!("已确认操作，但执行失败: {}", e), vec![]));
+                                }
+                            }
+                        }
+                    }
+                    return Ok(("已确认，但找不到对应的技能。".to_string(), vec![]));
+                }
+            }
+        }
+
+        // Step 1: LLM Intent Analysis (zero hardcoded rules)
+        let intent_analyzer = self.llm_intent_analyzer.as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("LLM Intent Analyzer not configured".into()))?;
+        
+        let intent_v2 = match intent_analyzer.analyze(&message_text, None).await {
+            Ok(intent) => intent,
+            Err(e) => {
+                warn!("V2 Intent analysis failed for task {} ({}), falling back to legacy path", task_id, e);
+                return self.process_task_legacy(task).await;
+            }
+        };
+
+        info!("V2 Intent: direct_answer={}, needs_skill={}, needs_planning={}, confidence={:.2} for task {}",
+              intent_v2.direct_answer, intent_v2.needs_skill, intent_v2.needs_planning, 
+              intent_v2.confidence, task_id);
+
+        // 🆕 FIX (Plan B): Skill introspection shortcut — when user asks about available skills,
+        // directly query the registry instead of relying on LLM knowledge (which is stale).
+        // This handles queries like "有哪些skills", "本机技能", "你有什么能力" etc.
+        let query_lower = message_text.to_lowercase();
+        let is_skill_query = query_lower.contains("skill") 
+            || query_lower.contains("技能")
+            || query_lower.contains("有哪些能力")
+            || query_lower.contains("你能做什么")
+            || query_lower.contains("会什么")
+            || (query_lower.contains("有哪些") && (query_lower.contains("功能") || query_lower.contains("工具")))
+            || query_lower.contains("list skills")
+            || query_lower.contains("available skills")
+            || query_lower.contains("what can you do");
+        
+        if is_skill_query {
+            if let Some(ref registry) = self.skill_registry {
+                let skills = registry.list_enabled().await;
+                let mut lines = vec![
+                    format!("🛠️ 本机共有 {} 个可用技能 (enabled skills):", skills.len()),
+                    String::new(),
+                ];
+                for skill in &skills {
+                    let manifest = &skill.skill.manifest;
+                    lines.push(format!(
+                        "• **{}** (`{}`)",
+                        skill.skill.name, skill.skill.id
+                    ));
+                    if !manifest.description.is_empty() {
+                        lines.push(format!("  - {}", manifest.description));
+                    }
+                    if !manifest.capabilities.is_empty() {
+                        lines.push(format!("  - 能力: {}", manifest.capabilities.join(", ")));
+                    }
+                    lines.push(String::new());
+                }
+                let response = lines.join("\n");
+                info!("Plan B: Skill introspection shortcut answered query with {} skills", skills.len());
+                return Ok((response, vec![]));
+            }
+        }
+
+        // Initialize trace for observability
+        let mut trace = crate::skill_matching::SkillActivationTrace::new(&message_text, intent_v2.clone());
+
+        // Step 2: Route based on LLM intent (no hardcoded keyword matching)
+        let result = if intent_v2.direct_answer || !intent_v2.needs_skill {
+            // Direct answer path — no skill injection
+            self.handle_direct_answer(&task).await
+        } else {
+            // Step 3: Skill Selection (pure LLM-driven)
+            let selector = self.skill_selector.as_ref()
+                .ok_or_else(|| AgentError::InvalidConfig("Skill Selector not configured".into()))?;
+
+            let selection = match selector.select(&message_text, &intent_v2.query_summary).await {
+                Ok(sel) => sel,
+                Err(e) => {
+                    warn!("V2 Skill selection failed for task {} ({}), continuing without skill injection", task_id, e);
+                    // Fallback: proceed without skill hint, let LLM handle directly
+                    return self.handle_llm_task_v2(&task, &intent_v2, &crate::skill_matching::SkillSelection {
+                        selected_skill: None,
+                        selected_skill_name: None,
+                        needs_planning: intent_v2.needs_planning,
+                        confidence: 0.0,
+                        scores: Vec::new(),
+                        selection_reasoning: format!("Skill selection failed: {}", e),
+                        disclosure_level: crate::skills::registry::SkillDisclosureLevel::L0,
+                    }).await;
+                }
+            };
+
+            info!("V2 Skill Selection: selected={:?}, confidence={:.2}, reasoning='{}'",
+                  selection.selected_skill, selection.confidence, 
+                  selection.selection_reasoning.chars().take(80).collect::<String>());
+
+            // Update trace with retrieval and ranking results
+            let candidate_ids: Vec<String> = selection.scores.iter().map(|s| s.skill_id.clone()).collect();
+            let recall_scores: Vec<(String, f32)> = selection.scores.iter()
+                .map(|s| (s.skill_id.clone(), s.overall_score))
+                .collect();
+            trace = trace.with_retrieval(crate::skill_matching::RetrievalTrace {
+                method: "registry_search".to_string(),
+                candidate_skills: candidate_ids,
+                recall_scores,
+            });
+            trace = trace.with_ranking(crate::skill_matching::RankingTrace {
+                llm_model: String::new(),
+                scores: selection.scores.clone(),
+                selected_skill: selection.selected_skill.clone(),
+                reasoning: selection.selection_reasoning.clone(),
+                confidence: selection.confidence,
+            });
+
+            // Step 4: Build task with skill hint if selected
+            let mut task = task;
+            if let Some(ref skill_id) = selection.selected_skill {
+                let registry = self.skill_registry.as_ref()
+                    .ok_or_else(|| AgentError::InvalidConfig("Skill registry not configured".into()))?;
+                
+                match registry.get(skill_id).await {
+                    Some(skill) => {
+                        let l3_doc = registry.get_skill_description(skill_id, 
+                            crate::skills::registry::SkillDisclosureLevel::L3).await;
+                        
+                        // Inject skill hint into task input
+                        if let Ok(mut input_json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+                            if let Some(obj) = input_json.as_object_mut() {
+                                obj.insert("skill_hint_v2".to_string(), serde_json::json!({
+                                    "id": skill_id,
+                                    "name": skill.skill.name,
+                                    "description": skill.skill.manifest.description,
+                                    "prompt_template": l3_doc.unwrap_or_else(|| skill.skill.manifest.prompt_template.clone()),
+                                    "confidence": selection.confidence,
+                                    "needs_planning": intent_v2.needs_planning || selection.needs_planning,
+                                }));
+                                task.input = input_json.to_string();
+                            }
+                        }
+                    }
+                    None => {
+                        warn!("V2 Skill Selection: skill '{}' selected but not found in registry", skill_id);
+                    }
+                }
+            }
+
+            // Step 5: Route to handler based on planning need
+            if intent_v2.needs_planning || selection.needs_planning {
+                if self.is_planning_ready() {
+                    self.execute_with_planning(task).await
+                } else {
+                    self.handle_llm_task_v2(&task, &intent_v2, &selection).await
+                }
+            } else {
+                self.handle_llm_task_v2(&task, &intent_v2, &selection).await
+            }
+        };
+
+        // Store trace for observability (fire-and-forget, don't fail the task)
+        if let Some(ref store) = self.trace_store {
+            if let Err(e) = store.store(&trace).await {
+                warn!("Failed to store skill activation trace: {}", e);
+            }
+        }
+
+        result
+    }
+
+    /// 🆕 SKILL MATCHING V2: Handle LLM task with V2 intent + skill selection
+    async fn handle_llm_task_v2(
+        &self,
+        task: &Task,
+        intent: &crate::skill_matching::IntentAnalysisV2,
+        _selection: &crate::skill_matching::SkillSelection,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        // Convert V2 types to legacy types for handler compatibility
+        let legacy_intent = crate::intent::IntentAnalysis::new(
+            intent.intent.clone(),
+            intent.confidence,
+        )
+        .with_entities(intent.entities.clone())
+        .with_constraints(intent.constraints.clone());
+
+        self.handle_llm_task_with_intent(task, &legacy_intent).await
+    }
+
+    /// Legacy task processing path (preserved for backward compatibility)
+    async fn process_task_legacy(&self, task: Task) -> Result<(String, Vec<Artifact>), AgentError> {
         let task_id = task.id.clone();
 
         // 🆕 OPTIMIZATION PHASE 1: Intent Engine前置 — 基于实际消息内容分类意图
@@ -1044,7 +1351,7 @@ impl Agent {
         info!("Intent classified as {:?} (confidence: {:.2}) for task {}", 
               intent_analysis.intent, intent_analysis.confidence, task_id);
 
-        let result = match &task.task_type {
+        match &task.task_type {
             TaskType::LlmChat => {
                 // 🆕 OPTIMIZATION: Route based on intent classification
                 match intent_analysis.intent {
@@ -1097,31 +1404,6 @@ impl Agent {
                     )))
                 }
             }
-        };
-
-        let execution_time_ms = start_time.elapsed().as_millis() as u64;
-
-        match result {
-            Ok((output, artifacts)) => {
-                info!(
-                    "Task {} completed successfully in {}ms",
-                    task_id, execution_time_ms
-                );
-                Ok(TaskResult {
-                    task_id,
-                    success: true,
-                    output,
-                    artifacts,
-                    execution_time_ms,
-                })
-            }
-            Err(e) => {
-                error!(
-                    "Task {} failed after {}ms: {}",
-                    task_id, execution_time_ms, e
-                );
-                Err(e)
-            }
         }
     }
 
@@ -1151,7 +1433,12 @@ impl Agent {
             ),
         ];
 
-        let response = llm.call_llm(messages, None).await
+        // 🆕 FIX: Limit max_tokens to 1024 for direct answers to prevent
+        // Kimi k2.6 thinking mode from generating excessive reasoning tokens.
+        let mut context = std::collections::HashMap::new();
+        context.insert("max_tokens".to_string(), "1024".to_string());
+
+        let response = llm.call_llm(messages, Some(context)).await
             .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?;
 
         Ok((response, vec![]))
@@ -1243,7 +1530,8 @@ impl Agent {
                 .and_then(|m| m.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| task.input.clone());
-            let hint = json.get("skill_hint").cloned();
+            // 🆕 SKILL MATCHING V2: Check for skill_hint_v2 first, fallback to skill_hint
+            let hint = json.get("skill_hint_v2").cloned().or_else(|| json.get("skill_hint").cloned());
             (msg, hint)
         } else {
             (task.input.clone(), None)
@@ -1278,17 +1566,11 @@ impl Agent {
         // 🆕 FIX: 强规划关键词（如"计划"/"规划"/"攻略"）即使短文本也应触发 planning，
         // 避免"去汕头市旅游五天的计划"（14字）因低于50字阈值而被误判为简单查询。
         // 设置 6 字符下限防止单字误触发（如"计"）。
-        // 🆕 FIX: 但生成类 skill（travel/writer 等）不走 planning，一次性生成更高效。
-        let is_generative_skill = skill_hint.as_ref().map_or(false, |hint| {
-            let name = hint.get("name").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-            name.contains("travel") || name.contains("planner")
-                || name.contains("writer") || name.contains("creator")
-                || name.contains("story") || name.contains("email")
-                || name.contains("master") || name.contains("game")
-        });
+        // 🆕 SKILL MATCHING V2: Removed hardcoded generative skill exclusions.
+        // Planning need is determined by the query semantics, not skill name keywords.
 
         let is_complex = has_explicit_planning_param
-            || (has_planning_keywords && char_count >= 6 && !is_generative_skill)
+            || (has_planning_keywords && char_count >= 6)
             || has_multi_step_indicators
             || (char_count > planning_threshold && (has_planning_keywords || has_multi_step_indicators))
             || char_count > long_threshold;
@@ -1506,11 +1788,8 @@ impl Agent {
 
         // 🆕 FIX: Append skill-catalog trigger instruction to persona so the LLM
         // knows to emit SKILL:<id> when the user request matches a registered skill.
-        let is_generative_skill = skill_hint.as_ref().map_or(false, |hint| {
-            let name = hint.get("name").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-            name.contains("travel") && name.contains("planner")
-        });
-        let persona = if self.skill_catalog.is_some() && !is_generative_skill {
+        // 🆕 SKILL MATCHING V2: Removed hardcoded generative skill exclusions.
+        let persona = if self.skill_catalog.is_some() {
             if let Some(ref hint) = skill_hint {
                 // 🆕 FIX: Gateway already matched a skill; tell LLM to emit SKILL:id|params directly
                 let skill_id = hint.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -1651,12 +1930,9 @@ impl Agent {
             metadata,
         ));
 
-        // 🟢 P2 FIX: Dynamic max_tokens based on message complexity and skill type
-        // Generative skills (travel_planner, etc.) need more tokens for rich output,
-        // but we cap at 1200 to keep response times under ~60s.
-        let dynamic_max_tokens = if is_generative_skill {
-            "1200".to_string()
-        } else if input_text.chars().count() < 30 {
+        // 🟢 P2 FIX: Dynamic max_tokens based on message complexity
+        // 🆕 SKILL MATCHING V2: Removed hardcoded generative skill exclusions.
+        let dynamic_max_tokens = if input_text.chars().count() < 30 {
             "300".to_string()
         } else if input_text.chars().count() < 100 {
             "600".to_string()
@@ -1735,6 +2011,16 @@ impl Agent {
                     keywords.push("quote".to_string());
                     keywords.push("market".to_string());
                     keywords.push("行情".to_string());
+                }
+                // 🆕 FIX (Plan D): Expand search-related keywords to ensure web search skills are ranked
+                if query_lower_str.contains("搜索") || query_lower_str.contains("search") || query_lower_str.contains("查找") 
+                    || query_lower_str.contains("查一下") || query_lower_str.contains("网上") || query_lower_str.contains("google")
+                    || query_lower_str.contains("百度") || query_lower_str.contains("look up") || query_lower_str.contains("find online")
+                    || query_lower_str.contains("搜") {
+                    keywords.push("search".to_string());
+                    keywords.push("web_search".to_string());
+                    keywords.push("web".to_string());
+                    keywords.push("查找".to_string());
                 }
 
                 // Detect explicit trading intent to boost order-placement tools
@@ -1910,9 +2196,23 @@ Never ask the user for missing information.".to_string(),
 
         let mut response = if !native_tools.is_empty() && llm.supports_native_tools() {
             info!("handle_llm_task: using native function calling with {} tools", native_tools.len());
-            llm.call_llm_with_tools(messages.clone(), native_tools, Some(extra_params.clone()))
-                .await
-                .map_err(|e| AgentError::Execution(format!("LLM call with tools failed: {}", e)))?
+            match llm.call_llm_with_tools(messages.clone(), native_tools.clone(), Some(extra_params.clone())).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    let err_str = e.to_string();
+                    // 🆕 FIX: Retry without tool_choice when Claude thinking mode conflicts
+                    if err_str.contains("tool_choice") && err_str.contains("thinking") {
+                        warn!("tool_choice incompatible with thinking mode, retrying without tool_choice");
+                        let mut retry_params = extra_params.clone();
+                        retry_params.remove("tool_choice");
+                        llm.call_llm_with_tools(messages.clone(), native_tools, Some(retry_params))
+                            .await
+                            .map_err(|e2| AgentError::Execution(format!("LLM call with tools failed: {}", e2)))?
+                    } else {
+                        return Err(AgentError::Execution(format!("LLM call with tools failed: {}", e)));
+                    }
+                }
+            }
         } else {
             llm.call_llm(messages.clone(), Some(extra_params.clone()))
                 .await
@@ -2117,20 +2417,31 @@ The tool will handle validation and tell us what's missing.".to_string(),
         Ok((response, vec![]))
     }
 
-    /// Check whether a skill directory contains executable scripts
+    /// Check whether a skill directory contains executable scripts.
+    /// Checks both the root directory and the `scripts/` subdirectory.
     async fn has_scripts_in_dir(&self, dir: &std::path::Path) -> bool {
-        let mut entries = match tokio::fs::read_dir(dir).await {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                if matches!(ext, "py" | "js" | "sh" | "ts") {
-                    return true;
+        // Helper to check a single directory for script files
+        async fn check_dir_for_scripts(dir: &std::path::Path) -> bool {
+            let mut entries = match tokio::fs::read_dir(dir).await {
+                Ok(e) => e,
+                Err(_) => return false,
+            };
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                    if matches!(ext, "py" | "js" | "sh" | "ts") {
+                        return true;
+                    }
                 }
             }
+            false
         }
-        false
+
+        // 1. Check root directory
+        if check_dir_for_scripts(dir).await {
+            return true;
+        }
+        // 2. Check scripts/ subdirectory
+        check_dir_for_scripts(&dir.join("scripts")).await
     }
 
     /// 🟢 P1 FIX: Public API to execute a skill by ID (used by composition, SkillCallTool, and external callers)
@@ -2369,6 +2680,8 @@ The tool will handle validation and tell us what's missing.".to_string(),
         let skill_id = registered_skill.skill.id.clone();
 
         // 🆕 OPTIMIZATION PHASE 1: Approval gate for destructive operations
+        // 🆕 FIX (Plan C): Store pending approval for multi-step user confirmation
+        if !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst) {
         if let Some(ref gate) = self.approval_gate {
             let env = std::collections::HashMap::new(); // Could be enriched with env vars
             let params_json = parameters.as_ref().map(|p| {
@@ -2382,10 +2695,38 @@ The tool will handle validation and tell us what's missing.".to_string(),
             match gate.evaluate(&skill_id, &params_json, &env) {
                 crate::security::ApprovalResult::Rejected { reason } => {
                     warn!("Approval required but not granted for skill '{}': {}", skill_id, reason);
+                    let request = gate.build_request(&skill_id, &params_json);
+                    let req_id = request.request_id.clone();
+                    let description = request.description.clone();
+                    let risk_level = request.risk_level;
+                    
+                    // Store pending approval
+                    {
+                        let mut pending = self.pending_approvals.write().await;
+                        pending.insert(req_id.clone(), request);
+                        // Keep only the most recent 10 pending approvals
+                        if pending.len() > 10 {
+                            let oldest: Vec<String> = pending.keys().cloned().collect::<Vec<_>>().into_iter().take(pending.len() - 10).collect();
+                            for k in oldest {
+                                pending.remove(&k);
+                            }
+                        }
+                    }
+                    
+                    let risk_label = match risk_level {
+                        crate::security::RiskLevel::Low => "🟢 低风险",
+                        crate::security::RiskLevel::Medium => "🟡 中风险",
+                        crate::security::RiskLevel::High => "🟠 高风险",
+                        crate::security::RiskLevel::Critical => "🔴 关键操作",
+                    };
+                    
                     return Ok(skills::executor::SkillExecutionResult {
                         task_id: skill_id,
                         success: false,
-                        output: format!("⚠️ 操作需要确认: {}。请明确批准后再执行。", reason),
+                        output: format!(
+                            "{} {}\n\n{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\n\n请回复「确认」或「同意」来执行此操作。",
+                            risk_label, reason, description
+                        ),
                         structured_output: None,
                         execution_time_ms: start_time.elapsed().as_millis() as u64,
                     });
@@ -2396,6 +2737,7 @@ The tool will handle validation and tell us what's missing.".to_string(),
                 _ => {} // Approved or other states — proceed
             }
         }
+        } // close skip_approval check
 
         // ── MCP Skill Bridge: Execute MCP tools registered as skills ──
         if let Some((server_name, tool_name)) = crate::mcp::skill_bridge::parse_mcp_skill_id(&registered_skill.skill.id) {
@@ -2524,13 +2866,10 @@ The tool will handle validation and tell us what's missing.".to_string(),
         }
         
         // 2. Knowledge / Code skill execution via ReAct executor
-        // 🆕 FIX: Generative skills (e.g. travel_planner) do not need ReAct tools;
-        // direct LLM generation is faster and sufficient.
-        let is_generative_skill = registered_skill.skill.name.to_lowercase().contains("travel")
-            && registered_skill.skill.name.to_lowercase().contains("planner");
-
+        // 🆕 SKILL MATCHING V2: Removed hardcoded generative skill exclusions.
+        // All skills are treated uniformly; the Agent's LLM decides execution strategy.
         let source = &registered_skill.skill.source_path;
-        if !is_generative_skill && !source.as_os_str().is_empty() {
+        if !source.as_os_str().is_empty() {
             if let Some(llm) = &self.llm_interface {
                 let has_scripts = if source.is_dir() {
                     self.has_scripts_in_dir(source).await
@@ -3221,6 +3560,11 @@ The tool will handle validation and tell us what's missing.".to_string(),
                             functions: vec![],
                             prompt_template: markdown.clone(),
                             examples: "".to_string(),
+                            when_to_use: distilled.description.clone(),
+                            when_not_to_use: None,
+                            activation_examples: vec![],
+                            activation_negative_examples: vec![],
+                            dependencies: vec![],
                         },
                     };
 

@@ -5,7 +5,7 @@ PORT=8090
 HOST=0.0.0.0
 # 自动发现脚本所在目录，避免写死绝对路径
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-STATIC_PATH="$SCRIPT_DIR"
+STATIC_PATH="$SCRIPT_DIR/dist"
 GATEWAY_URL="http://localhost:8000"
 
 # 检查端口是否被占用

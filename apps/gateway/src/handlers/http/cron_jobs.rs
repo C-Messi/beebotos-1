@@ -255,10 +255,28 @@ async fn register_job_with_scheduler(
             if svc.is_none() { return; }
             let svc = svc.unwrap();
 
-            // Check max runs
-            if let Some(max) = job.max_runs {
-                if job.run_count >= max {
-                    info!("Cron job {} reached max runs, skipping", job.id);
+            // 🆕 FIX (P0): Re-read latest run_count from DB before checking max_runs
+            // The closure captures a snapshot of run_count at registration time.
+            let refreshed_job = match svc.get_job(&job.id).await {
+                Ok(j) => j,
+                Err(e) => {
+                    warn!("Failed to refresh job {} state before execution: {}", job.id, e);
+                    return;
+                }
+            };
+
+            // 🆕 FIX (P0): Check max_runs using latest DB state
+            if let Some(max) = refreshed_job.max_runs {
+                if refreshed_job.run_count >= max {
+                    info!("Cron job {} reached max runs ({} / {}), disabling", job.id, refreshed_job.run_count, max);
+                    let _ = svc.disable_job(&job.id).await;
+                    // Remove from scheduler to prevent further triggers
+                    if let Some(old_uuid) = svc.get_scheduler_uuid(&job.id).await {
+                        if let Some(scheduler) = state.workflow_cron_scheduler.as_ref() {
+                            let _ = scheduler.remove(&old_uuid).await;
+                        }
+                        let _ = svc.remove_scheduler_uuid(&job.id).await;
+                    }
                     return;
                 }
             }
@@ -389,6 +407,11 @@ async fn execute_cron_job_inner(
                 m.insert("sender_id".to_string(), "cron".to_string());
                 m.insert("cron_job_id".to_string(), job.id.clone());
                 m.insert("cron_job_name".to_string(), job.name.clone());
+                // 🆕 FIX (P1): Pass context_mode so Agent can decide session strategy
+                m.insert("context_mode".to_string(), match job.context_mode {
+                    crate::services::cron_job_service::ContextMode::Main => "main".to_string(),
+                    crate::services::cron_job_service::ContextMode::Isolated => "isolated".to_string(),
+                });
                 m
             },
             timestamp: chrono::Utc::now(),
@@ -511,6 +534,15 @@ pub async fn start_at_job_checker(state: Arc<AppState>, interval_secs: u64) {
             };
 
             for job in jobs {
+                // 🆕 FIX (P0): Check max_runs before executing one-shot at-job
+                if let Some(max) = job.max_runs {
+                    if job.run_count >= max {
+                        info!("At-job {} reached max runs ({} / {}), disabling", job.id, job.run_count, max);
+                        let _ = svc.disable_job(&job.id).await;
+                        continue;
+                    }
+                }
+
                 info!("Executing one-shot at-job {}: '{}'", job.id, job.name);
 
                 let run_id = match svc.record_run_start(&job.id).await {

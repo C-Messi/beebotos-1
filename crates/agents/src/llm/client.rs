@@ -457,7 +457,8 @@ impl LLMClient {
 
             if let Some(choice) = response.choices.first() {
                 if let Some(tool_calls) = &choice.message.tool_calls {
-                    // Add assistant message with tool_calls to context
+                    // 🆕 FIX: Constraint 2 - Preserve assistant message with reasoning_content in context
+                    // for multi-step tool calls (required for Kimi k2.6 thinking mode)
                     messages.push(choice.message.clone());
 
                     // Execute each tool call

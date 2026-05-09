@@ -30,7 +30,7 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             // Gateway API runs on port 8000 per project docs
-            base_url: "http://localhost:8000/api/v1".to_string(),
+            base_url: "/api/v1".to_string(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             retry_attempts: DEFAULT_RETRY_ATTEMPTS,
             retry_delay_ms: DEFAULT_RETRY_DELAY_MS,

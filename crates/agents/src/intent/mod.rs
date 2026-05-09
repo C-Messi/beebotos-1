@@ -79,6 +79,8 @@ const DEFAULT_TOOLSETS: &[(&str, &[&str])] = &[
     ("options-data", &["期权", "option", "call", "put"]),
     ("news", &["新闻", "news", "头条"]),
     ("weather", &["天气", "weather", "temperature", "预报"]),
+    // 🆕 FIX (Plan D): Web search toolset — triggers when user asks to search the web
+    ("search", &["搜索", "查找", "查一下", "网上", "google", "search", "look up", "find online", "查", "搜", "百度"]),
 ];
 
 /// Intent Engine with heuristic classification

@@ -466,6 +466,10 @@ pub struct KernelAgentBuilder {
     with_replanner: Option<Arc<dyn crate::planning::RePlanner>>,
     with_skill_catalog: Option<String>,
     with_mcp: Option<Arc<crate::mcp::MCPManager>>,
+    // 🆕 SKILL MATCHING V2: Skill selector for LLM-driven matching
+    with_skill_selector: Option<Arc<crate::skill_matching::SkillSelector>>,
+    // 🆕 SKILL MATCHING V2: Trace store for observability
+    with_trace_store: Option<Arc<dyn crate::skill_matching::TraceStore>>,
 }
 
 impl KernelAgentBuilder {
@@ -486,6 +490,8 @@ impl KernelAgentBuilder {
             with_replanner: None,
             with_skill_catalog: None,
             with_mcp: None,
+            with_skill_selector: None,
+            with_trace_store: None,
         }
     }
 
@@ -582,6 +588,18 @@ impl KernelAgentBuilder {
         self
     }
 
+    /// 🆕 SKILL MATCHING V2: Set skill selector for LLM-driven matching
+    pub fn with_skill_selector(mut self, selector: Arc<crate::skill_matching::SkillSelector>) -> Self {
+        self.with_skill_selector = Some(selector);
+        self
+    }
+
+    /// 🆕 SKILL MATCHING V2: Set trace store for activation observability
+    pub fn with_trace_store(mut self, store: Arc<dyn crate::skill_matching::TraceStore>) -> Self {
+        self.with_trace_store = Some(store);
+        self
+    }
+
     /// Build and spawn the agent in kernel sandbox
     pub async fn spawn(self) -> Result<(TaskId, mpsc::UnboundedSender<KernelTaskRequest>)> {
         let kernel = self.kernel.ok_or_else(|| {
@@ -627,6 +645,16 @@ impl KernelAgentBuilder {
 
         if let Some(catalog) = self.with_skill_catalog {
             agent = agent.with_skill_catalog(catalog);
+        }
+
+        // 🆕 SKILL MATCHING V2: Attach skill selector
+        if let Some(selector) = self.with_skill_selector {
+            agent = agent.with_skill_selector(selector);
+        }
+
+        // 🆕 SKILL MATCHING V2: Attach trace store
+        if let Some(trace_store) = self.with_trace_store {
+            agent = agent.with_trace_store(trace_store);
         }
 
         // 🆕 Attach MCP manager for external tool access

@@ -154,6 +154,11 @@ impl McpSkillBridge {
             functions,
             prompt_template: Self::build_prompt_template(&tool.name, &description, &tool.input_schema),
             examples: String::new(),
+            when_to_use: format!("Use this skill when you need to call the MCP tool '{}' from server '{}'", tool.name, server_name),
+            when_not_to_use: None,
+            activation_examples: vec![format!("Call the {} tool", tool.name)],
+            activation_negative_examples: vec![],
+            dependencies: vec![],
         };
 
         LoadedSkill {

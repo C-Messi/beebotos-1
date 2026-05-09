@@ -312,6 +312,11 @@ impl OpenAIRequestBuilder {
                     obj["tool_call_id"] = json!(tool_call_id);
                 }
 
+                // 🆕 FIX: Constraint 2 - preserve reasoning_content in context for multi-step tool calls (Kimi k2.6)
+                if let Some(reasoning_content) = m.reasoning_content {
+                    obj["reasoning_content"] = json!(reasoning_content);
+                }
+
                 obj
             })
             .collect();

@@ -22,7 +22,7 @@ pub use zhipu::{ZhipuConfig as ChatGLMConfig, ZhipuProvider as ChatGLMProvider, 
 pub use deepseek::{DeepSeekConfig, DeepSeekProvider, deepseek_models};
 pub use doubao::{DoubaoConfig, DoubaoProvider, doubao_models};
 pub use gemini::{GeminiConfig, GeminiProvider, gemini_models};
-pub use kimi::{KimiConfig, KimiProvider, ProviderMode, kimi_models};
+pub use kimi::{KimiConfig, KimiProvider, ProviderMode, ThinkingMode, kimi_models};
 pub use ollama::{OllamaConfig, OllamaProvider, ollama_models};
 pub use openai::{OpenAIConfig, OpenAIProvider, openai_models};
 pub use qwen::{QwenConfig, QwenProvider, qwen_models};

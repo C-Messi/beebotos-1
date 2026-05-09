@@ -38,6 +38,41 @@ impl std::fmt::Display for ProviderMode {
     }
 }
 
+/// Kimi thinking mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingMode {
+    /// Enabled thinking mode
+    Enabled,
+    /// Disabled thinking mode (fast mode, default)
+    Disabled,
+}
+
+impl Default for ThinkingMode {
+    fn default() -> Self {
+        ThinkingMode::Disabled
+    }
+}
+
+impl std::fmt::Display for ThinkingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ThinkingMode::Enabled => write!(f, "enabled"),
+            ThinkingMode::Disabled => write!(f, "disabled"),
+        }
+    }
+}
+
+impl ThinkingMode {
+    /// Parse from string
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "enabled" => Some(ThinkingMode::Enabled),
+            "disabled" => Some(ThinkingMode::Disabled),
+            _ => None,
+        }
+    }
+}
+
 /// Kimi API configuration
 #[derive(Debug, Clone)]
 pub struct KimiConfig {
@@ -53,6 +88,8 @@ pub struct KimiConfig {
     pub retry_policy: RetryPolicy,
     /// 🔧 P1 FIX: Provider mode for multi-provider configuration
     pub mode: ProviderMode,
+    /// 🆕 FIX: Kimi k2.6 thinking mode (default disabled for fast mode)
+    pub thinking: ThinkingMode,
 }
 
 impl Default for KimiConfig {
@@ -64,6 +101,7 @@ impl Default for KimiConfig {
             timeout: std::time::Duration::from_secs(120),
             retry_policy: RetryPolicy::default(),
             mode: ProviderMode::default(), // merge by default
+            thinking: ThinkingMode::default(), // disabled by default
         }
     }
 }
@@ -92,6 +130,11 @@ impl KimiConfig {
             })
             .unwrap_or_default();
 
+        let thinking = env::var("KIMI_THINKING")
+            .ok()
+            .and_then(|t| ThinkingMode::from_str(&t))
+            .unwrap_or_default();
+
         Ok(Self {
             base_url,
             api_key,
@@ -99,6 +142,7 @@ impl KimiConfig {
             timeout: std::time::Duration::from_secs(120),
             retry_policy: RetryPolicy::default(),
             mode,
+            thinking,
         })
     }
 
@@ -111,6 +155,12 @@ impl KimiConfig {
     /// 🔧 P1 FIX: Check if this provider should be used exclusively
     pub fn is_exclusive(&self) -> bool {
         self.mode == ProviderMode::Replace
+    }
+
+    /// 🆕 FIX: Set thinking mode
+    pub fn with_thinking(mut self, thinking: ThinkingMode) -> Self {
+        self.thinking = thinking;
+        self
     }
 }
 
@@ -197,6 +247,15 @@ impl KimiProvider {
             .map_err(|e| LLMError::InvalidRequest(e))?;
         Self::new(config)
     }
+
+    /// 🆕 FIX: Check if web_search tool is present (incompatible with thinking mode)
+    fn has_web_search_tool(tools: Option<&Vec<crate::llm::types::Tool>>) -> bool {
+        tools.map(|tools| {
+            tools.iter().any(|t| {
+                t.function.name == "$web_search" || t.function.name == "web_search"
+            })
+        }).unwrap_or(false)
+    }
 }
 
 #[async_trait]
@@ -212,9 +271,35 @@ impl LLMProvider for KimiProvider {
     async fn complete(&self, mut request: LLMRequest) -> LLMResult<LLMResponse> {
         debug!("Sending completion request to Kimi");
 
-        // Kimi k2.6 only supports temperature=1
+        // 🆕 FIX: Kimi k2.6 only supports temperature=0.6
         if request.config.model.contains("k2.6") {
-            request.config.temperature = Some(1.0);
+            request.config.temperature = Some(0.6);
+        }
+
+        // 🆕 FIX: Determine effective thinking mode
+        // Constraint 3: $web_search tool is incompatible with thinking mode on K2.6/K2.5
+        let effective_thinking = if request.config.model.contains("k2.6") && Self::has_web_search_tool(request.config.tools.as_ref()) {
+            debug!("Web search tool detected, forcing thinking mode to disabled for Kimi k2.6");
+            ThinkingMode::Disabled
+        } else {
+            self.config.thinking
+        };
+
+        // 🆕 FIX: Explicitly set thinking parameter (default disabled for fast mode)
+        let thinking_json = serde_json::json!({"type": effective_thinking.to_string()});
+        request.config.extra.insert("thinking".to_string(), thinking_json);
+
+        // 🆕 FIX: Constraint 1 - tool_choice can only be "auto" or "none" for K2.6 with thinking enabled
+        if request.config.model.contains("k2.6") {
+            if let Some(ref tool_choice) = request.config.tool_choice {
+                let is_valid = matches!(tool_choice,
+                    ToolChoice::Auto(_) | ToolChoice::None(_)
+                );
+                if !is_valid {
+                    debug!("Invalid tool_choice for Kimi k2.6, resetting to 'auto'");
+                    request.config.tool_choice = Some(ToolChoice::Auto("auto".to_string()));
+                }
+            }
         }
 
         let body = self.request_builder.build_body(request);
@@ -242,11 +327,37 @@ impl LLMProvider for KimiProvider {
 
         let (tx, rx) = mpsc::channel(100);
 
-        // Kimi k2.6 only supports temperature=1
+        // 🆕 FIX: Kimi k2.6 only supports temperature=0.6
         if request.config.model.contains("k2.6") {
-            request.config.temperature = Some(1.0);
+            request.config.temperature = Some(0.6);
         }
         request.config.stream = Some(true);
+
+        // 🆕 FIX: Determine effective thinking mode
+        // Constraint 3: $web_search tool is incompatible with thinking mode on K2.6/K2.5
+        let effective_thinking = if request.config.model.contains("k2.6") && Self::has_web_search_tool(request.config.tools.as_ref()) {
+            debug!("Web search tool detected, forcing thinking mode to disabled for Kimi k2.6");
+            ThinkingMode::Disabled
+        } else {
+            self.config.thinking
+        };
+
+        // 🆕 FIX: Explicitly set thinking parameter (default disabled for fast mode)
+        let thinking_json = serde_json::json!({"type": effective_thinking.to_string()});
+        request.config.extra.insert("thinking".to_string(), thinking_json);
+
+        // 🆕 FIX: Constraint 1 - tool_choice can only be "auto" or "none" for K2.6 with thinking enabled
+        if request.config.model.contains("k2.6") {
+            if let Some(ref tool_choice) = request.config.tool_choice {
+                let is_valid = matches!(tool_choice,
+                    ToolChoice::Auto(_) | ToolChoice::None(_)
+                );
+                if !is_valid {
+                    debug!("Invalid tool_choice for Kimi k2.6, resetting to 'auto'");
+                    request.config.tool_choice = Some(ToolChoice::Auto("auto".to_string()));
+                }
+            }
+        }
 
         let body = self.request_builder.build_body(request);
         let response = self.http_client.stream_with_retry(

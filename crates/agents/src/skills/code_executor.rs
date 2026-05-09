@@ -228,7 +228,8 @@ fn extract_json(text: &str) -> &str {
     trimmed
 }
 
-async fn list_scripts(dir: &Path) -> Vec<(String, String)> {
+/// Scan a directory for script files (.py, .js, .ts, .sh).
+async fn scan_dir_for_scripts(dir: &Path) -> Vec<(String, String)> {
     let mut result = Vec::new();
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(e) => e,
@@ -245,5 +246,16 @@ async fn list_scripts(dir: &Path) -> Vec<(String, String)> {
             }
         }
     }
+    result
+}
+
+/// List all scripts in a skill directory.
+/// Checks both the root directory and the `scripts/` subdirectory.
+async fn list_scripts(dir: &Path) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    // 1. Scan root directory
+    result.extend(scan_dir_for_scripts(dir).await);
+    // 2. Scan scripts/ subdirectory
+    result.extend(scan_dir_for_scripts(&dir.join("scripts")).await);
     result
 }

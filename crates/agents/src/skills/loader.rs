@@ -71,6 +71,21 @@ pub struct SkillManifest {
     /// 🆕 FIX: Few-shot examples for LLM fallback execution
     #[serde(default)]
     pub examples: String,
+    /// 🆕 SKILL MATCHING V2: When to use this skill (REQUIRED for matching)
+    #[serde(default)]
+    pub when_to_use: String,
+    /// 🆕 SKILL MATCHING V2: When NOT to use this skill
+    #[serde(default)]
+    pub when_not_to_use: Option<String>,
+    /// 🆕 SKILL MATCHING V2: Positive examples that should activate this skill
+    #[serde(default)]
+    pub activation_examples: Vec<String>,
+    /// 🆕 SKILL MATCHING V2: Negative examples that should NOT activate this skill
+    #[serde(default)]
+    pub activation_negative_examples: Vec<String>,
+    /// 🆕 SKILL MATCHING V2: Skill dependencies
+    #[serde(default)]
+    pub dependencies: Vec<String>,
 }
 
 impl SkillLoader {

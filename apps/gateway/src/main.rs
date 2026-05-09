@@ -1154,7 +1154,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 🟢 Start background checker for one-shot (at) cron jobs
-    handlers::http::cron_jobs::start_at_job_checker(app_state.clone(), 30).await;
+    // 🆕 FIX (P2): Reduced interval from 30s to 5s for more accurate one-shot job triggering
+    handlers::http::cron_jobs::start_at_job_checker(app_state.clone(), 5).await;
     info!("✅ Cron at-job checker started (30s interval)");
 
     // 🟢 P2 FIX: Start TriggerEngine event listener for event-based workflow triggers
@@ -1550,7 +1551,8 @@ async fn init_channel_registry(
     }
 }
 
-/// Scan skills directory and load installed skills into registry
+/// Scan skills directory and load installed skills into registry.
+/// Supports both WASM skills (skill.yaml + skill.wasm) and Markdown skills (SKILL.md + optional scripts).
 async fn restore_skills_from_disk(registry: &Arc<beebotos_agents::skills::SkillRegistry>) {
     let base_dir = handlers::http::skills::get_skills_base_dir();
     if !base_dir.exists() {
@@ -1572,15 +1574,21 @@ async fn restore_skills_from_disk(registry: &Arc<beebotos_agents::skills::SkillR
                 None => continue,
             };
 
-            match loader.load_skill(&skill_id).await {
-                Ok(skill) => {
-                    let category = "general".to_string();
-                    registry.register(skill, category, vec![]).await;
-                    restored += 1;
+            // 1. Try WASM form first (skill.yaml + skill.wasm)
+            let skill = match loader.load_skill(&skill_id).await {
+                Ok(skill) => Some(skill),
+                Err(_) => {
+                    // 2. Fallback to Markdown form (SKILL.md + optional scripts)
+                    beebotos_agents::skills::builtin_loader::load_markdown_skill_from_dir(&path).await
                 }
-                Err(e) => {
-                    warn!("Failed to restore skill {}: {}", skill_id, e);
-                }
+            };
+
+            if let Some(skill) = skill {
+                let tags = skill.manifest.capabilities.clone();
+                registry.register(skill, "general", tags).await;
+                restored += 1;
+            } else {
+                warn!("Failed to restore skill {}: not a valid WASM or Markdown skill", skill_id);
             }
         }
     }

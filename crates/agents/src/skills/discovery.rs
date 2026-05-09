@@ -136,7 +136,7 @@ impl SkillDiscovery {
     }
 
     /// Inspect a directory that may contain a SKILL.md or skill.yaml
-    async fn inspect_directory(path: &Path) -> Option<SkillMetadata> {
+    pub async fn inspect_directory(path: &Path) -> Option<SkillMetadata> {
         let skill_md = path.join("SKILL.md");
         let skill_yaml = path.join("skill.yaml");
         let skill_wasm = path.join("skill.wasm");

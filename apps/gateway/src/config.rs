@@ -280,6 +280,9 @@ pub struct ModelProviderConfig {
     pub deployment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<usize>,
+    /// Kimi thinking mode: "enabled" or "disabled" (default "disabled")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 /// Channels configuration - flattened structure like beebot

@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use tracing::{info, warn};
 
 /// Schedule type for cron jobs
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -403,17 +404,44 @@ impl CronJobService {
         }
     }
 
-    /// Get pending at-jobs whose scheduled time has arrived
-    pub async fn get_pending_at_jobs(&self) -> Result<Vec<CronJob>, AppError> {
-        let now = Utc::now().to_rfc3339();
-        let rows = sqlx::query_as::<_, CronJobRow>(
+    /// 🆕 FIX (P1): Clean up completed one-shot at-jobs older than 30 days
+    /// to prevent table bloat from accumulating disabled historical records.
+    async fn cleanup_completed_at_jobs(&self) -> Result<u64, AppError> {
+        let result = sqlx::query(
             r#"
-            SELECT id, name, description, schedule_type, schedule_expr, timezone,
-                   prompt, enabled, context_mode, delivery_channel, delivery_target,
-                   max_runs, run_count, last_run_at, next_run_at, created_by, created_at, updated_at
+            DELETE FROM cron_jobs
+            WHERE enabled = 0
+              AND schedule_type = 'at'
+              AND updated_at < datetime('now', '-30 days')
+            "#
+        )
+        .execute(&self.db)
+        .await
+        .map_err(AppError::database)?;
+
+        let deleted = result.rows_affected();
+        if deleted > 0 {
+            info!("Cleaned up {} completed one-shot at-jobs older than 30 days", deleted);
+        }
+        Ok(deleted)
+    }
+
+    /// Get pending at-jobs whose scheduled time has arrived
+    /// 🆕 FIX (P1): Runs cleanup before query to keep table lean.
+    /// 🆕 FIX (P2): Selects only necessary fields + LIMIT 50 to reduce I/O.
+    pub async fn get_pending_at_jobs(&self) -> Result<Vec<CronJob>, AppError> {
+        // P1: Clean up old completed jobs first
+        let _ = self.cleanup_completed_at_jobs().await;
+
+        let now = Utc::now().to_rfc3339();
+        let rows = sqlx::query_as::<_, PendingAtJobRow>(
+            r#"
+            SELECT id, name, prompt, context_mode, delivery_channel, delivery_target,
+                   max_runs, run_count
             FROM cron_jobs
             WHERE enabled = 1 AND schedule_type = 'at' AND next_run_at <= ?1
             ORDER BY next_run_at ASC
+            LIMIT 50
             "#
         )
         .bind(&now)
@@ -557,6 +585,47 @@ impl From<CronJobRow> for CronJob {
             created_by: row.created_by,
             created_at: row.created_at.parse().unwrap_or_else(|_| Utc::now()),
             updated_at: row.updated_at.parse().unwrap_or_else(|_| Utc::now()),
+        }
+    }
+}
+
+/// 🆕 FIX (P2): Lightweight row for pending at-jobs query — only fetches necessary fields
+#[derive(sqlx::FromRow)]
+struct PendingAtJobRow {
+    id: String,
+    name: String,
+    prompt: String,
+    context_mode: String,
+    delivery_channel: String,
+    delivery_target: String,
+    max_runs: Option<i64>,
+    run_count: i64,
+}
+
+impl From<PendingAtJobRow> for CronJob {
+    fn from(row: PendingAtJobRow) -> Self {
+        Self {
+            id: row.id,
+            name: row.name,
+            description: String::new(),
+            schedule_type: ScheduleType::At,
+            schedule_expr: String::new(),
+            timezone: String::from("UTC"),
+            prompt: row.prompt,
+            enabled: true,
+            context_mode: match row.context_mode.as_str() {
+                "main" => ContextMode::Main,
+                _ => ContextMode::Isolated,
+            },
+            delivery_channel: row.delivery_channel,
+            delivery_target: row.delivery_target,
+            max_runs: row.max_runs,
+            run_count: row.run_count,
+            last_run_at: None,
+            next_run_at: None,
+            created_by: String::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         }
     }
 }

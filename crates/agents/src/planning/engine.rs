@@ -870,22 +870,11 @@ impl HybridPlanner {
     }
 
     /// Select best strategy based on goal characteristics
+    /// 🆕 SKILL MATCHING V2: Removed all hardcoded keyword rules.
+    /// Strategy selection is now delegated to the caller (IntentAnalyzer) or defaults to Hybrid.
     #[allow(dead_code)]
-    fn select_strategy(&self, goal: &str, _context: &PlanContext) -> PlanStrategy {
-        let goal_lower = goal.to_lowercase();
-
-        if goal_lower.contains("analyze") || goal_lower.contains("reason") {
-            PlanStrategy::ChainOfThought
-        } else if goal_lower.contains("implement")
-            || goal_lower.contains("build")
-            || goal_lower.contains("fix")
-        {
-            PlanStrategy::ReAct
-        } else if goal_lower.contains("achieve") || goal_lower.contains("goal") {
-            PlanStrategy::GoalBased
-        } else {
-            PlanStrategy::ReAct
-        }
+    fn select_strategy(&self, _goal: &str, _context: &PlanContext) -> PlanStrategy {
+        PlanStrategy::Hybrid
     }
 }
 

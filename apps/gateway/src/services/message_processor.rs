@@ -580,59 +580,25 @@ impl MessageProcessor {
         
         // 🆕 FIX: Session-level skill inheritance. If current message doesn't match any skill,
         // but the session has an active_skill from previous turns, inherit it to avoid
-        // losing skill context in multi-turn conversations (e.g. travel_planner follow-ups).
-        // FIX: Only inherit when the current message is still relevant to the active skill's domain.
+        // losing skill context in multi-turn conversations.
+        // 🆕 SKILL MATCHING V2: Removed all hardcoded keyword rules (exit_keywords, domain relevance).
+        // The Agent layer now uses LLM to determine if the user has switched topics.
+        // Gateway only checks if the skill still exists and is enabled.
         if skill_match.is_none() {
             let active_skill = session.metadata.get("active_skill").cloned();
             if let Some(skill_id) = active_skill {
-                // Check if user explicitly wants to exit the skill
-                let exit_keywords = ["结束", "退出", "不用了", "谢谢", "再见", "stop", "exit", "quit", "done", "thanks", "bye"];
-                let is_exit = exit_keywords.iter().any(|kw| content.contains(kw));
-                if is_exit {
-                    let _ = self.session_manager.update_metadata(&session.id, "active_skill", "").await;
-                    info!("🎯 Cleared active_skill '{}' (user exit detected)", skill_id);
-                } else if let Some(ref registry) = self.skill_registry {
+                if let Some(ref registry) = self.skill_registry {
                     if let Some(skill) = registry.get(&skill_id).await {
                         if skill.enabled {
-                            // 🆕 FIX: Domain relevance check — don't inherit if current message
-                            // clearly belongs to a different domain (e.g. BTC/crypto vs code research).
-                            let query_lower = content.to_lowercase();
-                            let is_relevant = if skill_id == "code_researcher" {
-                                // code_researcher should NOT be inherited for crypto/finance/market queries
-                                !query_lower.contains("btc")
-                                    && !query_lower.contains("bitcoin")
-                                    && !query_lower.contains("比特币")
-                                    && !query_lower.contains("eth")
-                                    && !query_lower.contains("crypto")
-                                    && !query_lower.contains("加密货币")
-                                    && !query_lower.contains("币价")
-                                    && !query_lower.contains("market")
-                                    && !query_lower.contains("alpaca")
-                                    && !query_lower.contains("股票")
-                                    && !query_lower.contains("行情")
-                                    && !query_lower.contains("价格")
-                            } else if skill_id.starts_with("mcp:alpaca/") {
-                                // alpaca skills should NOT be inherited for code/development queries
-                                !query_lower.contains("code")
-                                    && !query_lower.contains("编程")
-                                    && !query_lower.contains("开发")
-                                    && !query_lower.contains("debug")
-                                    && !query_lower.contains("代码")
-                            } else {
-                                true
-                            };
-                            if is_relevant {
-                                skill_match = Some((
-                                    skill_id.clone(),
-                                    skill.skill.name.clone(),
-                                    skill.skill.manifest.description.clone(),
-                                    skill.skill.manifest.prompt_template.clone(),
-                                ));
-                                info!("🎯 Inherited active skill '{}' for query '{}'", skill_id, content.chars().take(40).collect::<String>());
-                            } else {
-                                info!("🎯 Skipped inheriting active skill '{}' — query '{}' is not in the same domain", skill_id, content.chars().take(40).collect::<String>());
-                                let _ = self.session_manager.update_metadata(&session.id, "active_skill", "").await;
-                            }
+                            // 🆕 SKILL MATCHING V2: No hardcoded domain relevance check.
+                            // Let the Agent's LLM determine if the skill is still relevant.
+                            skill_match = Some((
+                                skill_id.clone(),
+                                skill.skill.name.clone(),
+                                skill.skill.manifest.description.clone(),
+                                skill.skill.manifest.prompt_template.clone(),
+                            ));
+                            info!("🎯 Inherited active skill '{}' for query '{}'", skill_id, content.chars().take(40).collect::<String>());
                         }
                     }
                 }
@@ -688,37 +654,10 @@ impl MessageProcessor {
         }
 
         // 7. 处理 Skill planning 判断
+        // 🆕 SKILL MATCHING V2: Removed all hardcoded skill type checks (travel/planner/analytical/generative).
+        // Planning need is now determined by the Agent's LLM Intent Analyzer.
+        // Gateway no longer injects plan=true based on skill name keywords.
         let mut has_skill_plan = false;
-        if let Some((_, ref skill_name, _, _)) = skill_match {
-            // 复杂 skill 强制触发 agent 端 planning
-            // 🆕 FIX: 结合 skill 类型与 query 复杂度综合判断是否启用 planning
-            let skill_lower = skill_name.to_lowercase();
-            let is_generative_skill = skill_lower.contains("travel") || skill_lower.contains("planner")
-                || skill_lower.contains("writer") || skill_lower.contains("creator")
-                || skill_lower.contains("story") || skill_lower.contains("email")
-                || skill_lower.contains("master") || skill_lower.contains("game");
-            let is_analytical_skill = skill_lower.contains("developer") || skill_lower.contains("analyst")
-                || skill_lower.contains("advisor") || skill_lower.contains("manager")
-                || skill_lower.contains("auditor") || skill_lower.contains("researcher");
-            
-            let query_complexity = Self::estimate_query_complexity(&content);
-            let is_high_complexity = query_complexity == QueryComplexity::High;
-            // Travel planner does not need ReAct; direct generation is faster and sufficient
-            let is_travel_planner = skill_lower.contains("travel") && skill_lower.contains("planner");
-
-            if is_travel_planner {
-                info!("🎯 Travel planner skill matched, skipping plan=true (single-shot generation preferred)");
-            } else if is_analytical_skill && !is_generative_skill {
-                has_skill_plan = true;
-                info!("🎯 Analytical skill matched, will inject plan=true for '{}'", skill_name);
-            } else if is_generative_skill && is_high_complexity {
-                // 🆕 FIX: 高复杂度 generative skill 也启用 planning
-                has_skill_plan = true;
-                info!("🎯 Generative skill '{}' matched with high complexity query, forcing plan=true", skill_name);
-            } else if is_generative_skill {
-                info!("🎯 Generative skill matched, skipping plan=true for '{}' (single-shot generation preferred)", skill_name);
-            }
-        }
 
         // 8. 构造 TaskConfig
         let mut task_input = serde_json::json!({
@@ -1127,6 +1066,11 @@ impl MessageProcessor {
                 functions: vec![],
                 prompt_template: prompt_template.clone(),
                 examples,
+                when_to_use: description.clone(),
+                when_not_to_use: None,
+                activation_examples: vec![],
+                activation_negative_examples: vec![],
+                dependencies: vec![],
             },
         };
 
@@ -1445,13 +1389,9 @@ impl MessageProcessor {
         let mut memory_context = String::new();
         let mut direct_answer: Option<String> = None;
 
-        // 🆕 FIX: Detect skills that don't need heavy user profiles
-        let skip_profiles = skill_match.as_ref().map_or(false, |(_, name, _, _)| {
-            let n = name.to_lowercase();
-            (n.contains("travel") && n.contains("planner")) || n.contains("weather")
-        });
-
         // 🆕 FIX: 根据 query 复杂度动态调整参数
+        // 🆕 SKILL MATCHING V2: Removed hardcoded skill-based profile skipping (travel_planner/weather).
+        // All skills now receive consistent context; the Agent's LLM decides what to use.
         let char_count = content.chars().count();
         let is_simple = char_count <= 10;
         let is_complex = char_count > 30
@@ -1464,10 +1404,7 @@ impl MessageProcessor {
         // 简单查询：固定档案 300 chars + 动态记忆 400 chars
         // 普通查询：固定档案 600 chars + 动态记忆 800 chars
         // 复杂查询：固定档案 1000 chars + 动态记忆 1200 chars
-        // 🆕 FIX: travel_planner and weather_assistant skip user profiles to reduce prompt size and prevent LLM over-analysis
-        let (system_budget, dynamic_budget): (usize, usize) = if skip_profiles {
-            (0, 300) // Skip fixed profiles, minimal dynamic memory
-        } else if is_simple {
+        let (system_budget, dynamic_budget): (usize, usize) = if is_simple {
             (300, 400)
         } else if is_complex {
             (1000, 1200)

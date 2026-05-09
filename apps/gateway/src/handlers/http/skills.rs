@@ -266,14 +266,21 @@ pub async fn install_skill(
     if let Some(ref registry) = state.skill_registry {
         let mut loader = beebotos_agents::skills::SkillLoader::new();
         loader.add_path(get_skills_base_dir());
-        match loader.load_skill(&metadata.id).await {
-            Ok(skill) => {
-                registry.register(skill, metadata.tags.first().map(|s| s.as_str()).unwrap_or("general"), metadata.tags.clone()).await;
-                info!("Registered skill {} to registry", metadata.id);
+
+        // 1. Try WASM form first, then fallback to Markdown form
+        let skill = match loader.load_skill(&metadata.id).await {
+            Ok(skill) => Some(skill),
+            Err(_) => {
+                let skill_dir = get_skills_base_dir().join(&metadata.id);
+                beebotos_agents::skills::builtin_loader::load_markdown_skill_from_dir(&skill_dir).await
             }
-            Err(e) => {
-                warn!("Failed to load skill into registry: {}", e);
-            }
+        };
+
+        if let Some(skill) = skill {
+            registry.register(skill, metadata.tags.first().map(|s| s.as_str()).unwrap_or("general"), metadata.tags.clone()).await;
+            info!("Registered skill {} to registry", metadata.id);
+        } else {
+            warn!("Failed to load skill {} into registry: not a valid WASM or Markdown skill", metadata.id);
         }
     }
     

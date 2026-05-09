@@ -362,6 +362,16 @@ impl GatewayAgentRuntime {
         // 🟢 P2 FIX: Attach skill registry to recovered agent
         if let Some(ref registry) = self.skill_registry {
             builder = builder.with_skill_registry(registry.clone());
+            // 🆕 SKILL MATCHING V2: Build and attach skill selector for recovered agents
+            if let Some(ref llm) = self.llm_interface {
+                let selector = Arc::new(crate::skill_matching::SkillSelector::new(
+                    llm.clone(),
+                    registry.clone(),
+                ));
+                builder = builder.with_skill_selector(selector);
+            }
+            let trace_store = Arc::new(crate::skill_matching::InMemoryTraceStore::new());
+            builder = builder.with_trace_store(trace_store);
         }
 
         // 🆕 Attach MCP manager to recovered agent
@@ -804,6 +814,17 @@ impl AgentRuntime for GatewayAgentRuntime {
             // 🟢 P2 FIX: Attach skill registry to agent
             if let Some(ref registry) = self.skill_registry {
                 builder = builder.with_skill_registry(registry.clone());
+                // 🆕 SKILL MATCHING V2: Build and attach skill selector
+                if let Some(ref llm) = self.llm_interface {
+                    let selector = Arc::new(crate::skill_matching::SkillSelector::new(
+                        llm.clone(),
+                        registry.clone(),
+                    ));
+                    builder = builder.with_skill_selector(selector);
+                }
+                // 🆕 SKILL MATCHING V2: Attach in-memory trace store
+                let trace_store = Arc::new(crate::skill_matching::InMemoryTraceStore::new());
+                builder = builder.with_trace_store(trace_store);
             }
 
             // 🆕 Attach MCP manager to agent
