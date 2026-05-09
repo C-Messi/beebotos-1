@@ -2582,3 +2582,522 @@ let query_preview = Self::truncate(query, 100);
 • 这意味着 skill_selector 中 context.insert("model", "kimi-flash") 现在真正生效
 
 &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+已完成针对 Skill Selection 持续超时的根本性修复。以下是本次变更的核心内容：
+
+---
+
+## 🔧 根本性修复：极简 Ranking Prompt
+
+### 核心问题
+之前的 ranking prompt 要求 LLM 输出**完整的嵌套 JSON**，包含 5 个候选的 4 维评分 + reason + selection_reasoning，导致：
+- 输出 token 数：500-800+
+- 生成时间：15-25s（API 波动时超时）
+
+### 修复方案
+
+**1. 输出格式从 JSON 改为 3 行纯文本**
+
+```
+selected_skill: city-weather
+needs_planning: no
+scores: city-weather:9.5,weather-assistant:7.0,game-ai-player:2.0
+```
+
+LLM 只需生成约 **30-50 个 token**，而不是 500-800。
+
+**2. Prompt 结构大幅精简**
+
+| 改动 | 之前 | 之后 |
+|------|------|------|
+| 候选描述格式 | 多行 markdown（when/desc/caps/examples） | 单行紧凑格式 |
+| when_to_use 截断 | 200 字符 | **150 字符** |
+| description 截断 | 100 字符 | **80 字符** |
+| 正/负示例 | 各保留 1 条 | **完全移除** |
+| 评分维度 | Relevance/Specificity/Capability/Negative | **仅保留 overall_score** |
+| 输出要求 | 完整 JSON + reasoning | **3 行纯文本** |
+
+**3. 参数调整**
+
+| 参数 | 之前 | 之后 |
+|------|------|------|
+| `max_candidates` | 5 | **3** |
+| `timeout` | 25s | **30s** |
+| `max_tokens` | 768 | **256** |
+
+---
+
+## 📋 预期效果
+
+- **输出 token 减少 ~90%**（从 500-800 降至 30-50）
+- **生成时间预计减少 ~80%**（从 15-25s 降至 3-8s）
+- **TTFB 不变**（由 API 负载决定），但整体请求应能在 10-15s 内完成
+- 30s timeout 作为 API 高峰期的安全兜底
+
+---
+
+## 🔥 其他已修复问题（本次迭代）
+
+| 问题 | 修复 |
+|------|------|
+| `kimi-flash` 404 导致 provider 被禁用 | 移除了 `model` hint |
+| 404 错误永久禁用 provider | `FailoverProvider` 新增 `is_transient_error()`，客户端错误不再影响健康状态 |
+| Knowledge skill ReAct 导致 Planning 180s 超时 | `KnowledgeSkillExecutor` 改为**单轮 LLM 调用**，不再执行工具循环 |
+
+---
+
+## ⚠️ 仍需注意的执行错误
+
+从日志中看到以下错误与 **Skill Selection 超时无关**，是后续执行阶段的问题：
+
+1. **天气脚本返回 exit code 1** — `city-weather` 脚本需要网络访问（Open-Meteo API），请确认已设置 `BEE_ALLOW_NETWORK=1`
+2. **BTC MCP ConnectError** — `mcp-alpaca` 服务连接失败，请检查 MCP server 是否运行
+3. **地铁查询匹配到 akshare_stock** — 这是 Skill Selection 超时后的 fallback 路径问题，应在 skill selection 修复后自然改善
+
+---
+
+## 📁 变更文件
+
+- `crates/agents/src/skill_matching/skill_selector.rs` — 极简 prompt + 参数调整
+- `crates/agents/src/llm/failover.rs` — 客户端错误不标记 provider 不健康
+- `crates/agents/src/skills/knowledge_executor.rs` — 移除 ReAct，改为单轮调用
+- `apps/gateway/src/services/llm_service.rs` — model_override 支持（预留）
+- `apps/gateway/src/services/agent_runtime_manager.rs` — model hint 传递（预留）
+
+#### gandy 2026-05-09 16:44
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+用户发来了新的生产日志。我需要仔细分析。
+关键发现
+1. Skill Selection 修复成功！
+深圳地铁查询：
+￼
+🤖 SkillSelector::rank_candidates() | prompt_len=1654 (~413 tokens) | candidates=3 | timeout=30s
+📥 SkillSelector::rank_candidates() | LLM latency=3.115262664s | response_len=105 | total_rank=3.115647204s
+🎯 SkillSelector::make_selection() | selected=None | confidence=0.20 | took=30.152µs
+🏁 SkillSelector::select() END | total=3.150690293s | selected=None | needs_planning=false
+Skill selection 现在只需要 3.1s！从之前的 25s 超时大幅改善。
+LLM 返回的 response_len=105，非常短，说明极简 prompt 生效了。
+但是 selected=None，因为召回的候选完全不相关（Calendar Assistant, Content Creator, Daily News）。LLM 正确地拒绝了这些不相关的 skill（最高分只有 2.0/10）。
+旅游规划查询：
+￼
+🤖 SkillSelector::rank_candidates() | prompt_len=1835 (~458 tokens) | candidates=3 | timeout=30s
+📥 SkillSelector::rank_candidates() | LLM latency=4.152780551s | response_len=150 | total_rank=4.153137493s
+🎯 SkillSelector::make_selection() | selected=Some("Travel Planner") | confidence=1.00 | took=132.6µs
+🏁 SkillSelector::select() END | total=4.188453475s | selected=Some("Travel Planner") | needs_planning=true
+Skill selection 成功选择了 Travel Planner，耗时仅 4.2s！
+2. 深圳地铁查询仍然超时（180s）
+地铁查询的 skill selection 成功后（其实是拒绝了所有候选），fallback 到 handle_llm_task_internal。然后：
+￼
+handle_llm_task: LLM raw response = 深圳地铁1号线（罗宝线）是深圳最早开通的地铁线路...
+LLM returned analysis text instead of tool_call. Retrying with forced tool prompt.
+Retry succeeded: LLM returned tool_call
+LLM requested skill execution: akshare_stock
+Executing code skill 'akshare-stock' via ReAct with tools
+...
+Executing tool 'process_exec' at step 1
+...
+❌ [BG] Agent execution failed: Agent error: Task execution timeout
+这里有几个问题：
+1. LLM 先返回了分析文本（关于深圳地铁的知识），而不是 tool_call
+2. 系统强制 retry，这次 LLM 返回了 akshare_stock tool call（完全不相关）
+3. akshare-stock 代码 skill 通过 ReAct 执行，耗时很长
+4. 最终 180s 超时
+3. 旅游规划查询 — 仍然很慢但最终成功
+旅游规划 task 最终 completed successfully in 177232ms（约 177s），非常接近 180s 超时。
+日志显示：
+• Planning 创建了 15 steps，截断到 5 steps
+• 每个 step 匹配到 Travel Planner knowledge skill
+• 但日志中仍然显示 "Executing knowledge skill 'Travel Planner' via ReAct with tools"
+• 然后有多次 LLM 调用，耗时 6s, 14s, 35s, 66s, 88s, 59s, 63s, 75s...
+等等！ 日志中仍然显示 "Executing knowledge skill 'Travel Planner' via ReAct with tools"。但我明明把 knowledge_executor.rs 改成了单轮 LLM 调用，不是 ReAct。
+这说明：
+1. 要么代码没有重新编译部署
+2. 要么有其他路径也在调用 ReAct
+3. 要么 agent_impl.rs 中的路由逻辑没有走 knowledge_executor.rs
+让我检查 agent_impl.rs 中 execute_registered_skill 的逻辑。可能 planning 步骤中的 skill 匹配走了不同的路径。
+从日志中可以看到：
+￼
+P2 PLANNING: matched skill 'Travel Planner' for step ..., executing...
+Executing knowledge skill 'Travel Planner' via ReAct with tools
+这说明 execute_registered_skill 确实调用了 knowledge skill，但日志消息仍然是旧的 "via ReAct with tools"。这可能就是之前代码中的日志消息。
+让我检查 agent_impl.rs 中的日志输出。
+
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+现在我有了完整的代码上下文。让我制定并实施三个修复：
+修复 1：Knowledge skill 跳过 planning
+在 Step 5 中，当 selection.selected_skill 非空时，检查该 skill 是否是 knowledge skill（source_path 不是目录）。如果是，直接走 handle_llm_task_v2，不进入 planning。
+修改位置：agent_impl.rs 第 1297-1306 行。
+￼
+// Step 5: Route to handler based on planning need
+let mut should_use_planning = intent_v2.needs_planning || selection.needs_planning;
+
+// 🆕 FIX: If selected skill is a knowledge skill (no scripts), skip planning
+// and execute it directly. Planning is only needed for multi-step code execution.
+if should_use_planning && selection.selected_skill.is_some() && selection.confidence >= 0.5 {
+    if let Some(ref registry) = self.skill_registry {
+        if let Some(skill) = registry.get(selection.selected_skill.as_ref().unwrap()).await {
+            let source = &skill.skill.source_path;
+            let is_knowledge = !source.as_os_str().is_empty() && !source.is_dir();
+            if is_knowledge {
+                info!("Selected skill '{}' is a knowledge skill (no scripts). Skipping planning and executing directly.", skill.skill.id);
+                should_use_planning = false;
+            }
+        }
+    }
+}
+
+if should_use_planning {
+    if self.is_planning_ready() {
+        self.execute_with_planning(task).await
+    } else {
+        self.handle_llm_task_v2(&task, &intent_v2, &selection).await
+    }
+} else {
+    self.handle_llm_task_v2(&task, &intent_v2, &selection).await
+}
+修复 2：Tool injection 移除 CJK 单字匹配
+在 handle_llm_task_internal 中，移除逐字拆分 CJK 字符的逻辑。
+修改位置：agent_impl.rs 第 2008-2017 行。
+移除：
+￼
+// For CJK text, also add individual CJK characters as keywords
+if part.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
+    for ch in part.chars() {
+        if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+            let ch_str = ch.to_string();
+            if !stopwords.contains(ch_str.as_str()) && !keywords.contains(&ch_str) {
+                keywords.push(ch_str);
+            }
+        }
+    }
+}
+修复 3：Retry 逻辑改进
+在 handle_llm_task_internal 中，只有当 gateway 已经明确匹配了 skill（skill_hint 存在）但 LLM 没有调用时，才 retry。
+修改位置：agent_impl.rs 第 2306 行附近。
+将：
+￼
+let is_native_tools = extra_params.contains_key("tools_json");
+if is_native_tools && !response.trim().starts_with("SKILL:") && response.trim().len() > 200 {
+改为：
+￼
+let is_native_tools = extra_params.contains_key("tools_json");
+// 🆕 FIX: Only retry if gateway has explicitly suggested a skill but LLM didn't call it.
+// If no skill_hint exists, the LLM returning a text answer is correct behavior.
+let has_skill_hint = skill_hint.is_some();
+if is_native_tools && has_skill_hint && !response.trim().starts_with("SKILL:") && response.trim().len() > 200 {
+但这里有一个问题：skill_hint 是在函数开头从 task.input 中提取的。对于 handle_llm_task_internal，skill_hint 已经存在了。让我确认。
+看代码第 1562-1572 行：
+￼
+let (message_text, skill_hint) = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+    let msg = json.get("message")...
+    let hint = json.get("skill_hint_v2").cloned().or_else(|| json.get("skill_hint").cloned());
+    (msg, hint)
+} else {
+    (task.input.clone(), None)
+};
+是的，skill_hint 在整个函数中可用。
+不过，当 skill_hint 存在时，上面的代码（第 1694-1788 行）已经尝试了直接执行 skill。如果直接执行成功了，就不会走到 LLM 调用部分。如果直接执行失败了（比如参数问题），才会 fallback 到 LLM。
+所以如果 LLM 被调用时 skill_hint 仍然存在，说明 direct execution 失败了。这时候 retry 让 LLM 调用 skill 是有意义的。
+但问题是，对于深圳地铁查询，skill_hint 是 None（skill selection 返回了 None）。所以这个修改确实能防止深圳地铁查询的强制 retry。
+让我再检查一下：在 handle_llm_task_internal 中，当 skill_hint 存在时，系统已经尝试了直接执行。如果失败了，它会继续走到 LLM 调用部分。这时候 skill_hint 仍然会在 JSON 中。然后 LLM 被调用，可能返回文本回答而不是 SKILL:。这时候 retry 是合理的。
+但是！对于 Travel Planner 这样的 knowledge skill，直接执行应该会成功（因为我们已经修复了 knowledge executor）。所以不应该走到 LLM 调用部分。
+让我再看看 direct execution 失败的条件：
+￼
+Err(e) => {
+    let err_str = e.to_string();
+    if err_str.contains("Missing required parameter")
+        || err_str.contains("argument validation failed")
+        || err_str.contains("Unknown parameter")
+    {
+        warn!("Direct skill execution for '{}' failed due to args issue, falling back to LLM: {}", skill_id, e);
+        // Continue to LLM path below instead of returning error
+    } else {
+        warn!("Direct skill execution for '{}' failed: {}", skill_id, e);
+        return Ok((format!("执行 skill '{}' 时出错: {}", skill_id, e), vec![]));
+    }
+}
+只有特定错误才会 fallback 到 LLM。其他错误直接返回。
+好的，那么修复 3 是安全的。
+让我现在开始实现这三个修复。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+三个修复已完成并成功编译通过（release build 耗时 10m 38s）。以下是变更总结：
+
+### 修复 1：Knowledge skill 跳过 Planning
+**文件**：`crates/agents/src/agent_impl.rs`  
+当 Skill Selector 选中了一个 knowledge skill（`source_path` 不是目录，即无 scripts）时，直接执行该 skill，不再进入 `execute_with_planning`。  
+**效果**：旅游规划等查询选中 `Travel Planner` 后，直接单次调用 knowledge skill，避免被拆成 5 个 steps 浪费 150s+。
+
+### 修复 2：移除 CJK 单字匹配
+**文件**：`crates/agents/src/agent_impl.rs`  
+在 `handle_llm_task_internal` 的 tool injection 关键词提取中，移除了逐字拆分 CJK 字符的逻辑。  
+**效果**："深圳地铁1号线情况" 不再被拆成 `["况", "号", "地", ...]`，避免匹配到完全不相关的 `akshare_stock` 等工具。
+
+### 修复 3：Retry 逻辑加保护
+**文件**：`crates/agents/src/agent_impl.rs`  
+强制 tool retry 的条件从 "有 tools 且回答不是 SKILL: 且长度 > 200" 收紧为： additionally 要求 `skill_hint` 存在。  
+**效果**：当 gateway/skill selector 没有找到合适 skill 时，LLM 返回文本知识回答是正确行为，不会再被强制 retry 去硬凑一个不相关的 tool call。
+
+### 编译状态
+```
+-rwxr-xr-x 2 root root 39416784 May  9 09:59 target/release/beebotos-gateway
+```
+Release 二进制已生成，可直接部署测试。
+
+#### gandy 2026-05-09 18:08
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+### 问答1：“在互联网上搜索一下，中国人口多少”，输出javascript搜索操作命令，实际需要输出人口多少的查询结果；
+问答2：“根据当前行情，帮我开一单BTC市场（单笔金额不要超过100USD），然后告诉我持仓情况”，输出要下单“确认”，实际需要react,第一步输出买卖选择，数量选择或金额选择，第二步把选择的数据，显示出来，由用户“确认”或“不同意”；
+ 分析原因，为什么把这个问题，当作单步知识类planning了？
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+用户提出了两个问题：
+1. 搜索中国人口：返回了 javascript 代码（web_fetch），而不是实际的搜索结果。
+2. BTC 下单：流程不对，应该分步交互（选择数量/金额 → 确认），但实际走了一次性 planning + approval gate。
+用户问的是：为什么这些问题被当作单步知识类 planning 了？
+让我分析日志：
+搜索中国人口
+￼
+V2 Intent: direct_answer=false, needs_skill=true, needs_planning=false
+SkillSelector: selected=None (best candidate 'dongcai' scored 2.0/10)
+handle_llm_task: injected 4 tools (keywords包含 search, web_search, web, 查找)
+LLM returned: SKILL:zh_search_pro|{"queries": [...]}
+Executing knowledge skill 'zh-search-pro' via ReAct with tools
+Task completed in 12107ms
+Reply: ```javascript\nweb_fetch({\"url\": \"https://www.baidu.com/s?wd=中国人口 2024 最新数据\"})...
+问题：
+1. zh_search_pro 被识别为 knowledge skill（无 scripts），走了单轮 LLM 调用。
+2. 但 zh_search_pro 的 SKILL.md 可能包含的是使用说明，告诉 LLM 如何调用 web_fetch。单轮调用时，LLM 输出了 web_fetch(...) 代码，但没有真正执行它。
+3. 之前 knowledge_executor.rs 被改成了单轮 LLM 调用，不再走 ReAct 循环执行工具。所以 LLM 只是"描述"了要做什么，而不是真正去做。
+等等，之前的修改是把 knowledge skill 从 ReAct 改成单轮 LLM。但对于 zh_search_pro 这样的搜索 skill，它的目的是执行搜索操作，而不仅仅是基于 SKILL.md 回答。这个 skill 的 SKILL.md 可能包含了 web_fetch 等工具的使用说明。在原来的 ReAct 模式下，LLM 会逐步执行这些工具。现在改成单轮后，LLM 只是输出了工具调用代码，但没有执行环境。
+实际上，日志显示：
+Executing knowledge skill 'zh-search-pro' via ReAct with tools
+等等，日志消息仍然是 "via ReAct with tools"？不，看日志：
+Executing knowledge skill 'zh-search-pro' via ReAct with tools
+但代码里我已经把 KnowledgeSkillExecutor 改成了单轮 LLM。那为什么日志还是显示 "via ReAct with tools"？
+哦，看 agent_impl.rs 第 2969 行：
+￼
+info!("Executing knowledge skill '{}' via ReAct with tools", registered_skill.skill.name);
+这是日志消息文本，实际上 KnowledgeSkillExecutor::execute() 已经被改成了单轮 LLM。所以日志文本是误导性的，但行为确实是单轮。
+所以问题是：单轮 knowledge skill 执行对于需要调用工具的 skill（如搜索）不适用。LLM 只是输出了工具调用代码，但没有执行环境来运行它。
+BTC 下单
+￼
+V2 Intent: needs_skill=true, needs_planning=true
+SkillSelector: selected=None (best candidate scored 0)
+Using planning for task...
+Created plan with 1 steps
+P2 PLANNING: matched skill 'place_crypto_order'
+Approval required but not granted
+这里 skill selection 没有找到相关 skill（selected=None），但 needs_planning=true（因为意图分析器认为需要规划）。Planning 创建了 1 step，匹配到了 place_crypto_order。
+然后因为 place_crypto_order 是 MCP skill，在执行时触发了 approval gate，因为没有自动批准规则。
+用户确认后：
+￼
+Plan C: User confirmed pending approval
+...
+Invalid agent configuration: MCP tool argument validation failed: Missing required parameter
+确认后执行失败了，因为缺少必要参数。
+根因分析
+用户问的是：为什么这些问题被当作"单步知识类 planning"？
+让我澄清几个概念：
+1. 搜索中国人口：这没有进入 planning。Skill selection 没找到 skill，fallback 到 handle_llm_task_internal，LLM 调用了 zh_search_pro。zh_search_pro 是 knowledge skill，单轮执行。问题是单轮执行无法实际运行搜索工具。
+2. BTC 下单：这进入了 planning，因为 intent_v2.needs_planning=true。但 planning 只创建了 1 step。然后 skill selection 在 planning step 中匹配到了 place_crypto_order。
+用户的问题可能在于：
+• 对于搜索：期望能执行搜索并返回结果，而不是输出代码
+• 对于 BTC：期望分步交互（选择参数 → 确认），而不是一次性 approval
+为什么搜索返回了代码而不是结果？
+因为 zh_search_pro 的 SKILL.md 可能包含 web_search/web_fetch 等工具的使用说明。在原来的 ReAct 模式下，LLM 会：
+1. Thought: 用户要搜索中国人口
+2. Action: 调用 web_search
+3. Observation: 搜索结果
+4. Thought: 整理答案
+5. Final Answer: 中国人口约 14 亿
+但现在改成了单轮 LLM 调用，LLM 只是读了 SKILL.md，然后输出了一次性回答。由于 SKILL.md 教它使用 web_fetch，它就输出了 web_fetch(...) 代码。但没有 ReAct executor 来实际执行这个代码。
+所以问题出在：我把所有 knowledge skill 都改成了单轮，但某些 knowledge skill 实际上是需要工具执行的。
+为什么 BTC 走了一次性 approval？
+因为 planning 匹配到了 place_crypto_order 这个 MCP skill。MCP skill 在 execute_registered_skill 中有专门的处理逻辑：直接通过 MCP client 调用。但参数是从 input 解析的，而用户的自然语言输入没有被正确解析成结构化参数。
+当用户说"帮我开一单BTC市场（单笔金额不要超过100USD）"时，系统没有提取出 symbol=BTC、amount=100、side=buy 等参数，导致 MCP 调用缺少参数。
+然后用户回复"BTC，100美元，确认"时，虽然 skill selector 选中了 place_crypto_order（confidence=0.70），但直接执行时仍然缺少参数（可能因为没有参数提取逻辑）。
+深层问题
+Knowledge skill 分类过于粗糙。我把所有无 scripts 的 skill 都当作纯知识 skill（单轮 LLM），但实际上：
+1. 有些 knowledge skill 是纯知识（如 Travel Planner），单轮就够了
+2. 有些 knowledge skill 是"工具使用指南"（如 zh_search_pro），需要 ReAct 循环来执行工具
+修复思路：
+1. 对于 knowledge skill，如果 SKILL.md 中提到了工具（如 web_fetch, bash_shell 等），仍然走 ReAct 执行
+2. 或者，更简单的方法：检查 skill 的 manifest 中是否定义了工具/函数。如果定义了，说明它是需要执行的，走 ReAct；如果没有定义工具，走单轮。
+让我看看 zh_search_pro 的 manifest 和 SKILL.md。
+实际上，zh_search_pro 是一个 knowledge skill（没有 scripts），但它的 SKILL.md中包含了工具使用说明。这样的 skill 应该走 ReAct。
+判断逻辑：在 execute_registered_skill 中：
+• 如果有 scripts → CodeSkillExecutor（ReAct）
+• 如果没有 scripts → 检查 SKILL.md 是否包含工具引用
+• 如果有工具引用 → KnowledgeSkillExecutor ReAct（恢复）
+• 如果没有 → KnowledgeSkillExecutor 单轮
+但这会让 KnowledgeSkillExecutor 又变回两种模式。
+更简单的办法：恢复 KnowledgeSkillExecutor 的 ReAct 能力，但加一个短路逻辑：如果 ReAct 的第一步就是 "Final Answer"（不需要工具），就直接返回。或者限制 ReAct 的最大步数为 3 步。
+等等，之前的问题是 ReAct 导致 Planning 超时。那是因为 knowledge skill 的 ReAct 在 Planning step 中被调用，每个 step 可能花 30-60s。如果 Planning 有 5 steps，就会超时。
+但如果 knowledge skill 本身就在 Planning step 中被执行，那它不应该再启动自己的 ReAct 循环。
+真正的修复：
+1. 对于 handle_llm_task_internal 中的 knowledge skill 调用（直接调用，不走 planning），恢复 ReAct 执行
+2. 对于 Planning step 中的 knowledge skill 调用，保持单轮（因为 planning 已经拆分了步骤）
+这太复杂了。让我重新思考。
+实际上，用户的核心问题是：
+1. 搜索 skill 应该返回搜索结果，而不是代码
+2. BTC 下单应该分步交互
+对于问题 1，最简单的修复是：zh_search_pro 这样的 skill 不应该被标记为 knowledge skill。它实际上是一个需要工具执行的 skill。如果它的目录下有工具定义或者它的 manifest 表明它需要外部工具，就应该走 ReAct。
+但当前系统通过 "是否有 scripts" 来区分 code skill 和 knowledge skill。zh_search_pro 没有 scripts，所以被当作 knowledge skill。
+更根本的修复：在 execute_registered_skill 中，判断 skill 是否需要 ReAct 的条件不应该只是 has_scripts，还应该检查该 skill 的 manifest 是否包含 functions定义，或者 SKILL.md 中是否包含工具引用。
+但 zh_search_pro 是一个自定义 skill，它的 manifest 中可能有 functions 定义。让我检查一下。
+等等，从日志中：
+LLM requested skill execution: zh_search_pro (params: Some({...}))
+这说明 zh_search_pro 在 skill registry 中是有 manifest 定义的（有 functions），否则 LLM 不会以 SKILL:zh_search_pro|params 的形式调用它。
+但 execute_registered_skill 中，对于 zh_search_pro：
+￼
+let has_scripts = if source.is_dir() {
+    self.has_scripts_in_dir(source).await
+} else {
+    false
+};
+
+let result = if has_scripts {
+    // CodeSkillExecutor (ReAct)
+} else {
+    // KnowledgeSkillExecutor (单轮)
+    info!("Executing knowledge skill '{}' via ReAct with tools", ...);
+    let executor = skills::KnowledgeSkillExecutor::new(llm.clone());
+    executor.execute(source, &enriched_input).await
+};
+所以 zh_search_pro 被当作 knowledge skill 单轮执行了。
+修复方案：对于通过 SKILL: 格式被调用的 skill，如果它有 functions 定义，说明它需要执行操作，不应该走单轮知识回答。
+或者，更精确地：在 handle_llm_task_internal 中，当 LLM 返回 SKILL:xxx时，如果该 skill 是 MCP skill 或有明确 functions，直接执行。如果是纯 knowledge skill，单轮执行。
+但 zh_search_pro 不是 MCP skill，它只是一个普通的 knowledge skill。
+让我看看 zh_search_pro 的目录结构。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Release build 已经在后台运行了。让我等待它完成。由于之前的经验，LTO 链接可能需要 10-15 分钟。
+但用户的问题还没有得到完整回答。用户问了：
+1. 为什么搜索返回了代码而不是结果？
+2. 为什么 BTC 下单被当作单步 knowledge planning？
+我已经解释了搜索问题的原因（knowledge skill 单轮执行无法调用工具），并实施了修复（添加 WebFetchTool + 检测工具引用的受限 ReAct）。
+对于 BTC 下单问题，我还需要解释。让我在等待编译的同时，整理对 BTC 问题的分析。
+BTC 下单问题分析
+从日志：
+￼
+V2 Intent: direct_answer=false, needs_skill=true, needs_planning=true
+SkillSelector: selected=None
+Using planning for task: ...
+Created plan with 1 steps
+P2 PLANNING: matched skill 'place_crypto_order'
+Approval required but not granted
+为什么被当作 planning？
+• 意图分析器认为 needs_planning=true，可能是因为查询包含多个动作（"开一单...然后告诉我持仓情况"）
+• Skill selector 没找到 skill（selected=None）
+• 系统 fallback 到 planning
+• Planning 只创建了 1 step（因为查询本质上是一个操作：下单）
+• Step 匹配到了 place_crypto_order
+然后为什么直接触发了 approval gate？
+• place_crypto_order 是 MCP skill，在 execute_registered_skill 中直接通过 MCP client 调用
+• 但参数是从 input 解析的，用户的自然语言没有被转换为结构化参数
+• 参数为空 {}
+• MCP tool argument validation 失败，但 approval gate 先拦截了（因为 place_crypto_order 没有 auto-approval 规则）
+用户期望的流程：
+1. 系统识别 BTC 下单意图
+2. 系统询问/展示订单参数（品种、数量/金额、方向）
+3. 用户确认
+4. 执行下单
+当前系统的问题是：
+1. Planning 只创建了 1 step，没有分解成交互步骤
+2. 缺少从自然语言到结构化参数的提取
+3. MCP skill 执行时直接报错，没有给用户填参数的机会
+修复方案：
+1. 当 MCP skill 缺少参数时，不直接报错，而是返回一个交互式表单
+2. 或者，在 planning step 执行前，用 LLM 从自然语言中提取参数
+但这个修复比较复杂，涉及 MCP skill 的参数提取和交互式设计。
+让我先看看当前编译的状态。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+编译已成功完成（release build，16m 48s）。以下是两个问题的根因分析和已实施的修复：
+
+---
+
+## 问题 1：搜索中国人口返回了代码
+
+### 根因
+
+`zh-search-pro` 的 SKILL.md 中包含 `web_fetch` 工具的使用说明（用于抓取百度搜索结果）。但之前的优化把 **所有** knowledge skill 都改成了**单轮 LLM 调用**，不再执行工具。
+
+单轮模式下 LLM 的行为：
+1. 读了 SKILL.md，知道应该调用 `web_fetch`
+2. 但因为没有 ReAct 执行环境，LLM 只是**输出了 `web_fetch(...)` 代码作为文本回答**
+3. 用户看到的不是搜索结果，而是一段 JavaScript 代码
+
+### 修复（已编译）
+
+**① 新增 `WebFetchTool`**（`tool_set.rs`）：
+- 使用 `reqwest` 发起 HTTP GET 请求
+- 参数：`url`, `max_length`（默认 8000 字符）
+- 已加入 `default_tool_set`
+
+**② `KnowledgeSkillExecutor` 智能判断**（`knowledge_executor.rs`）：
+- 读取 SKILL.md 后，检测是否包含工具引用（`web_fetch`, `bash_shell`, `process_exec` 等）
+- **纯知识 skill**（如 Travel Planner）：保持单轮 LLM（快）
+- **工具型 skill**（如 `zh-search-pro`）：自动启用**受限 ReAct**，`max_steps: 3`，实际执行工具
+
+---
+
+## 问题 2：BTC 下单走了一次性 Approval
+
+### 根因（不是 knowledge planning）
+
+BTC 下单**没有**被当作 knowledge skill。日志显示：
+
+```
+V2 Intent: needs_planning=true, needs_skill=true
+SkillSelector: selected=None
+Created plan with 1 steps
+P2 PLANNING: matched skill 'place_crypto_order'
+Approval required but not granted
+```
+
+实际路径是：
+1. **Intent 分析器**认为查询包含两个动作（"开一单" + "告诉我持仓"），所以 `needs_planning=true`
+2. **Skill Selector** 没有找到高置信度 skill（`selected=None`）
+3. 系统进入 **Planning**，但只创建了 **1 step**（因为本质上只有一个核心操作：下单）
+4. Planning step 匹配到了 `place_crypto_order`（**MCP skill**，不是 knowledge skill）
+5. `execute_registered_skill` 直接通过 MCP client 调用，但**用户的自然语言没有被提取成结构化参数**（`symbol`, `amount`, `side`）
+6. 参数为空 `{}`，触发 Approval Gate → 用户确认 → 参数仍然为空 → MCP validation 失败
+
+### 为什么没有分步交互？
+
+当前系统缺少**从自然语言到 MCP 工具参数的自动提取**能力。当用户说"帮我开一单BTC市场（单笔金额不要超过100USD）"时，系统没有：
+- 用 LLM 提取 `symbol=BTC`, `notional=100`, `side=buy`
+- 而是直接把整句话传给 MCP，导致参数缺失
+
+### 需要额外修复
+
+如果希望 BTC 下单有"选择参数 → 确认"的交互流程，需要：
+1. **MCP skill 参数提取**：在 `execute_registered_skill` 的 MCP 分支中，当参数缺失时，用 LLM 从自然语言中提取
+2. 或 **交互式参数补全**：返回一个表单让用户填写缺失参数，而不是直接报错
+
+这两个修复目前**未实施**，因为涉及 MCP 参数提取的交互设计，需要确认具体需求。
+
+---
+
+## 当前编译状态
+
+```
+-rwxr-xr-x 2 root root 39430480 May  9 11:03 target/release/beebotos-gateway
+```
+
+Release 二进制已生成，可直接部署。搜索问题修复后，`zh-search-pro` 等工具型 skill 会实际执行 `web_fetch` 并返回抓取到的网页内容。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+### MCP client的list_tools返回的tool schema结构；
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+
+
+

@@ -1295,7 +1295,25 @@ impl Agent {
             }
 
             // Step 5: Route to handler based on planning need
-            if intent_v2.needs_planning || selection.needs_planning {
+            let mut should_use_planning = intent_v2.needs_planning || selection.needs_planning;
+
+            // 🆕 FIX: If selected skill is a knowledge skill (no executable scripts),
+            // skip planning and execute it directly. Planning is only useful for
+            // multi-step code execution or skill composition.
+            if should_use_planning && selection.selected_skill.is_some() && selection.confidence >= 0.5 {
+                if let Some(ref registry) = self.skill_registry {
+                    if let Some(skill) = registry.get(selection.selected_skill.as_ref().unwrap()).await {
+                        let source = &skill.skill.source_path;
+                        let is_knowledge = !source.as_os_str().is_empty() && !source.is_dir();
+                        if is_knowledge {
+                            info!("Selected skill '{}' is a knowledge skill (no scripts). Skipping planning and executing directly.", skill.skill.id);
+                            should_use_planning = false;
+                        }
+                    }
+                }
+            }
+
+            if should_use_planning {
                 if self.is_planning_ready() {
                     self.execute_with_planning(task).await
                 } else {
@@ -2005,17 +2023,6 @@ impl Agent {
                     if !stopwords.contains(part) {
                         keywords.push(part.to_string());
                     }
-                    // For CJK text, also add individual CJK characters as keywords
-                    if part.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
-                        for ch in part.chars() {
-                            if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
-                                let ch_str = ch.to_string();
-                                if !stopwords.contains(ch_str.as_str()) && !keywords.contains(&ch_str) {
-                                    keywords.push(ch_str);
-                                }
-                            }
-                        }
-                    }
                 }
                 keywords.sort();
                 keywords.dedup();
@@ -2303,8 +2310,11 @@ Never ask the user for missing information.".to_string(),
         // instead of a tool call, retry once with a stripped-down prompt to force
         // tool invocation.
         let is_native_tools = extra_params.contains_key("tools_json");
-        if is_native_tools && !response.trim().starts_with("SKILL:") && response.trim().len() > 200 {
-            warn!("LLM returned analysis text instead of tool_call. Retrying with forced tool prompt.");
+        // 🆕 FIX: Only retry if gateway has explicitly suggested a skill but LLM didn't call it.
+        // If no skill_hint exists, the LLM returning a text answer is correct behavior.
+        let has_skill_hint = skill_hint.is_some();
+        if is_native_tools && has_skill_hint && !response.trim().starts_with("SKILL:") && response.trim().len() > 200 {
+            warn!("LLM returned analysis text instead of tool_call (skill_hint present). Retrying with forced tool prompt.");
             let retry_messages = vec![
                 communication::Message::new(
                     uuid::Uuid::new_v4(),

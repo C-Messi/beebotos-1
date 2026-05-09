@@ -137,6 +137,23 @@ impl FailoverProvider {
         }
     }
 
+    /// 🆕 FIX: Determine if an error is transient (provider-side) or non-transient (client-side).
+    /// Transient errors: network issues, timeouts, server errors (5xx), rate limits (429).
+    /// Non-transient errors: auth failures (401), not found (404), bad requests (400), etc.
+    fn is_transient_error(error: &LLMError) -> bool {
+        match error {
+            LLMError::Network(_) | LLMError::Timeout => true,
+            LLMError::RateLimit { .. } => true,
+            LLMError::Api { code, .. } => matches!(code, 429 | 500..=599),
+            LLMError::Auth(_) => false,
+            LLMError::InvalidRequest(_) => false,
+            LLMError::ContextLengthExceeded(_) => false,
+            LLMError::Provider(_) => true,
+            LLMError::Serialization(_) => false,
+            _ => true, // Default to transient for unknown errors
+        }
+    }
+
     /// Try to complete request with failover
     async fn try_complete(&self, request: LLMRequest) -> LLMResult<LLMResponse> {
         let provider_count = self.providers.read().await.len();
@@ -168,9 +185,17 @@ impl FailoverProvider {
                     return Ok(response);
                 }
                 Ok(Err(e)) => {
-                    // Provider error - mark failure and continue to next
-                    warn!("Provider {} failed: {}", provider_name, e);
-                    self.update_provider_health(index, false).await;
+                    // 🆕 FIX: Only mark provider unhealthy for transient errors.
+                    // Non-transient client errors (4xx like 404 model not found, 401 auth)
+                    // should NOT penalize the provider's health score.
+                    if Self::is_transient_error(&e) {
+                        warn!("Provider {} failed (transient): {}", provider_name, e);
+                        self.update_provider_health(index, false).await;
+                    } else {
+                        warn!("Provider {} returned client error (non-transient): {}", provider_name, e);
+                        // Do NOT mark unhealthy for client errors — provider is fine,
+                        // but the request was invalid (e.g. wrong model name).
+                    }
                 }
                 Err(_) => {
                     // Timeout - mark failure and continue

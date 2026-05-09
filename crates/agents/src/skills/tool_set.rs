@@ -432,6 +432,65 @@ mod tests {
     }
 }
 
+/// Fetch a web page via HTTP GET
+pub struct WebFetchTool;
+
+#[async_trait::async_trait]
+impl SkillTool for WebFetchTool {
+    fn name(&self) -> &str {
+        "web_fetch"
+    }
+
+    fn description(&self) -> &str {
+        "Fetch the content of a web page via HTTP GET. \
+Parameters: url (string), max_length (integer, optional, default 8000)"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "Full URL to fetch" },
+                "max_length": { "type": "integer", "description": "Maximum characters to return", "default": 8000 }
+            },
+            "required": ["url"]
+        })
+    }
+
+    async fn execute(&self, params: &Value) -> Result<String, String> {
+        let url = params["url"].as_str().ok_or("Missing 'url' parameter")?;
+        let max_length = params["max_length"].as_u64().unwrap_or(8000) as usize;
+
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => return Err(format!("Failed to build HTTP client: {}", e)),
+        };
+
+        let response = match client.get(url).send().await {
+            Ok(r) => r,
+            Err(e) => return Err(format!("Failed to fetch '{}': {}", url, e)),
+        };
+
+        let status = response.status();
+        let body = match response.text().await {
+            Ok(t) => t,
+            Err(e) => return Err(format!("Failed to read response body from '{}': {}", url, e)),
+        };
+
+        let mut result = format!("Status: {}\nURL: {}\n\n", status, url);
+        if body.len() > max_length {
+            result.push_str(&body[..max_length]);
+            result.push_str(&format!("\n\n...[truncated, total length: {}]", body.len()));
+        } else {
+            result.push_str(&body);
+        }
+        Ok(result)
+    }
+}
+
 /// Build the default tool set for skill execution
 pub fn default_tool_set(skill_dir: &Path) -> HashMap<String, Box<dyn SkillTool>> {
     let dirs = vec![skill_dir.to_path_buf()];
@@ -447,6 +506,7 @@ pub fn default_tool_set(skill_dir: &Path) -> HashMap<String, Box<dyn SkillTool>>
         "bash_shell".to_string(),
         Box::new(BashShellTool::new(dirs)),
     );
+    tools.insert("web_fetch".to_string(), Box::new(WebFetchTool));
     tools
 }
 

@@ -67,12 +67,12 @@ impl SkillSelector {
         Self {
             llm,
             registry,
-            // 🆕 FIX: Reduced from 8 to 5 candidates — fewer candidates = faster LLM ranking.
-            max_candidates: 5,
-            // 🆕 FIX: Increased to 25s — skill selection needs time for LLM ranking
+            // 🆕 FIX: Reduced from 5 to 3 candidates — fewer candidates = faster LLM ranking.
+            max_candidates: 3,
+            // 🆕 FIX: Increased to 30s — skill selection needs time for LLM ranking
             // of complex queries (e.g. weather, multi-step tasks).
-            // Note: Kimi k2.6 can take 15-20s for 800-token JSON output at peak load.
-            timeout: Duration::from_secs(25),
+            // Note: Kimi k2.6 can take 15-25s for ranking output at peak load.
+            timeout: Duration::from_secs(30),
             cache: RwLock::new(HashMap::new()),
             cache_ttl: Duration::from_secs(300), // 5 minutes
         }
@@ -232,13 +232,10 @@ impl SkillSelector {
             prompt,
         )];
 
-        // 🆕 FIX: Limit max_tokens to 768 — ranking output for ~5 candidates is ~400-600 tokens.
+        // 🆕 FIX: Limit max_tokens to 256 — ranking output for ~3 candidates is ~50-100 tokens.
         // This prevents Kimi k2.6 from generating excessive reasoning and reduces latency.
         let mut context = std::collections::HashMap::new();
-        context.insert("max_tokens".to_string(), "768".to_string());
-        // 🆕 FIX: Request a faster/cheaper model for this stateless ranking task if available.
-        // Gateway can override this based on its own config; this is just a hint.
-        context.insert("model".to_string(), "kimi-flash".to_string());
+        context.insert("max_tokens".to_string(), "256".to_string());
 
         let llm_start = Instant::now();
         let response = tokio::time::timeout(
@@ -342,6 +339,8 @@ impl SkillSelector {
 
     /// Build the ranking prompt — pure semantic evaluation, zero keyword rules
     /// 🆕 FIX: Truncate all fields to keep prompt concise and reduce LLM latency.
+    /// Build the ranking prompt — pure semantic evaluation, zero keyword rules
+    /// 🆕 FIX: Ultra-lightweight output format to minimize LLM generation latency.
     fn build_ranking_prompt(
         &self,
         query: &str,
@@ -352,8 +351,6 @@ impl SkillSelector {
 
         for (i, skill) in candidates.iter().enumerate() {
             let manifest = &skill.skill.manifest;
-
-            // L1 disclosure: name, when_to_use, description (first sentence), capabilities (top 3)
             let caps = manifest
                 .capabilities
                 .iter()
@@ -362,145 +359,29 @@ impl SkillSelector {
                 .collect::<Vec<_>>()
                 .join(", ");
 
-            // 🆕 FIX: Only take 1 example each to reduce prompt size
-            let pos_examples = manifest
-                .activation_examples
-                .iter()
-                .take(1)
-                .cloned()
-                .collect::<Vec<_>>();
-            let pos_str = if pos_examples.is_empty() {
-                "(none)".to_string()
-            } else {
-                pos_examples.join("
-  - ")
-            };
-
-            let neg_examples = manifest
-                .activation_negative_examples
-                .iter()
-                .take(1)
-                .cloned()
-                .collect::<Vec<_>>();
-            let neg_str = if neg_examples.is_empty() {
-                "(none)".to_string()
-            } else {
-                neg_examples.join("
-  - ")
-            };
-
-            // 🆕 FIX: Truncate when_to_use and description to avoid prompt bloat
             let when_to_use = if manifest.when_to_use.is_empty() {
                 manifest.description.clone()
             } else {
                 manifest.when_to_use.clone()
             };
-            let when_truncated = Self::truncate(&when_to_use, 200);
-            let desc_truncated = Self::truncate(&manifest.description, 100);
+            let when_truncated = Self::truncate(&when_to_use, 150);
+            let desc_truncated = Self::truncate(&manifest.description, 80);
 
             candidate_sections.push_str(&format!(
-                "### [{index}] {name} (id: {id})
-\
-                 - When to use: {when}
-\
-                 - Description: {desc}
-\
-                 - Capabilities: {caps}
-\
-                 - Examples of CORRECT usage:
-   - {pos}
-\
-                 - Examples of INCORRECT usage (do NOT match these):
-   - {neg}
-
-",
+                "[{index}] {name} (id:{id}) | {when} | {desc} | [{caps}]\n",
                 index = i,
                 name = manifest.name,
                 id = skill.skill.id,
                 when = when_truncated,
                 desc = desc_truncated,
                 caps = caps,
-                pos = pos_str,
-                neg = neg_str,
             ));
         }
 
-        // 🆕 FIX: Truncate full query to avoid prompt bloat; query_summary is already concise.
         let query_truncated = Self::truncate(query, 300);
 
         format!(
-            "You are a Skill Matching Judge. Evaluate which skill, if any, best matches the query.
-
-\
-            ## User Query (truncated)
-{}
-
-\
-            ## Query Summary
-{}
-
-\
-            ## Candidate Skills
-{}\
-            ## Evaluation Criteria (score 0-10 each)
-\
-            1. **Relevance**: Alignment with query
-\
-            2. **Specificity**: Is this the MOST specific skill?
-\
-            3. **Capability Match**: Does it have needed capabilities?
-\
-            4. **Negative Example Check**: If query resembles a negative example, overall <= 3.
-
-\
-            ## Rules
-\
-            - Select only if overall >= 7.0
-\
-            - If multiple >= 7.0, pick highest SPECIFICITY
-\
-            - If none >= 7.0, selected_skill must be null
-\
-            - NEVER select just because it's the \"closest\" match
-
-\
-            ## Output Format
-\
-            ```json
-\
-            {{
-\
-              \"selected_skill\": \"skill_id_or_null\",
-\
-              \"needs_planning\": true/false,
-\
-              \"confidence\": 0.0-1.0,
-\
-              \"scores\": [
-\
-                {{
-\
-                  \"skill_id\": \"...\",
-\
-                  \"relevance\": 0-10,
-\
-                  \"specificity\": 0-10,
-\
-                  \"capability_match\": 0-10,
-\
-                  \"overall_score\": 0-10,
-\
-                  \"reason\": \"...\"
-\
-                }}
-\
-              ],
-\
-              \"selection_reasoning\": \"Detailed explanation...\"
-\
-            }}
-\
-            ```",
+            "You are a Skill Matching Judge. Pick the ONE skill that best matches the user query, or NONE if no skill fits.\n\n            Query: {}\n            Summary: {}\n\n            Candidates (id | when_to_use | description | capabilities):\n{}\n            RULES:\n            - Overall score 0-10 for EACH candidate\n            - Select ONLY if best score >= 7.0\n            - If multiple >= 7.0, pick the MOST SPECIFIC\n            - NEVER select just because it is the closest match\n\n            OUTPUT FORMAT (exactly 3 lines, no JSON, no explanation):\n            selected_skill: <skill_id_or_NONE>\n            needs_planning: <yes/no>\n            scores: <id:score,id:score,...>",
             query_truncated, query_summary, candidate_sections
         )
     }
@@ -523,93 +404,72 @@ impl SkillSelector {
         response: &str,
         candidates: &[RegisteredSkill],
     ) -> Result<(Vec<SkillScore>, bool), SkillSelectError> {
-        let json_str = Self::extract_json(response)?;
+        let mut selected_skill: Option<String> = None;
+        let mut needs_planning = false;
+        let mut scores_map: HashMap<String, f32> = HashMap::new();
 
-        let val: serde_json::Value = serde_json::from_str(json_str)
-            .map_err(|e| SkillSelectError::ParseError(e.to_string()))?;
-
-        let scores_array = val
-            .get("scores")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| SkillSelectError::ParseError("Missing scores array".to_string()))?;
-
-        // Parse LLM's needs_planning judgment (trust LLM, zero hardcoded rules)
-        let llm_needs_planning = val
-            .get("needs_planning")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let mut scores = Vec::new();
-
-        for score_val in scores_array {
-            let skill_id = score_val
-                .get("skill_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            // Find skill name from candidates
-            let skill_name = candidates
-                .iter()
-                .find(|s| s.skill.id == skill_id)
-                .map(|s| s.skill.name.clone())
-                .unwrap_or_else(|| skill_id.clone());
-
-            let relevance = score_val
-                .get("relevance")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0) as f32;
-
-            let specificity = score_val
-                .get("specificity")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0) as f32;
-
-            let capability_match = score_val
-                .get("capability_match")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0) as f32;
-
-            let overall_score = score_val
-                .get("overall_score")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0) as f32;
-
-            let reason = score_val
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            scores.push(SkillScore {
-                skill_id,
-                skill_name,
-                relevance,
-                specificity,
-                capability_match,
-                overall_score,
-                reason,
-            });
-        }
-
-        // If LLM didn't score all candidates, add zero scores for missing ones
-        for candidate in candidates {
-            if !scores.iter().any(|s| s.skill_id == candidate.skill.id) {
-                scores.push(SkillScore {
-                    skill_id: candidate.skill.id.clone(),
-                    skill_name: candidate.skill.name.clone(),
-                    relevance: 0.0,
-                    specificity: 0.0,
-                    capability_match: 0.0,
-                    overall_score: 0.0,
-                    reason: "Not scored by LLM".to_string(),
-                });
+        for line in response.lines() {
+            let line = line.trim();
+            if line.starts_with("selected_skill:") {
+                let val = line["selected_skill:".len()..].trim();
+                if val.to_lowercase() != "none" && !val.is_empty() {
+                    selected_skill = Some(val.to_string());
+                }
+            } else if line.starts_with("needs_planning:") {
+                let val = line["needs_planning:".len()..].trim().to_lowercase();
+                needs_planning = val == "yes" || val == "true";
+            } else if line.starts_with("scores:") {
+                let val = line["scores:".len()..].trim();
+                for part in val.split(',') {
+                    let part = part.trim();
+                    if let Some((id, score_str)) = part.split_once(':') {
+                        if let Ok(score) = score_str.trim().parse::<f32>() {
+                            scores_map.insert(id.trim().to_string(), score);
+                        }
+                    }
+                }
             }
         }
 
-        Ok((scores, llm_needs_planning))
-    }
+        let mut scores = Vec::new();
+        for candidate in candidates {
+            let id = &candidate.skill.id;
+            let overall = scores_map.get(id).copied().unwrap_or(0.0);
+            scores.push(SkillScore {
+                skill_id: id.clone(),
+                skill_name: candidate.skill.name.clone(),
+                relevance: overall,
+                specificity: overall,
+                capability_match: overall,
+                overall_score: overall,
+                reason: if overall > 0.0 {
+                    format!("LLM scored {:.1}/10", overall)
+                } else {
+                    "Not scored by LLM".to_string()
+                },
+            });
+        }
 
+        // Derive selected_skill from scores if not explicitly provided
+        let selected = if let Some(ref sel) = selected_skill {
+            Some(sel.clone())
+        } else {
+            scores
+                .iter()
+                .filter(|s| s.overall_score >= SkillSelection::SELECTION_THRESHOLD)
+                .max_by(|a, b| a.overall_score.partial_cmp(&b.overall_score).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|s| s.skill_id.clone())
+        };
+
+        // Override the selected skill in scores if we derived one
+        if let Some(ref sel_id) = selected {
+            if let Some(s) = scores.iter_mut().find(|s| &s.skill_id == sel_id) {
+                s.overall_score = s.overall_score.max(SkillSelection::SELECTION_THRESHOLD);
+            }
+        }
+
+        Ok((scores, needs_planning))
+    }
     fn extract_json(response: &str) -> Result<&str, SkillSelectError> {
         let trimmed = response.trim();
 
