@@ -217,6 +217,10 @@ impl LLMIntentAnalyzer {
             ## Rules\n\
             - \"direct_answer\": true ONLY for greetings, small talk, simple Q&A, \
               meta-questions about capabilities, or when no specialized skill applies.\n\
+            - \"needs_skill\": true when the user asks for real-time external data \
+              (weather, stock/crypto prices, news, account balances, etc.) or wants \
+              to perform an action (buy, sell, search, send, create). Do NOT treat \
+              weather queries, price lookups, or trading requests as simple Q&A.\n\
             - \"needs_planning\": true when the task has multiple steps, dependencies, \
               or requires sequential tool use.\n\
             - \"query_summary\": Should be a normalized, search-friendly description \

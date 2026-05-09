@@ -141,6 +141,17 @@ impl IntentEngine {
     // ── Internal helpers ──
 
     fn is_correction(lower: &str) -> bool {
+        // 🆕 FIX: "不要" is often a constraint (e.g. "不要超过100USD"), not a cancellation.
+        // Exclude cases where "不要" is followed by a numeric constraint pattern.
+        let excluded_patterns = [
+            "不要超过", "不要低于", "不要多于", "不要少于", "不要大于", "不要小于",
+            "不要超过", "不要超出", "不要过", "不要低过", "不要高过",
+        ];
+        let has_excluded = excluded_patterns.iter().any(|p| lower.contains(p));
+        if has_excluded {
+            return false;
+        }
+
         let correction_markers = ["不要", "别", "直接", "不用", "无需", "取消", "撤销", "别管"];
         correction_markers.iter().any(|m| lower.contains(m))
     }
@@ -453,6 +464,19 @@ mod tests {
         let analysis = IntentEngine::classify_heuristic("不要查询了，直接下单");
         assert_eq!(analysis.intent, UserIntent::Correction);
         assert!(analysis.constraints.contains(&"direct_order".to_string()));
+    }
+
+    #[test]
+    fn test_correction_false_positive_budget_constraint() {
+        // "不要" followed by a numeric constraint should NOT be a correction intent
+        let analysis = IntentEngine::classify_heuristic("不要超过100USD");
+        assert_ne!(analysis.intent, UserIntent::Correction);
+
+        let analysis2 = IntentEngine::classify_heuristic("不要低于50");
+        assert_ne!(analysis2.intent, UserIntent::Correction);
+
+        let analysis3 = IntentEngine::classify_heuristic("不要大于200");
+        assert_ne!(analysis3.intent, UserIntent::Correction);
     }
 
     #[test]

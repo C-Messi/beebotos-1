@@ -69,8 +69,9 @@ impl SkillSelector {
             registry,
             // 🆕 FIX: Reduced from 8 to 5 candidates — fewer candidates = faster LLM ranking.
             max_candidates: 5,
-            // 🆕 FIX: Reduced to 5s — skill selection is a lightweight JSON generation task.
-            timeout: Duration::from_secs(5),
+            // 🆕 FIX: Increased to 20s — skill selection needs time for LLM ranking
+            // of complex queries (e.g. weather, multi-step tasks).
+            timeout: Duration::from_secs(20),
             cache: RwLock::new(HashMap::new()),
             cache_ttl: Duration::from_secs(300), // 5 minutes
         }

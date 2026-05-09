@@ -1408,16 +1408,48 @@ impl Agent {
     }
 
     /// 🆕 OPTIMIZATION PHASE 1: Handle direct answer intents — no tool injection, saves tokens
+    /// 🆕 FIX: Safety net — queries that need real-time data (weather, crypto, stock) are
+    /// routed to skill-injection path instead of pure direct answer, preventing stale/fabricated data.
     async fn handle_direct_answer(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {
         info!("Direct answer path (no tools) for task {}", task.id);
-        let llm = self.llm_interface.as_ref()
-            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
 
         let input_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
             json.get("message").and_then(|m| m.as_str()).unwrap_or(&task.input).to_string()
         } else {
             task.input.clone()
         };
+        let lower = input_text.to_lowercase();
+
+        // Safety net: real-time data queries must go through skill injection
+        let needs_realtime_data = lower.contains("天气")
+            || lower.contains("weather")
+            || lower.contains("temperature")
+            || lower.contains("气温")
+            || lower.contains("预报")
+            || lower.contains("forecast")
+            || lower.contains("btc")
+            || lower.contains("比特币")
+            || lower.contains("eth")
+            || lower.contains("以太坊")
+            || lower.contains("crypto")
+            || lower.contains("加密货币")
+            || lower.contains("股价")
+            || lower.contains("股票")
+            || lower.contains("stock price")
+            || lower.contains("aapl")
+            || lower.contains("tsla")
+            || lower.contains("行情")
+            || lower.contains("价格");
+
+        if needs_realtime_data {
+            info!("Direct answer intercepted for real-time data query: '{}'", input_text);
+            let legacy_intent = crate::intent::IntentAnalysis::new(crate::intent::UserIntent::SingleToolCall, 0.75)
+                .with_toolsets(vec!["weather".to_string(), "crypto-data".to_string(), "stock-data".to_string()]);
+            return self.handle_llm_task_with_intent(task, &legacy_intent).await;
+        }
+
+        let llm = self.llm_interface.as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
 
         let messages = vec![
             communication::Message::new(
@@ -2033,6 +2065,18 @@ impl Agent {
                     || query_lower_str.contains("order")
                     || query_lower_str.contains("place");
 
+                // 🆕 FIX: Detect weather intent to boost weather-related skills
+                let has_weather_intent = query_lower_str.contains("天气")
+                    || query_lower_str.contains("weather")
+                    || query_lower_str.contains("temperature")
+                    || query_lower_str.contains("气温")
+                    || query_lower_str.contains("forecast")
+                    || query_lower_str.contains("预报")
+                    || query_lower_str.contains("rain")
+                    || query_lower_str.contains("雨")
+                    || query_lower_str.contains("snow")
+                    || query_lower_str.contains("雪");
+
                 // 🆕 OPTIMIZATION PHASE 1: Toolsets-based filter-first + scoring
                 let active_toolsets: std::collections::HashSet<String> = intent_opt
                     .map(|i| i.active_toolsets.iter().cloned().collect())
@@ -2069,6 +2113,14 @@ impl Agent {
                     if has_trading_intent {
                         let skill_id_lower = manifest.id.to_lowercase();
                         if skill_id_lower.contains("place_") && skill_id_lower.contains("_order") {
+                            score += 20;
+                        }
+                    }
+
+                    // 🆕 FIX: Boost weather skills when user asks about weather
+                    if has_weather_intent {
+                        let skill_id_lower = manifest.id.to_lowercase();
+                        if skill_id_lower.contains("weather") || skill_id_lower.contains("get_weather") {
                             score += 20;
                         }
                     }
@@ -4578,26 +4630,43 @@ pub enum TaskComplexity {
 fn format_known_skill_output(skill_id: &str, raw_output: &str) -> Option<String> {
     match skill_id {
         "mcp:alpaca/get_crypto_latest_trade" => format_crypto_latest_trade(raw_output),
-        "mcp:alpaca/get_crypto_snapshot" => format_crypto_snapshot(raw_output),
+        "mcp:alpaca/get_crypto_snapshot" | "mcp:alpaca/get_crypto_quote" | "mcp:alpaca/get_crypto_bars" => format_crypto_snapshot(raw_output),
+        "mcp:alpaca/get_stock_snapshot" | "mcp:alpaca/get_stock_quote" | "mcp:alpaca/get_stock_bars" => format_crypto_snapshot(raw_output),
         _ => None,
     }
 }
 
 fn format_crypto_latest_trade(raw_output: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw_output).ok()?;
-    let trades = v.get("trades")?.as_object()?;
+    // Alpaca may return trades under a "trades" key, or as a top-level object keyed by symbol.
+    let trades = v.get("trades")
+        .and_then(|s| s.as_object())
+        .or_else(|| v.as_object())?;
     let mut lines = vec!["📊 最新成交".to_string()];
     for (symbol, data) in trades {
-        let p = data.get("p")?.as_f64()?;
+        if symbol == "trades" {
+            continue;
+        }
+        if let Some(p) = data.get("p").and_then(|p| p.as_f64()) {
+            lines.push(format!("• {} 最新成交价: {:.2} USD", symbol, p));
+        } else if let Some(price) = data.as_f64() {
+            // Scalar price fallback (rare)
+            lines.push(format!("• {} 最新成交价: {:.2} USD", symbol, price));
+        } else {
+            continue;
+        }
         let s = data.get("s").and_then(|s| s.as_f64()).unwrap_or(0.0);
         let t = data.get("t").and_then(|t| t.as_str()).unwrap_or("");
-        lines.push(format!("• {} 最新成交价: {:.2} USD", symbol, p));
         if s > 0.0 {
             lines.push(format!("  成交量: {:.6}", s));
         }
         if !t.is_empty() {
             lines.push(format!("  成交时间: {}", t));
         }
+    }
+    if lines.len() == 1 {
+        // No trade data extracted — fall back to generic JSON
+        return None;
     }
     Some(lines.join("\n"))
 }
@@ -4608,7 +4677,8 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
     let snapshots = v.get("snapshots")
         .and_then(|s| s.as_object())
         .or_else(|| v.as_object())?;
-    let mut lines = vec!["📈 BTC 市场快照".to_string()];
+    let mut lines = vec!["📈 市场行情快照".to_string()];
+    let mut any_data = false;
 
     for (symbol, data) in snapshots {
         // Skip non-symbol wrapper keys at the top level when falling back to v.as_object()
@@ -4616,57 +4686,82 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
             continue;
         }
         lines.push(format!("\n【{}】", symbol));
+        let mut symbol_has_data = false;
+
+        // Helper: try multiple common price field names
+        let get_price = |obj: &serde_json::Value, keys: &[&str]| -> Option<f64> {
+            for k in keys {
+                if let Some(p) = obj.get(k).and_then(|p| p.as_f64()) {
+                    return Some(p);
+                }
+            }
+            None
+        };
 
         if let Some(lt) = data.get("latestTrade") {
-            if let Some(p) = lt.get("p").and_then(|p| p.as_f64()) {
+            if let Some(p) = get_price(lt, &["p", "price", "P"]) {
                 lines.push(format!("  最新成交价: {:.2} USD", p));
+                symbol_has_data = true;
             }
-            if let Some(s) = lt.get("s").and_then(|s| s.as_f64()) {
+            if let Some(s) = lt.get("s").and_then(|s| s.as_f64()).or_else(|| lt.get("size").and_then(|s| s.as_f64())) {
                 lines.push(format!("  最新成交量: {:.6}", s));
+                symbol_has_data = true;
             }
         }
 
         if let Some(q) = data.get("latestQuote") {
-            if let Some(bid) = q.get("bp").and_then(|p| p.as_f64()) {
-                if let Some(ask) = q.get("ap").and_then(|p| p.as_f64()) {
-                    lines.push(format!("  买一 / 卖一: {:.2} / {:.2} USD", bid, ask));
-                }
+            let bid = get_price(q, &["bp", "bidPrice", "bid"]).or_else(|| q.get("b").and_then(|p| p.as_f64()));
+            let ask = get_price(q, &["ap", "askPrice", "ask"]).or_else(|| q.get("a").and_then(|p| p.as_f64()));
+            if let (Some(bid), Some(ask)) = (bid, ask) {
+                lines.push(format!("  买一 / 卖一: {:.2} / {:.2} USD", bid, ask));
+                symbol_has_data = true;
             }
         }
 
         if let Some(db) = data.get("dailyBar") {
-            let o = db.get("o").and_then(|p| p.as_f64());
-            let h = db.get("h").and_then(|p| p.as_f64());
-            let l = db.get("l").and_then(|p| p.as_f64());
-            let c = db.get("c").and_then(|p| p.as_f64());
-            let v = db.get("v").and_then(|p| p.as_f64());
+            let o = get_price(db, &["o", "open"]);
+            let h = get_price(db, &["h", "high"]);
+            let l = get_price(db, &["l", "low"]);
+            let c = get_price(db, &["c", "close"]);
+            let vol = db.get("v").and_then(|p| p.as_f64()).or_else(|| db.get("volume").and_then(|p| p.as_f64()));
             if o.is_some() && h.is_some() && l.is_some() && c.is_some() {
                 lines.push(format!(
                     "  日K线: 开 {:.2} / 高 {:.2} / 低 {:.2} / 收 {:.2}",
                     o.unwrap(), h.unwrap(), l.unwrap(), c.unwrap()
                 ));
+                symbol_has_data = true;
             }
-            if let Some(v) = v {
-                lines.push(format!("  日成交量: {:.4}", v));
+            if let Some(vol) = vol {
+                lines.push(format!("  日成交量: {:.4}", vol));
+                symbol_has_data = true;
             }
         }
 
         if let Some(pb) = data.get("prevDailyBar") {
-            if let Some(prev_c) = pb.get("c").and_then(|p| p.as_f64()) {
-                if let Some(curr_c) = data.get("dailyBar").and_then(|db| db.get("c")).and_then(|p| p.as_f64()) {
-                    let change = ((curr_c - prev_c) / prev_c) * 100.0;
-                    lines.push(format!("  较昨日收盘: {:+.2}%", change));
-                }
+            let prev_c = get_price(pb, &["c", "close"]);
+            let curr_c = data.get("dailyBar").and_then(|db| get_price(db, &["c", "close"]));
+            if let (Some(prev_c), Some(curr_c)) = (prev_c, curr_c) {
+                let change = ((curr_c - prev_c) / prev_c) * 100.0;
+                lines.push(format!("  较昨日收盘: {:+.2}%", change));
+                symbol_has_data = true;
             }
         }
 
         if let Some(mb) = data.get("minuteBar") {
-            if let Some(c) = mb.get("c").and_then(|p| p.as_f64()) {
+            if let Some(c) = get_price(mb, &["c", "close"]) {
                 lines.push(format!("  最新分钟线收盘价: {:.2} USD", c));
+                symbol_has_data = true;
             }
+        }
+
+        if symbol_has_data {
+            any_data = true;
         }
     }
 
+    if !any_data {
+        return None;
+    }
     Some(lines.join("\n"))
 }
 
