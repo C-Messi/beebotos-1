@@ -959,6 +959,7 @@ mod tests {
                 temperature: 0.7,
                 deployment: None,
                 context_window: None,
+                thinking: None,
             },
         );
         config

@@ -409,15 +409,26 @@ pub async fn remove_cron_jobs_for_workflow(
 pub async fn create_workflow(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
-    Json(req): Json<CreateWorkflowRequest>,
+    body: String,
 ) -> Result<Json<WorkflowResponse>, GatewayError> {
     require_any_role(&user, &["admin"])?;
-    info!("Creating workflow from YAML");
+    info!("Creating workflow from YAML/JSON body");
+
+    // 🆕 FIX: Support both JSON wrapper {"yaml": "..."} and raw YAML body
+    let (yaml_content, id_override) = if body.trim_start().starts_with('{') {
+        // JSON wrapper format
+        let req: CreateWorkflowRequest = serde_json::from_str(&body)
+            .map_err(|e| GatewayError::bad_request(format!("Invalid JSON: {}", e)))?;
+        (req.yaml, req.id)
+    } else {
+        // Raw YAML format
+        (body, None)
+    };
 
     let mut def: beebotos_agents::workflow::WorkflowDefinition =
-        serde_yaml::from_str(&req.yaml).map_err(|e| GatewayError::bad_request(format!("Invalid YAML: {}", e)))?;
+        serde_yaml::from_str(&yaml_content).map_err(|e| GatewayError::bad_request(format!("Invalid YAML: {}", e)))?;
 
-    if let Some(id_override) = req.id {
+    if let Some(id_override) = id_override {
         def.id = id_override;
     }
 
@@ -443,7 +454,7 @@ pub async fn create_workflow(
         warn!("Failed to create workflow directory: {}", e);
     }
     let path = workflow_dir.join(format!("{}.yaml", def.id));
-    if let Err(e) = tokio::fs::write(&path, &req.yaml).await {
+    if let Err(e) = tokio::fs::write(&path, &yaml_content).await {
         return Err(GatewayError::Internal {
             message: format!("Failed to persist workflow {}: {}", def.id, e),
             correlation_id: uuid::Uuid::new_v4().to_string(),
@@ -1007,24 +1018,30 @@ pub async fn execute_workflow(
 }
 
 /// Webhook trigger handler for workflow execution
+/// 🆕 FIX: Route is /api/v1/workflows/webhook/*path, extract wildcard path
 pub async fn workflow_webhook_trigger(
     State(state): State<Arc<AppState>>,
-    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    Path(path): Path<String>,
     headers: axum::http::HeaderMap,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<WorkflowExecutionResponse>, GatewayError> {
-    let path = uri.path();
-    info!("Workflow webhook triggered: {}", path);
+    // The trigger path in workflow definition starts with "/" (e.g. "/test-webhook")
+    let trigger_path = if path.starts_with('/') {
+        path.clone()
+    } else {
+        format!("/{}", path)
+    };
+    info!("Workflow webhook triggered: {}", trigger_path);
 
     let trigger_engine = state.workflow_trigger_engine()?;
 
     let trigger_match = {
         let engine = trigger_engine.read().await;
-        engine.match_webhook(path, "POST")
+        engine.match_webhook(&trigger_path, "POST")
     };
 
     let trigger_match = trigger_match
-        .ok_or_else(|| GatewayError::not_found("Webhook trigger", path))?;
+        .ok_or_else(|| GatewayError::not_found("Webhook trigger", &trigger_path))?;
 
     // 🟢 AUTH FIX: Validate bearer token if webhook requires auth
     if let Some(expected_token) = &trigger_match.auth {

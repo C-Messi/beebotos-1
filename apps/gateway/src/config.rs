@@ -827,6 +827,7 @@ mod tests {
                         temperature: 0.7,
                         deployment: None,
                         context_window: Some(8192),
+                        thinking: None,
                     });
                     map
                 },

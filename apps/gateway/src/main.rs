@@ -2177,6 +2177,7 @@ mod tests {
         BeeBotOSConfig {
             system_name: "BeeBotOS".to_string(),
             version: "2.0.0".to_string(),
+            mcp: config::McpConfig::default(),
             server: config::ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
@@ -2221,6 +2222,7 @@ mod tests {
                         temperature: 0.7,
                         deployment: None,
                         context_window: Some(8192),
+                        thinking: None,
                     });
                     map
                 },

@@ -1135,3 +1135,76 @@ start_at_job_checker(app_state.clone(), 5).await;
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+编译通过 ✅ `Finished dev profile in 2.72s`
+
+---
+
+**问题根因：** `ModelProviderConfig` 新增了 `thinking` 字段，`BeeBotOSConfig` 新增了 `mcp` 字段，但 Gateway 中有 4 处直接结构体初始化未同步更新。
+
+**修复的 4 个位置：**
+
+| 文件 | 行号 | 修复内容 |
+|------|------|----------|
+| `config.rs` | 823 | `ModelProviderConfig` 添加 `thinking: None` |
+| `llm_service.rs` | 955 | `ModelProviderConfig` 添加 `thinking: None` |
+| `main.rs` | 2217 | `ModelProviderConfig` 添加 `thinking: None` |
+| `main.rs` | 2177 | `BeeBotOSConfig` 添加 `mcp: config::McpConfig::default()` |
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+全部 4 个失败的 workflow 测试现已通过 ✅
+
+```
+test tests::test_workflow_create_and_list ... ok
+test tests::test_workflow_get_and_delete ... ok
+test tests::test_workflow_webhook_trigger ... ok
+test tests::test_workflow_execute_manual ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 76 filtered out
+```
+
+---
+
+## 修复总结
+
+### Bug 1：`create_workflow` 返回 415 Unsupported Media Type
+
+**根因：** `create_workflow` handler 使用 `Json(req): Json<CreateWorkflowRequest>` 提取器，强制要求 `Content-Type: application/json`。但测试发送的是纯 YAML body（`application/yaml`），导致 axum 在到达 handler 之前就返回 415。
+
+**修复：** `apps/gateway/src/handlers/http/workflows.rs` — 将提取器改为 `body: String`，然后自动检测 body 格式：
+- 如果以 `{` 开头 → 解析为 JSON wrapper `{"yaml": "...", "id": "..."}`
+- 否则 → 直接当作 raw YAML workflow 定义
+
+```rust
+let (yaml_content, id_override) = if body.trim_start().starts_with('{') {
+    let req: CreateWorkflowRequest = serde_json::from_str(&body)?;
+    (req.yaml, req.id)
+} else {
+    (body, None)
+};
+```
+
+---
+
+### Bug 2：webhook trigger 返回 404
+
+**根因：** URL 路由是 `/api/v1/workflows/webhook/*path`，handler 原来使用 `OriginalUri` 获取完整路径 `/api/v1/workflows/webhook/test-webhook`。但 trigger engine 中注册的是 workflow 定义中的相对路径 `/test-webhook`，两者不匹配。
+
+**修复：** 将 `OriginalUri` 改为 `Path(path): Path<String>`，直接获取通配符匹配的部分（`test-webhook`），然后拼接为 `/test-webhook` 再传给 trigger engine：
+
+```rust
+Path(path): Path<String>,
+let trigger_path = if path.starts_with('/') { path } else { format!("/{}", path) };
+engine.match_webhook(&trigger_path, "POST")
+```
+
+---
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `apps/gateway/src/handlers/http/workflows.rs` | `create_workflow` 支持 raw YAML body |
+| `apps/gateway/src/handlers/http/workflows.rs` | `workflow_webhook_trigger` 使用 `Path<String>` 提取相对路径 |
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
