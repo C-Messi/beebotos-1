@@ -96,7 +96,10 @@ impl ReActExecutor {
             ACTION: <tool_name>\n\
             PARAMETERS: <JSON object>\n\n\
             After the tool result is provided, continue reasoning or provide your final answer.\n\
-            To finish, provide a clear final answer without the ACTION header."
+            To finish, provide a clear final answer without the ACTION header.\n\n\
+            FORBIDDEN: Do NOT introduce yourself, describe your capabilities, or say what you are. \
+            Do NOT output text like 'I am the ... skill' or 'I can help you with ...'. \
+            If you are unsure what to do, call the most relevant tool with your best guess."
         );
 
         let mut history = format!(
@@ -119,6 +122,25 @@ impl ReActExecutor {
                 .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?;
 
             debug!("LLM response: {}", response);
+
+            // 🆕 FIX: Detect self-introduction responses and treat them as "no tool call"
+            // instead of final answers, giving the LLM a chance to retry.
+            let looks_like_intro = Self::is_self_introduction(&response);
+            let has_stop_phrase = self.config.stop_phrases.iter().any(|p| response.to_uppercase().contains(&p.to_uppercase()));
+            let has_tool_call = self.tool_call_re.is_match(&response);
+
+            if !has_tool_call && looks_like_intro && !has_stop_phrase {
+                info!("ReAct step {}: LLM output self-introduction, guiding to retry with tool call", step + 1);
+                history.push_str(&response);
+                history.push_str(
+                    "\n\n[System]: Self-introduction is NOT allowed. \
+                    You MUST call a tool to fulfill the user's request. \
+                    Respond exactly with:\n\
+                    ACTION: <tool_name>\n\
+                    PARAMETERS: <JSON object>\n\n[Assistant]: "
+                );
+                continue;
+            }
 
             // Check for stop phrases indicating final answer
             if self.is_final_answer(&response) {
@@ -242,6 +264,20 @@ impl ReActExecutor {
         let upper = text.to_uppercase();
         self.config.stop_phrases.iter().any(|p| upper.contains(&p.to_uppercase()))
             || !self.tool_call_re.is_match(text)
+    }
+
+    /// Detect whether the LLM is introducing itself instead of acting.
+    fn is_self_introduction(text: &str) -> bool {
+        let lower = text.to_lowercase();
+        let intro_markers = [
+            "i am the ", "i'm the ", "i am a ", "i'm a ",
+            "i can help you", "i can assist you",
+            "i am ready to help", "i'm ready to help",
+            "skill executor", "web search skill",
+            "my name is", "you can call me",
+            "i am an ai", "i'm an ai",
+        ];
+        intro_markers.iter().any(|m| lower.contains(m))
     }
 
     fn extract_final_answer(&self, text: &str) -> String {

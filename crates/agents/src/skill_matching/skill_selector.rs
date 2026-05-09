@@ -69,9 +69,10 @@ impl SkillSelector {
             registry,
             // 🆕 FIX: Reduced from 8 to 5 candidates — fewer candidates = faster LLM ranking.
             max_candidates: 5,
-            // 🆕 FIX: Increased to 20s — skill selection needs time for LLM ranking
+            // 🆕 FIX: Increased to 25s — skill selection needs time for LLM ranking
             // of complex queries (e.g. weather, multi-step tasks).
-            timeout: Duration::from_secs(20),
+            // Note: Kimi k2.6 can take 15-20s for 800-token JSON output at peak load.
+            timeout: Duration::from_secs(25),
             cache: RwLock::new(HashMap::new()),
             cache_ttl: Duration::from_secs(300), // 5 minutes
         }
@@ -95,22 +96,41 @@ impl SkillSelector {
         query: &str,
         query_summary: &str,
     ) -> Result<SkillSelection, SkillSelectError> {
+        let select_start = Instant::now();
+        let query_preview = Self::truncate(query, 100);
+        tracing::info!(
+            "🔍 SkillSelector::select() START | query_summary='{}' | query_preview='{}'",
+            query_summary, query_preview
+        );
+
         // 1. Check cache first
         let cache_key = query_summary.to_string();
         {
             let cache = self.cache.read().await;
             if let Some((cached, timestamp)) = cache.get(&cache_key) {
                 if timestamp.elapsed() < self.cache_ttl {
-                    tracing::debug!("Skill selection cache hit for: {}", &cache_key[..cache_key.len().min(50)]);
+                    tracing::info!(
+                        "✅ Skill selection cache hit for: {} (took {:?})",
+                        &cache_key[..cache_key.len().min(50)],
+                        select_start.elapsed()
+                    );
                     return Ok(cached.clone());
                 }
             }
         }
 
         // Step 1: Recall candidates
+        let recall_start = Instant::now();
         let candidates = self.recall_candidates(query_summary).await?;
+        tracing::info!(
+            "📋 SkillSelector::recall_candidates() | count={} | names={:?} | took={:?}",
+            candidates.len(),
+            candidates.iter().map(|c| c.skill.name.as_str()).collect::<Vec<_>>(),
+            recall_start.elapsed()
+        );
 
         if candidates.is_empty() {
+            tracing::warn!("⚠️ SkillSelector::select() — no candidates recalled, returning empty selection");
             return Ok(SkillSelection {
                 selected_skill: None,
                 selected_skill_name: None,
@@ -126,7 +146,12 @@ impl SkillSelector {
         let (ranked, llm_needs_planning) = self.rank_candidates(query, query_summary, &candidates).await?;
 
         // Step 3: Selection
+        let selection_start = Instant::now();
         let selection = self.make_selection(&ranked, llm_needs_planning).await?;
+        tracing::info!(
+            "🎯 SkillSelector::make_selection() | selected={:?} | confidence={:.2} | took={:?}",
+            selection.selected_skill_name, selection.confidence, selection_start.elapsed()
+        );
 
         // 2. Store in cache
         {
@@ -146,6 +171,12 @@ impl SkillSelector {
             }
         }
 
+        tracing::info!(
+            "🏁 SkillSelector::select() END | total={:?} | selected={:?} | needs_planning={}",
+            select_start.elapsed(),
+            selection.selected_skill_name,
+            selection.needs_planning
+        );
         Ok(selection)
     }
 
@@ -155,6 +186,12 @@ impl SkillSelector {
         query_summary: &str,
     ) -> Result<Vec<RegisteredSkill>, SkillSelectError> {
         let mut candidates = self.registry.search(query_summary).await;
+
+        // 🆕 FIX: If search returns empty (e.g. English query_summary vs Chinese descriptions),
+        // fallback to enabled skills sorted by popularity so ranking still has candidates.
+        if candidates.is_empty() {
+            candidates = self.registry.list_enabled().await;
+        }
 
         // Sort by usage count (popularity) as secondary sort
         candidates.sort_by(|a, b| {
@@ -178,7 +215,16 @@ impl SkillSelector {
         query_summary: &str,
         candidates: &[RegisteredSkill],
     ) -> Result<(Vec<SkillScore>, bool), SkillSelectError> {
+        let rank_start = Instant::now();
         let prompt = self.build_ranking_prompt(query, query_summary, candidates);
+        let prompt_len = prompt.len();
+        let prompt_tokens_est = prompt_len / 4; // rough estimate: 1 token ≈ 4 chars
+
+        tracing::info!(
+            "🤖 SkillSelector::rank_candidates() | prompt_len={} (~{} tokens) | candidates={} | timeout={}s",
+            prompt_len, prompt_tokens_est, candidates.len(), self.timeout.as_secs()
+        );
+        tracing::debug!("📝 SkillSelector ranking prompt:\n{}", prompt);
 
         let messages = vec![Message::new(
             uuid::Uuid::new_v4(),
@@ -186,18 +232,36 @@ impl SkillSelector {
             prompt,
         )];
 
-        // 🆕 FIX: Limit max_tokens to 1024 — ranking output for ~8 candidates is ~400-800 tokens.
-        // This prevents Kimi k2.6 thinking mode from generating excessive reasoning tokens.
+        // 🆕 FIX: Limit max_tokens to 768 — ranking output for ~5 candidates is ~400-600 tokens.
+        // This prevents Kimi k2.6 from generating excessive reasoning and reduces latency.
         let mut context = std::collections::HashMap::new();
-        context.insert("max_tokens".to_string(), "1024".to_string());
+        context.insert("max_tokens".to_string(), "768".to_string());
+        // 🆕 FIX: Request a faster/cheaper model for this stateless ranking task if available.
+        // Gateway can override this based on its own config; this is just a hint.
+        context.insert("model".to_string(), "kimi-flash".to_string());
 
+        let llm_start = Instant::now();
         let response = tokio::time::timeout(
             self.timeout,
             self.llm.call_llm(messages, Some(context)),
         )
         .await
-        .map_err(|_| SkillSelectError::Timeout(self.timeout.as_secs()))?
+        .map_err(|_| {
+            tracing::error!(
+                "⏱️ SkillSelector::rank_candidates() TIMEOUT after {:?} | prompt_len={} | candidates={}",
+                self.timeout, prompt_len, candidates.len()
+            );
+            SkillSelectError::Timeout(self.timeout.as_secs())
+        })?
         .map_err(|e| SkillSelectError::LLMError(e.to_string()))?;
+
+        let llm_latency = llm_start.elapsed();
+        let response_len = response.len();
+        tracing::info!(
+            "📥 SkillSelector::rank_candidates() | LLM latency={:?} | response_len={} | total_rank={:?}",
+            llm_latency, response_len, rank_start.elapsed()
+        );
+        tracing::debug!("📄 SkillSelector ranking response:\n{}", response);
 
         self.parse_ranking_response(&response, candidates)
     }
@@ -277,6 +341,7 @@ impl SkillSelector {
     }
 
     /// Build the ranking prompt — pure semantic evaluation, zero keyword rules
+    /// 🆕 FIX: Truncate all fields to keep prompt concise and reduce LLM latency.
     fn build_ranking_prompt(
         &self,
         query: &str,
@@ -297,92 +362,160 @@ impl SkillSelector {
                 .collect::<Vec<_>>()
                 .join(", ");
 
+            // 🆕 FIX: Only take 1 example each to reduce prompt size
             let pos_examples = manifest
                 .activation_examples
                 .iter()
-                .take(2)
+                .take(1)
                 .cloned()
                 .collect::<Vec<_>>();
             let pos_str = if pos_examples.is_empty() {
-                "(none provided)".to_string()
+                "(none)".to_string()
             } else {
-                pos_examples.join("\n  - ")
+                pos_examples.join("
+  - ")
             };
 
             let neg_examples = manifest
                 .activation_negative_examples
                 .iter()
-                .take(2)
+                .take(1)
                 .cloned()
                 .collect::<Vec<_>>();
             let neg_str = if neg_examples.is_empty() {
-                "(none provided)".to_string()
+                "(none)".to_string()
             } else {
-                neg_examples.join("\n  - ")
+                neg_examples.join("
+  - ")
             };
 
+            // 🆕 FIX: Truncate when_to_use and description to avoid prompt bloat
+            let when_to_use = if manifest.when_to_use.is_empty() {
+                manifest.description.clone()
+            } else {
+                manifest.when_to_use.clone()
+            };
+            let when_truncated = Self::truncate(&when_to_use, 200);
+            let desc_truncated = Self::truncate(&manifest.description, 100);
+
             candidate_sections.push_str(&format!(
-                "### [{index}] {name} (id: {id})\n\
-                 - When to use: {when}\n\
-                 - Description: {desc}\n\
-                 - Capabilities: {caps}\n\
-                 - Examples of CORRECT usage:\n   - {pos}\n\
-                 - Examples of INCORRECT usage (do NOT match these):\n   - {neg}\n\n",
+                "### [{index}] {name} (id: {id})
+\
+                 - When to use: {when}
+\
+                 - Description: {desc}
+\
+                 - Capabilities: {caps}
+\
+                 - Examples of CORRECT usage:
+   - {pos}
+\
+                 - Examples of INCORRECT usage (do NOT match these):
+   - {neg}
+
+",
                 index = i,
                 name = manifest.name,
                 id = skill.skill.id,
-                when = if manifest.when_to_use.is_empty() {
-                    manifest.description.clone()
-                } else {
-                    manifest.when_to_use.clone()
-                },
-                desc = manifest.description.chars().take(150).collect::<String>(),
+                when = when_truncated,
+                desc = desc_truncated,
                 caps = caps,
                 pos = pos_str,
                 neg = neg_str,
             ));
         }
 
+        // 🆕 FIX: Truncate full query to avoid prompt bloat; query_summary is already concise.
+        let query_truncated = Self::truncate(query, 300);
+
         format!(
-            "You are a Skill Matching Judge. Your task is to evaluate which skill, \
-            if any, best matches the user's query.\n\n\
-            ## User Query\n{}\n\n\
-            ## Query Summary\n{}\n\n\
-            ## Candidate Skills\n{}\n\
-            ## Evaluation Criteria (score 0-10 each)\n\
-            1. **Relevance**: How well does the skill's purpose align with the query?\n\
-            2. **Specificity**: Is this the MOST specific skill for the task, or is it too general?\n\
-            3. **Capability Match**: Does the skill actually have the capabilities needed?\n\
-            4. **Negative Example Check**: If the query resembles a negative example, \
-               the overall score must be <= 3.\n\n\
-            ## Rules\n\
-            - A skill is \"selected\" only if its overall score >= 7.0\n\
-            - If multiple skills score >= 7.0, select the one with highest SPECIFICITY\n\
-            - If NO skill scores >= 7.0, selected_skill must be null\n\
-            - NEVER select a skill just because it's the \"closest\" match — \
-              if nothing truly fits, reject all\n\
-            - Consider negative examples as strong signals of non-match\n\n\
-            ## Output Format\n\
-            ```json\n\
-            {{\n\
-              \"selected_skill\": \"skill_id_or_null\",\n\
-              \"needs_planning\": true/false,\n\
-              \"confidence\": 0.0-1.0,\n\
-              \"scores\": [\n\
-                {{\n\
-                  \"skill_id\": \"...\",\n\
-                  \"relevance\": 0-10,\n\
-                  \"specificity\": 0-10,\n\
-                  \"capability_match\": 0-10,\n\
-                  \"overall_score\": 0-10,\n\
-                  \"reason\": \"...\"\n\
-                }}\n\
-              ],\n\
-              \"selection_reasoning\": \"Detailed explanation...\"\n\
-            }}\n\
+            "You are a Skill Matching Judge. Evaluate which skill, if any, best matches the query.
+
+\
+            ## User Query (truncated)
+{}
+
+\
+            ## Query Summary
+{}
+
+\
+            ## Candidate Skills
+{}\
+            ## Evaluation Criteria (score 0-10 each)
+\
+            1. **Relevance**: Alignment with query
+\
+            2. **Specificity**: Is this the MOST specific skill?
+\
+            3. **Capability Match**: Does it have needed capabilities?
+\
+            4. **Negative Example Check**: If query resembles a negative example, overall <= 3.
+
+\
+            ## Rules
+\
+            - Select only if overall >= 7.0
+\
+            - If multiple >= 7.0, pick highest SPECIFICITY
+\
+            - If none >= 7.0, selected_skill must be null
+\
+            - NEVER select just because it's the \"closest\" match
+
+\
+            ## Output Format
+\
+            ```json
+\
+            {{
+\
+              \"selected_skill\": \"skill_id_or_null\",
+\
+              \"needs_planning\": true/false,
+\
+              \"confidence\": 0.0-1.0,
+\
+              \"scores\": [
+\
+                {{
+\
+                  \"skill_id\": \"...\",
+\
+                  \"relevance\": 0-10,
+\
+                  \"specificity\": 0-10,
+\
+                  \"capability_match\": 0-10,
+\
+                  \"overall_score\": 0-10,
+\
+                  \"reason\": \"...\"
+\
+                }}
+\
+              ],
+\
+              \"selection_reasoning\": \"Detailed explanation...\"
+\
+            }}
+\
             ```",
-            query, query_summary, candidate_sections
+            query_truncated, query_summary, candidate_sections
         )
+    }
+
+    /// 🆕 FIX: Helper to truncate strings with ellipsis
+    fn truncate(s: &str, max_len: usize) -> String {
+        if s.len() <= max_len {
+            s.to_string()
+        } else {
+            let mut end = max_len;
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &s[..end])
+        }
     }
 
     fn parse_ranking_response(

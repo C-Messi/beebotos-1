@@ -78,6 +78,12 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
             .and_then(|c| c.get("max_tokens"))
             .and_then(|t| t.parse::<u32>().ok());
 
+        // 🆕 FIX: Support model override for fast/cheap tasks (e.g. skill ranking)
+        let model_override = _context
+            .as_ref()
+            .and_then(|c| c.get("model"))
+            .cloned();
+
         // 🆕 FIX: Support native function calling via tools_json in extra_params
         // Agent sends Vec<communication::ToolDefinition>, convert to llm::Tool here.
         let tools: Option<Vec<beebotos_agents::llm::Tool>> = _context
@@ -104,7 +110,7 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
             .and_then(|c| c.get("tool_choice"))
             .cloned();
 
-        self.llm_service.chat(final_messages, max_tokens_override, tools, tool_choice).await.map_err(|e| {
+        self.llm_service.chat(final_messages, max_tokens_override, tools, tool_choice, model_override).await.map_err(|e| {
             beebotos_agents::error::AgentError::Execution(format!("LLM call failed: {}", e))
         })
     }

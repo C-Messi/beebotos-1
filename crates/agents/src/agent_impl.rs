@@ -220,8 +220,10 @@ impl Agent {
     ) -> Self {
         self.llm_interface = Some(interface.clone());
         // 🆕 SKILL MATCHING V2: Auto-build LLM intent analyzer when LLM interface is set
+        // 🆕 FIX: Timeout 5s → 20s to prevent frequent fallback to legacy path.
         self.llm_intent_analyzer = Some(Arc::new(
-            crate::skill_matching::LLMIntentAnalyzer::new(interface.clone()),
+            crate::skill_matching::LLMIntentAnalyzer::new(interface.clone())
+                .with_timeout(std::time::Duration::from_secs(20)),
         ));
         self
     }
@@ -2076,6 +2078,11 @@ impl Agent {
                     || query_lower_str.contains("雨")
                     || query_lower_str.contains("snow")
                     || query_lower_str.contains("雪");
+                if has_weather_intent {
+                    keywords.push("weather".to_string());
+                    keywords.push("get_weather".to_string());
+                    keywords.push("forecast".to_string());
+                }
 
                 // 🆕 OPTIMIZATION PHASE 1: Toolsets-based filter-first + scoring
                 let active_toolsets: std::collections::HashSet<String> = intent_opt
@@ -2134,8 +2141,21 @@ impl Agent {
                 let selected = if scored_skills.len() >= 3 {
                     scored_skills.into_iter().take(top_n).map(|(_, s)| s).collect::<Vec<_>>()
                 } else {
-                    // Fallback: if too few matches, use all enabled skills (but cap at 30)
-                    all_skills.iter().filter(|s| s.enabled).take(30).collect::<Vec<_>>()
+                    // 🆕 FIX: When too few keyword matches, still prioritize scored skills.
+                    // Inject only scored skills + enough top enabled skills to reach 3,
+                    // instead of flooding the LLM with 30 unrelated tools.
+                    let mut selected: Vec<&skills::registry::RegisteredSkill> = scored_skills.into_iter().map(|(_, s)| s).collect();
+                    if selected.len() < 3 {
+                        for s in all_skills.iter().filter(|s| s.enabled) {
+                            if !selected.iter().any(|sel| sel.skill.id == s.skill.id) {
+                                selected.push(s);
+                            }
+                            if selected.len() >= 3 {
+                                break;
+                            }
+                        }
+                    }
+                    selected
                 };
 
                 let mut tools = Vec::new();
@@ -2884,6 +2904,18 @@ The tool will handle validation and tell us what's missing.".to_string(),
             });
         }
 
+        // 🆕 FIX: Pass parameters to skill executor so ReAct knows the parsed args.
+        let enriched_input = if parameters.as_ref().map_or(false, |p| !p.is_empty()) {
+            let params_json = serde_json::to_string(&parameters).unwrap_or_default();
+            if input.is_empty() {
+                format!("[已解析参数] {}\n请使用这些参数执行相应的脚本。", params_json)
+            } else {
+                format!("{}\n\n[已解析参数] {}\n请使用这些参数执行相应的脚本。", input, params_json)
+            }
+        } else {
+            input.to_string()
+        };
+
         let context = skills::executor::SkillContext {
             input: input.to_string(),
             parameters: parameters.unwrap_or_default(),
@@ -2932,11 +2964,11 @@ The tool will handle validation and tell us what's missing.".to_string(),
                 let result = if has_scripts {
                     info!("Executing code skill '{}' via ReAct with tools", registered_skill.skill.name);
                     let executor = skills::CodeSkillExecutor::new(llm.clone());
-                    executor.execute(source, input).await
+                    executor.execute(source, &enriched_input).await
                 } else {
                     info!("Executing knowledge skill '{}' via ReAct with tools", registered_skill.skill.name);
                     let executor = skills::KnowledgeSkillExecutor::new(llm.clone());
-                    executor.execute(source, input).await
+                    executor.execute(source, &enriched_input).await
                 };
 
                 return match result {
@@ -4100,7 +4132,14 @@ The tool will handle validation and tell us what's missing.".to_string(),
 
             if let Some(skill) = candidates.into_iter().find(|s| s.enabled) {
                 info!("P2 PLANNING: matched skill '{}' for step '{}', executing...", skill.skill.name, step.description.chars().take(40).collect::<String>());
-                match self.execute_registered_skill(&skill, &step.description, None).await {
+                // 🆕 FIX: Include the original user goal in the skill input so knowledge skills
+                // don't ask follow-up questions about information the user already provided.
+                let enriched_step_input = if let Some(ref goal) = *self.current_plan_goal.read().await {
+                    format!("[原始用户请求] {}\n\n[当前步骤] {}", goal, step.description)
+                } else {
+                    step.description.clone()
+                };
+                match self.execute_registered_skill(&skill, &enriched_step_input, None).await {
                     Ok(result) => {
                         let _ = registry.record_usage(&skill.skill.id).await;
                         return Ok(ExecutionResult {

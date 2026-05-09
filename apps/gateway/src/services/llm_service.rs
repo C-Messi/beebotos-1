@@ -537,17 +537,19 @@ impl LlmService {
     /// to avoid double-flattening in Agent→Gateway path.
     /// 🆕 FIX: Accept optional max_tokens override from caller (e.g. Agent extra_params).
     /// 🆕 FIX: Supports native function calling via OpenAI-compatible tools parameter.
+    /// 🆕 FIX: Accept optional model override (e.g. "kimi-flash" for fast ranking tasks).
     pub async fn chat(
         &self,
         messages: Vec<LLMMessage>,
         max_tokens_override: Option<u32>,
         tools: Option<Vec<beebotos_agents::llm::Tool>>,
         tool_choice: Option<String>,
+        model_override: Option<String>,
     ) -> Result<String, GatewayError> {
         let start_time = std::time::Instant::now();
 
         let mut request_config = RequestConfig {
-            model: self.get_default_model(),
+            model: model_override.unwrap_or_else(|| self.get_default_model()),
             temperature: self.get_default_temperature(),
             max_tokens: max_tokens_override.or(Some(self.config.models.max_tokens)),
             stream: Some(false),

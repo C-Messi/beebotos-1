@@ -47,10 +47,16 @@ impl KnowledgeSkillExecutor {
             ));
         };
 
+        // 🆕 FIX: Strip SKILL.md down to essential instructions to prevent LLM from
+        // outputting skill self-introduction instead of answering the user directly.
+        let skill_instructions = crate::skills::code_executor::extract_skill_usage(&skill_md);
         let system_prompt = format!(
-            "You are the '{}' skill. Follow the instructions below to help the user.\n\n{}",
+            "You are the '{}' skill executor. Your ONLY job is to help the user based on the \
+            instructions below. Do NOT introduce yourself, describe your capabilities, or explain \
+            what you are. Answer the user's request directly and concisely.\n\n\
+            Skill instructions:\n{}",
             skill_name,
-            skill_md
+            skill_instructions
         );
 
         let tools = default_tool_set(&tool_root);

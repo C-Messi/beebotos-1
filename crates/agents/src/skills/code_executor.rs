@@ -93,13 +93,18 @@ impl CodeSkillExecutor {
         }
 
         // Fallback: full ReAct loop
+        // 🆕 FIX: Strip SKILL.md down to essential script usage to prevent LLM from outputting
+        // skill self-introduction instead of executing the tool.
+        let skill_instructions = extract_skill_usage(&skill_md);
         let system_prompt = format!(
-            "You are the '{}' skill. Follow the instructions below to help the user.\n\n\
+            "You are the '{}' skill executor. Your ONLY job is to run the appropriate script \
+            to fulfill the user's request. Do NOT introduce yourself, describe your capabilities, \
+            or explain what you are.\n\n\
             {scripts_info}\n\n\
             When constructing commands, use the absolute skill directory path: {skill_dir_str}\n\n\
+            Script usage instructions:\n{skill_instructions}\n\n\
             IMPORTANT: If the user has provided enough information, execute the script immediately \
-            using the process_exec tool. Do not ask follow-up questions unless critical information is missing.\n\n\
-            {skill_md}",
+            using the process_exec tool. Do not ask follow-up questions unless critical information is missing.",
             skill_path.file_name().unwrap_or_default().to_string_lossy(),
         );
 
@@ -123,10 +128,12 @@ impl CodeSkillExecutor {
         user_input: &str,
         skill_path: &Path,
     ) -> Result<String, AgentError> {
+        // 🆕 FIX: Use stripped skill usage to prevent LLM from generating intros instead of commands.
+        let skill_instructions = extract_skill_usage(skill_md);
         let prompt = format!(
-            "You are a code-skill assistant. Your job is to turn the user's request into a \
-            single shell command that fulfills it.\n\n\
-            Skill instructions:\n{skill_md}\n\n\
+            "You are a code-skill executor. Your job is to turn the user's request into a \
+            single shell command that fulfills it. Do NOT introduce yourself.\n\n\
+            Script usage:\n{skill_instructions}\n\n\
             {scripts_info}\n\n\
             When constructing commands, use the absolute skill directory path: {skill_dir_str}\n\n\
             User request: {user_input}\n\n\
@@ -200,6 +207,60 @@ impl CodeSkillExecutor {
                 e
             ))),
         }
+    }
+}
+
+/// Strip SKILL.md down to script usage blocks and tool descriptions.
+/// Removes marketing copy, feature lists, and examples that distract the LLM.
+pub fn extract_skill_usage(skill_md: &str) -> String {
+    let mut lines = Vec::new();
+    let mut in_code_block = false;
+    let mut in_usage_section = false;
+
+    for line in skill_md.lines() {
+        let trimmed = line.trim();
+
+        // Detect code blocks (bash examples are critical)
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            lines.push(line.to_string());
+            continue;
+        }
+
+        if in_code_block {
+            lines.push(line.to_string());
+            continue;
+        }
+
+        // Detect usage/工具使用说明 sections
+        if trimmed.to_lowercase().contains("usage")
+            || trimmed.to_lowercase().contains("使用说明")
+            || trimmed.to_lowercase().contains("工具使用")
+            || trimmed.to_lowercase().contains("使用示例")
+            || trimmed.starts_with("## ")
+            || trimmed.starts_with("### ")
+        {
+            in_usage_section = true;
+            lines.push(line.to_string());
+            continue;
+        }
+
+        // Skip feature lists, marketing copy, and empty lines outside usage sections
+        if in_usage_section {
+            // Skip emoji-only lines and decorative separators
+            if trimmed.chars().all(|c| c.is_whitespace() || c == '-' || c == '*' || c == '>' || c == '•' || c == '#' || c.is_ascii_punctuation()) {
+                continue;
+            }
+            lines.push(line.to_string());
+        }
+    }
+
+    let result = lines.join("\n");
+    if result.trim().is_empty() {
+        // Fallback: return first 2000 chars if no usage section found
+        skill_md.chars().take(2000).collect()
+    } else {
+        result
     }
 }
 

@@ -41,9 +41,12 @@ mod linux {
                 // CLONE_NEWNET = network namespace (no network by default)
                 // CLONE_NEWIPC = IPC namespace (isolate sysv ipc / posix mq)
                 // CLONE_NEWUTS = UTS namespace (isolate hostname)
+                // 🆕 FIX: Allow network access for skills that need external APIs
+                // when BEE_ALLOW_NETWORK is set (e.g. weather, web search).
+                let allow_network = std::env::var("BEE_ALLOW_NETWORK").is_ok();
                 let flags = libc::CLONE_NEWNS
                     | libc::CLONE_NEWPID
-                    | libc::CLONE_NEWNET
+                    | (if allow_network { 0 } else { libc::CLONE_NEWNET })
                     | libc::CLONE_NEWIPC
                     | libc::CLONE_NEWUTS;
                 if libc::unshare(flags) != 0 {
