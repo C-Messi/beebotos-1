@@ -75,6 +75,8 @@ pub struct Agent {
     pub(crate) approval_gate: Option<crate::security::ApprovalGate>,
     // 🆕 FIX (Plan C): Pending approvals for multi-step user confirmation
     pub(crate) pending_approvals: Arc<RwLock<HashMap<String, crate::security::ApprovalRequest>>>,
+    // 🆕 MCP PARAMETER EXTRACTION: Pending interactive parameter forms
+    pub(crate) pending_parameter_forms: Arc<RwLock<HashMap<String, crate::skills::PendingParameterForm>>>,
     // 🆕 FIX (Plan C): Temporary flag to skip approval for confirmed operations
     pub(crate) skip_approval: std::sync::atomic::AtomicBool,
     // 🆕 OPTIMIZATION PHASE 2: Prompt cache for repeated prompt assembly
@@ -127,6 +129,7 @@ impl Agent {
             trace_store: None,
             approval_gate: Some(crate::security::ApprovalGate::with_paper_trading_rules()),
             pending_approvals: Arc::new(RwLock::new(HashMap::new())),
+            pending_parameter_forms: Arc::new(RwLock::new(HashMap::new())),
             skip_approval: std::sync::atomic::AtomicBool::new(false),
             prompt_cache: Some(Arc::new(crate::prompt::PromptCache::new())),
             max_rounds: 10,
@@ -764,6 +767,91 @@ impl Agent {
         }
     }
 
+    // ── MCP Parameter Extraction Helpers ──
+
+    /// Determine whether an MCP skill is high-risk (requires preview + approval).
+    /// Uses precise suffix/prefix matching to avoid false positives on skill names
+    /// like "buying_guide" or "knowledge_buy".
+    fn is_high_risk_mcp_skill(skill_id: &str) -> bool {
+        let id_lower = skill_id.to_lowercase();
+        let high_risk_keywords = [
+            "_order", "place_order", "cancel_order",
+            "_trade", "trading_", "_trading",
+            "_transfer", "_withdraw", "_delete",
+        ];
+        high_risk_keywords.iter().any(|kw| id_lower.contains(kw))
+            || id_lower.ends_with("_buy") || id_lower.ends_with("_sell")
+            || id_lower.starts_with("buy_") || id_lower.starts_with("sell_")
+    }
+
+    /// Generate a human-readable action preview for high-risk MCP operations.
+    fn generate_action_preview(_skill_id: &str, tool_name: &str, params: &serde_json::Map<String, serde_json::Value>) -> String {
+        let mut lines = vec![
+            "🔴 高风险操作确认".to_string(),
+            String::new(),
+            format!("操作: {}", tool_name),
+        ];
+
+        for (key, value) in params {
+            let display_value = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => value.to_string(),
+            };
+            let label = match key.as_str() {
+                "symbol" => "交易品种",
+                "side" => "交易方向",
+                "notional" | "qty" | "quantity" => "交易数量/金额",
+                "price" => "价格",
+                "type" => "订单类型",
+                _ => key.as_str(),
+            };
+            lines.push(format!("{}: {}", label, display_value));
+        }
+
+        lines.push(String::new());
+        lines.push("⚠️ 此操作涉及真实资金或重要数据，确认后无法撤销。".to_string());
+        lines.push("请仔细核对以上信息，回复「确认」执行，或直接取消。".to_string());
+        lines.join("\n")
+    }
+
+    /// Render a parameter collection form for interactive parameter input.
+    fn render_parameter_form(
+        request_id: &str,
+        missing_fields: &[crate::skills::FieldSchema],
+        partial: &serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let mut lines = vec![
+            "📋 请补充以下信息".to_string(),
+            String::new(),
+        ];
+
+        for field in missing_fields {
+            let hint = match field.name.as_str() {
+                "symbol" => "例如: BTC/USD, ETH/USD",
+                "side" => "买入 或 卖出",
+                "notional" => "例如: 100 (USD)",
+                "qty" => "例如: 0.01",
+                _ => &field.description,
+            };
+            lines.push(format!("• {} ({}): {}", field.name, field.param_type, hint));
+        }
+
+        if !partial.is_empty() {
+            lines.push(String::new());
+            lines.push("已识别的信息:".to_string());
+            for (k, v) in partial {
+                lines.push(format!("  • {}: {}", k, v));
+            }
+        }
+
+        lines.push(String::new());
+        lines.push("请直接回复您要填写的内容，例如：\"BTC/USD, 买入, 100\"".to_string());
+        lines.push(format!("(表单 ID: {})", request_id));
+        lines.join("\n")
+    }
+
     /// Clean up LLM responses that contain thinking/process analysis instead of direct answers.
     /// 🆕 OPTIMIZATION PHASE 2: Supports <REASONING_SCRATCHPAD> extraction
     fn cleanup_thinking_process(response: &str) -> String {
@@ -1114,8 +1202,58 @@ impl Agent {
             task.input.clone()
         };
 
+        // 🆕 MCP PARAMETER EXTRACTION: Check for form submission responses FIRST.
+        // If the user is replying to a parameter form, handle it before any other logic.
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+            if let Some(form_submission) = json.get("form_submission") {
+                if let Some(req_id) = form_submission.get("request_id").and_then(|v| v.as_str()) {
+                    return self.handle_form_submission(req_id, &form_submission).await;
+                }
+            }
+        }
+        // Also try to detect plain-text form responses (user replies directly with values)
+        // Heuristic: only treat as form submission if message looks like parameter values
+        // (contains commas/numbers/short length) and there is an active pending form.
+        {
+            let has_pending_form = {
+                let forms = self.pending_parameter_forms.read().await;
+                forms.values().any(|form| !form.is_expired())
+            };
+            if has_pending_form {
+                // Exclude pure confirmation words from form detection so they fall through
+                // to the approval confirmation handler below.
+                let is_pure_confirmation = message_text.trim().len() <= 6
+                    && ["确认", "同意", "yes", "ok", "好", "可以", "执行", "y"]
+                        .iter()
+                        .any(|w| message_text.to_lowercase().trim() == *w);
+                let looks_like_form_response = !is_pure_confirmation
+                    && (message_text.contains(',')
+                        || message_text.contains('，')
+                        || message_text.chars().any(|c| c.is_ascii_digit())
+                        || message_text.trim().len() <= 30);
+                if looks_like_form_response {
+                    let req_id = {
+                        let forms = self.pending_parameter_forms.read().await;
+                        forms.iter()
+                            .find(|(_, form)| !form.is_expired())
+                            .map(|(req_id, _)| req_id.clone())
+                    };
+                    if let Some(req_id) = req_id {
+                        match self.handle_text_form_submission(&req_id, &message_text).await {
+                            Ok(result) => return Ok(result),
+                            Err(_) => {
+                                // Form expired or parsing failed; continue to normal processing
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 🆕 FIX (Plan C): Check for pending approval confirmations BEFORE intent analysis.
         // If user says "confirm"/"同意"/"yes"/"ok", execute the pending operation.
+        // This is checked AFTER form submission so that parameter values containing
+        // "确认" (e.g., "买入，确认") are handled as form input first.
         let confirmation_words = ["确认", "同意", "yes", "y", "ok", "好", "可以", "执行"];
         let is_confirmation = message_text.trim().len() <= 20 
             && confirmation_words.iter().any(|w| message_text.to_lowercase().contains(w));
@@ -1332,6 +1470,163 @@ impl Agent {
         }
 
         result
+    }
+
+    /// 🆕 MCP PARAMETER EXTRACTION: Handle structured form submission.
+    async fn handle_form_submission(
+        &self,
+        request_id: &str,
+        form_submission: &serde_json::Value,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        let values = form_submission
+            .get("values")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+
+        let pending = self.pending_parameter_forms.write().await.remove(request_id);
+        let pending = match pending {
+            Some(p) if !p.is_expired() => p,
+            _ => {
+                return Ok(("表单已过期或不存在，请重新发起请求。".to_string(), vec![]));
+            }
+        };
+
+        // Merge partial params with submitted values
+        let mut final_params = pending.partial_params.clone();
+        for (k, v) in &values {
+            final_params.insert(k.clone(), v.clone());
+        }
+
+        info!(
+            "Form submission for '{}': merged params: {:?}",
+            pending.skill_id,
+            final_params.keys().collect::<Vec<_>>()
+        );
+
+        // Re-execute the skill with complete parameters
+        if let Some(ref registry) = self.skill_registry {
+            if let Some(skill) = registry.get(&pending.skill_id).await {
+                let params_map: std::collections::HashMap<String, String> = final_params
+                    .iter()
+                    .map(|(k, v)| {
+                        let s = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            _ => v.to_string(),
+                        };
+                        (k.clone(), s)
+                    })
+                    .collect();
+                let skill_result = self.execute_registered_skill(&skill, &pending.user_input, Some(params_map)).await;
+                match skill_result {
+                    Ok(result) => {
+                        let _ = registry.record_usage(&pending.skill_id).await;
+                        return Ok((result.output, vec![]));
+                    }
+                    Err(e) => {
+                        return Ok((format!("参数已补充，但执行失败: {}", e), vec![]));
+                    }
+                }
+            }
+        }
+
+        Ok(("找不到对应的技能，请重新发起请求。".to_string(), vec![]))
+    }
+
+    /// 🆕 MCP PARAMETER EXTRACTION: Handle plain-text form responses.
+    /// Attempts to parse comma-separated values into the missing fields.
+    async fn handle_text_form_submission(
+        &self,
+        request_id: &str,
+        message_text: &str,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        let pending = self.pending_parameter_forms.write().await.remove(request_id);
+        let pending = match pending {
+            Some(p) if !p.is_expired() => p,
+            _ => {
+                // Form not found or expired — caller should fall through to normal processing
+                return Err(AgentError::Execution("Form expired or not found".to_string()));
+            }
+        };
+
+        // Try to parse comma-separated or space-separated values
+        let parts: Vec<&str> = message_text.split(&[',', '，', '|']).map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let mut final_params = pending.partial_params.clone();
+
+        // Simple heuristic mapping: try to match each part to a missing field by position
+        for (i, field) in pending.missing_fields.iter().enumerate() {
+            if let Some(value) = parts.get(i) {
+                let json_value = match field.param_type.as_str() {
+                    "number" | "integer" => {
+                        if let Ok(n) = value.parse::<f64>() {
+                            serde_json::json!(n)
+                        } else {
+                            serde_json::json!(value)
+                        }
+                    }
+                    "boolean" => serde_json::json!(value.to_lowercase() == "true" || *value == "是"),
+                    _ => serde_json::json!(value),
+                };
+                final_params.insert(field.name.clone(), json_value);
+            }
+        }
+
+        info!(
+            "Text form submission for '{}': parsed params: {:?}",
+            pending.skill_id,
+            final_params.keys().collect::<Vec<_>>()
+        );
+
+        // Validate that all originally-missing fields are now present
+        let still_missing: Vec<String> = pending.missing_fields.iter()
+            .filter(|f| !final_params.contains_key(&f.name))
+            .map(|f| f.name.clone())
+            .collect();
+        if !still_missing.is_empty() {
+            // Re-create the form with updated partial params for the user to try again
+            let req_id = uuid::Uuid::new_v4().to_string();
+            let remaining_fields: Vec<crate::skills::FieldSchema> = pending.missing_fields.into_iter()
+                .filter(|f| !final_params.contains_key(&f.name))
+                .collect();
+            let new_form = crate::skills::PendingParameterForm::new(
+                req_id.clone(),
+                pending.skill_id.clone(),
+                pending.user_input.clone(),
+                final_params,
+                remaining_fields.clone(),
+            );
+            self.pending_parameter_forms.write().await.insert(req_id.clone(), new_form);
+            let output = Self::render_parameter_form(&req_id, &remaining_fields, &serde_json::Map::new());
+            return Ok((format!("还有以下信息未提供，请补充：\n{}", output), vec![]));
+        }
+
+        // Re-execute the skill with complete parsed parameters
+        if let Some(ref registry) = self.skill_registry {
+            if let Some(skill) = registry.get(&pending.skill_id).await {
+                let params_map: std::collections::HashMap<String, String> = final_params
+                    .iter()
+                    .map(|(k, v)| {
+                        let s = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            _ => v.to_string(),
+                        };
+                        (k.clone(), s)
+                    })
+                    .collect();
+                let skill_result = self.execute_registered_skill(&skill, &pending.user_input, Some(params_map)).await;
+                match skill_result {
+                    Ok(result) => {
+                        let _ = registry.record_usage(&pending.skill_id).await;
+                        return Ok((result.output, vec![]));
+                    }
+                    Err(e) => {
+                        return Ok((format!("参数已识别，但执行失败: {}", e), vec![]));
+                    }
+                }
+            }
+        }
+
+        Ok(("找不到对应的技能，请重新发起请求。".to_string(), vec![]))
     }
 
     /// 🆕 SKILL MATCHING V2: Handle LLM task with V2 intent + skill selection
@@ -2821,7 +3116,7 @@ The tool will handle validation and tell us what's missing.".to_string(),
         }
         } // close skip_approval check
 
-        // ── MCP Skill Bridge: Execute MCP tools registered as skills ──
+        // ── MCP Skill Bridge: Two-Stage Execution (Parameter Resolution → Confirmation & Execution) ──
         if let Some((server_name, tool_name)) = crate::mcp::skill_bridge::parse_mcp_skill_id(&registered_skill.skill.id) {
             let mcp = self
                 .mcp_manager
@@ -2833,10 +3128,9 @@ The tool will handle validation and tell us what's missing.".to_string(),
                 .await
                 .ok_or_else(|| AgentError::InvalidConfig(format!("MCP client '{}' not found", server_name)))?;
 
-            // Build arguments from input + parameters
+            // ===== STAGE 1: Parameter Resolution =====
             let mut arguments = serde_json::Map::new();
             if !input.is_empty() {
-                // Try to parse input as JSON object; if it fails, wrap it in a "query" field
                 match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(input) {
                     Ok(map) => arguments = map,
                     Err(_) => {
@@ -2852,22 +3146,157 @@ The tool will handle validation and tell us what's missing.".to_string(),
                 }
             }
 
-            // Security: validate arguments against tool's JSON Schema before calling
-            {
-                let tools_result = client.list_tools(None).await.map_err(|e| {
-                    AgentError::Execution(format!("Failed to list tools for validation: {}", e))
-                })?;
-                if let Some(tool) = tools_result.tools.into_iter().find(|t| t.name == tool_name) {
-                    if let Err(validation_err) = crate::mcp::skill_bridge::validate_tool_arguments(&tool.input_schema, &arguments) {
-                        return Err(AgentError::InvalidConfig(format!(
-                            "MCP tool argument validation failed: {}", validation_err
-                        )));
+            // Fetch tool schema for validation and extraction
+            let tools_result = client.list_tools(None).await.map_err(|e| {
+                AgentError::Execution(format!("Failed to list tools for validation: {}", e))
+            })?;
+            let tool_opt = tools_result.tools.into_iter().find(|t| t.name == tool_name);
+            let tool_schema = tool_opt.as_ref().map(|t| t.input_schema.clone());
+            let tool_description = tool_opt.as_ref()
+                .and_then(|t| t.description.clone())
+                .unwrap_or_else(|| format!("MCP tool '{}'", tool_name));
+
+            // Validate arguments; if incomplete, attempt LLM extraction
+            let mut final_params = arguments.clone();
+            let needs_extraction = arguments.is_empty()
+                || tool_schema.as_ref().map_or(false, |schema| {
+                    crate::mcp::skill_bridge::validate_tool_arguments(schema, &arguments).is_err()
+                });
+
+            if needs_extraction {
+                if let Some(ref llm) = self.llm_interface {
+                    let extractor = skills::McpParameterExtractor::new(llm.clone());
+                    match extractor.extract(input, tool_schema.as_ref().unwrap_or(&serde_json::json!({})), &skill_id, &tool_description).await {
+                        Ok(skills::ExtractedParams::Complete(params)) => {
+                            info!("MCP parameter extraction succeeded for '{}'", skill_id);
+                            final_params = params;
+                        }
+                        Ok(skills::ExtractedParams::Partial { partial, missing }) => {
+                            info!("MCP parameter extraction partial for '{}', missing: {:?}", skill_id, missing.iter().map(|f| &f.name).collect::<Vec<_>>());
+                            let req_id = uuid::Uuid::new_v4().to_string();
+                            let form = skills::PendingParameterForm::new(
+                                req_id.clone(),
+                                skill_id.clone(),
+                                input.to_string(),
+                                partial,
+                                missing.clone(),
+                            );
+                            // Insert form and clean up in a single lock
+                            {
+                                let mut forms = self.pending_parameter_forms.write().await;
+                                forms.insert(req_id.clone(), form);
+                                // Remove expired forms; if still over limit, remove oldest
+                                while forms.len() > 20 {
+                                    let oldest = forms.iter()
+                                        .min_by_key(|(_, f)| f.submitted_at)
+                                        .map(|(k, _)| k.clone());
+                                    if let Some(k) = oldest {
+                                        forms.remove(&k);
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                            let output = Self::render_parameter_form(&req_id, &missing, &serde_json::Map::new());
+                            return Ok(skills::executor::SkillExecutionResult {
+                                task_id: skill_id,
+                                success: false,
+                                output,
+                                structured_output: None,
+                                execution_time_ms: start_time.elapsed().as_millis() as u64,
+                            });
+                        }
+                        Ok(skills::ExtractedParams::Unclear { reason }) => {
+                            warn!("MCP parameter extraction unclear for '{}': {}", skill_id, reason);
+                            return Ok(skills::executor::SkillExecutionResult {
+                                task_id: skill_id,
+                                success: false,
+                                output: format!("无法从您的描述中提取操作参数。{} 请提供更具体的信息，例如：品种（BTC）、方向（买入/卖出）、金额。", reason),
+                                structured_output: None,
+                                execution_time_ms: start_time.elapsed().as_millis() as u64,
+                            });
+                        }
+                        Err(e) => {
+                            warn!("MCP parameter extraction failed for '{}': {}", skill_id, e);
+                            return Ok(skills::executor::SkillExecutionResult {
+                                task_id: skill_id,
+                                success: false,
+                                output: format!("参数提取失败: {}。请尝试用更明确的格式描述，例如：'买入 BTC 100 美元'。", e),
+                                structured_output: None,
+                                execution_time_ms: start_time.elapsed().as_millis() as u64,
+                            });
+                        }
+                    }
+                } else {
+                    return Err(AgentError::InvalidConfig("LLM interface not configured for parameter extraction".into()));
+                }
+            }
+
+            // Final validation after extraction
+            if let Some(ref schema) = tool_schema {
+                if let Err(e) = crate::mcp::skill_bridge::validate_tool_arguments(schema, &final_params) {
+                    return Ok(skills::executor::SkillExecutionResult {
+                        task_id: skill_id,
+                        success: false,
+                        output: format!("参数验证失败: {}。请检查您提供的参数是否符合要求。", e),
+                        structured_output: None,
+                        execution_time_ms: start_time.elapsed().as_millis() as u64,
+                    });
+                }
+            }
+
+            // ===== STAGE 2: Confirmation & Execution =====
+            let is_high_risk = Self::is_high_risk_mcp_skill(&skill_id);
+            if is_high_risk {
+                let preview = Self::generate_action_preview(&skill_id, &tool_name, &final_params);
+                let env = std::collections::HashMap::new();
+                let params_json: serde_json::Value = final_params.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<serde_json::Map<String, serde_json::Value>>()
+                    .into();
+
+                if let Some(ref gate) = self.approval_gate {
+                    match gate.evaluate(&skill_id, &params_json, &env) {
+                        crate::security::ApprovalResult::AutoApproved { rule } => {
+                            info!("MCP skill '{}' auto-approved by rule: {}", skill_id, rule);
+                            // For paper trading, auto-approve is sufficient; for live trading,
+                            // still show preview but mark as pre-approved.
+                            if !rule.contains("paper") && !rule.contains("模拟") {
+                                // Live trading: show preview for visibility
+                                info!("Live trading MCP skill '{}', showing preview before execution", skill_id);
+                            }
+                        }
+                        crate::security::ApprovalResult::Rejected { reason } => {
+                            return Ok(skills::executor::SkillExecutionResult {
+                                task_id: skill_id,
+                                success: false,
+                                output: format!("{}\n\n{}", preview, reason),
+                                structured_output: None,
+                                execution_time_ms: start_time.elapsed().as_millis() as u64,
+                            });
+                        }
+                        _ => {
+                            // Needs confirmation: store pending approval with full params
+                            let request = gate.build_request(&skill_id, &params_json);
+                            let req_id = request.request_id.clone();
+                            {
+                                let mut pending = self.pending_approvals.write().await;
+                                pending.insert(req_id.clone(), request);
+                            }
+                            return Ok(skills::executor::SkillExecutionResult {
+                                task_id: skill_id,
+                                success: false,
+                                output: format!("{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\n\n请回复「确认」或「同意」来执行此操作。", preview),
+                                structured_output: None,
+                                execution_time_ms: start_time.elapsed().as_millis() as u64,
+                            });
+                        }
                     }
                 }
             }
 
-            let args = if arguments.is_empty() { None } else { Some(arguments) };
-
+            // Execute MCP tool call
+            let args = if final_params.is_empty() { None } else { Some(final_params) };
             let result = client
                 .call_tool(tool_name, args)
                 .await
