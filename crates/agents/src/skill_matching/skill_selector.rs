@@ -40,7 +40,10 @@ pub struct SkillSelection {
 
 impl SkillSelection {
     /// Threshold for selecting a skill
-    pub const SELECTION_THRESHOLD: f32 = 7.0;
+    /// 🆕 FIX: Lowered from 7.0 to 5.0 — query-type intents (e.g. "ETH price")
+    /// typically score 5-7 against data-fetching skills. 7.0 was too strict
+    /// and caused unnecessary fallback to native tool calling.
+    pub const SELECTION_THRESHOLD: f32 = 5.0;
 
     pub fn is_rejected(&self) -> bool {
         self.selected_skill.is_none()
@@ -65,9 +68,10 @@ impl SkillSelector {
         Self {
             llm,
             registry,
-            // 🆕 FIX: Increased from 3 to 10 candidates — ensure relevant skills
-            // (especially MCP tools with low usage_count) are not truncated out.
-            max_candidates: 10,
+            // 🆕 FIX: Reduced from 10 to 5 candidates — LLM ranking quality
+            // degrades with too many candidates. 5 is the sweet spot for
+            // accurate scoring without overwhelming the LLM.
+            max_candidates: 5,
             // 🆕 FIX: Increased to 30s — skill selection needs time for LLM ranking
             // of complex queries (e.g. weather, multi-step tasks).
             // Note: Kimi k2.6 can take 15-25s for ranking output at peak load.
@@ -378,6 +382,8 @@ impl SkillSelector {
     /// latency. Build the ranking prompt — pure semantic evaluation, zero
     /// keyword rules 🆕 FIX: Ultra-lightweight output format to minimize
     /// LLM generation latency.
+    /// 🆕 FIX: Use index-based scoring to avoid colon-in-ID parsing issues
+    /// with MCP skill IDs like "mcp:alpaca/get_crypto_snapshot".
     fn build_ranking_prompt(
         &self,
         query: &str,
@@ -404,11 +410,13 @@ impl SkillSelector {
             let when_truncated = Self::truncate(&when_to_use, 150);
             let desc_truncated = Self::truncate(&manifest.description, 80);
 
+            // 🆕 FIX: Use [index] as the unique identifier in the prompt.
+            // Do NOT include the raw skill id (which may contain colons that
+            // break the scores: line parser).
             candidate_sections.push_str(&format!(
-                "[{index}] {name} (id:{id}) | {when} | {desc} | [{caps}]\n",
+                "[{index}] {name} | {when} | {desc} | [{caps}]\n",
                 index = i,
                 name = manifest.name,
-                id = skill.skill.id,
                 when = when_truncated,
                 desc = desc_truncated,
                 caps = caps,
@@ -418,7 +426,7 @@ impl SkillSelector {
         let query_truncated = Self::truncate(query, 300);
 
         format!(
-            "You are a Skill Matching Judge. Pick the ONE skill that best matches the user query, or NONE if no skill fits.\n\n            Query: {}\n            Summary: {}\n\n            Candidates (id | when_to_use | description | capabilities):\n{}\n            RULES:\n            - Overall score 0-10 for EACH candidate\n            - Select ONLY if best score >= 7.0\n            - If multiple >= 7.0, pick the MOST SPECIFIC\n            - NEVER select just because it is the closest match\n\n            OUTPUT FORMAT (exactly 3 lines, no JSON, no explanation):\n            selected_skill: <skill_id_or_NONE>\n            needs_planning: <yes/no>\n            scores: <id:score,id:score,...>",
+            "You are a Skill Matching Judge. Pick the ONE skill that best matches the user query, or NONE if no skill fits.\n\n            Query: {}\n            Summary: {}\n\n            Candidates (index | name | when_to_use | description | capabilities):\n{}\n            RULES:\n            - Overall score 0-10 for EACH candidate\n            - Select ONLY if best score >= 5.0\n            - If multiple >= 5.0, pick the MOST SPECIFIC\n            - NEVER select just because it is the closest match\n\n            OUTPUT FORMAT (exactly 3 lines, no JSON, no explanation):\n            selected_skill: <skill_id_or_NONE>\n            needs_planning: <yes/no>\n            scores: <index:score,index:score,...>\n\n            EXAMPLE:\n            selected_skill: mcp:alpaca/get_crypto_snapshot\n            needs_planning: no\n            scores: 0:8,1:6,2:4,3:2,4:0",
             query_truncated, query_summary, candidate_sections
         )
     }
@@ -459,9 +467,31 @@ impl SkillSelector {
                 let val = line["scores:".len()..].trim();
                 for part in val.split(',') {
                     let part = part.trim();
-                    if let Some((id, score_str)) = part.split_once(':') {
-                        if let Ok(score) = score_str.trim().parse::<f32>() {
-                            scores_map.insert(id.trim().to_string(), score);
+                    if part.is_empty() {
+                        continue;
+                    }
+
+                    // 🆕 FIX: Use rsplit_once(':') to handle MCP skill IDs that
+                    // contain colons (e.g. "mcp:alpaca/get_crypto_snapshot:8").
+                    // We split from the RIGHT so the last colon separates id from score.
+                    if let Some((left, score_str)) = part.rsplit_once(':') {
+                        let left = left.trim();
+                        let score_str = score_str.trim();
+
+                        if let Ok(score) = score_str.parse::<f32>() {
+                            // 🆕 FIX: Prefer index-based lookup.
+                            // If left side is a numeric index, map it to the candidate's skill id.
+                            if let Ok(idx) = left.parse::<usize>() {
+                                if idx < candidates.len() {
+                                    let id = candidates[idx].skill.id.clone();
+                                    scores_map.insert(id, score);
+                                    continue;
+                                }
+                            }
+
+                            // Fallback: treat left side as literal skill id
+                            // (backward compatibility for non-MCP skills)
+                            scores_map.insert(left.to_string(), score);
                         }
                     }
                 }

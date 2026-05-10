@@ -903,11 +903,12 @@ impl Agent {
     /// positives on skill names like "buying_guide" or "knowledge_buy".
     fn is_high_risk_mcp_skill(skill_id: &str) -> bool {
         let id_lower = skill_id.to_lowercase();
+        // 🆕 FIX: Removed "_trade" — get_crypto_latest_trade / get_crypto_latest_quote
+        // are read-only queries and should NOT require approval.
         let high_risk_keywords = [
             "_order",
             "place_order",
             "cancel_order",
-            "_trade",
             "trading_",
             "_trading",
             "_transfer",
@@ -1482,10 +1483,12 @@ impl Agent {
                     if let Some(ref registry) = self.skill_registry {
                         if let Some(skill) = registry.get(&request.skill_id).await {
                             // 🆕 FIX: Temporarily bypass approval gate for confirmed operation
+                            // 🆕 FIX: Use original_input instead of params.to_string() so
+                            // MCP parameter extractor can re-extract params from natural language.
                             self.skip_approval
                                 .store(true, std::sync::atomic::Ordering::SeqCst);
                             let skill_result = self
-                                .execute_registered_skill(&skill, &request.params.to_string(), None)
+                                .execute_registered_skill(&skill, &request.original_input, None)
                                 .await;
                             self.skip_approval
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1923,21 +1926,73 @@ impl Agent {
                 );
 
                 // Step 6: Post-process the final answer (safety checks)
-                let processed = match crate::skills::investment_analysis::post_process_final_answer(
+                let mut processed = match crate::skills::investment_analysis::post_process_final_answer(
                     &raw_content,
                     user_risk_level,
                 ) {
                     Ok(report_json) => {
                         // Step 7: Format as user-friendly Markdown
-                        match crate::skills::investment_analysis::format_report_for_user(
+                        let formatted = match crate::skills::investment_analysis::format_report_for_user(
                             &report_json,
                         ) {
                             Ok(formatted) => formatted,
                             Err(e) => {
                                 warn!("Failed to format report: {}. Returning raw JSON.", e);
-                                report_json
+                                report_json.clone()
+                            }
+                        };
+
+                        // 🆕 FIX: If user originally requested a trade, try to extract
+                        // trade_request from the ReAct report and trigger execution.
+                        let trade_keywords = [
+                            "开单", "下单", "买入", "卖出", "交易", "买", "卖",
+                            "order", "buy", "sell", "place", "trade",
+                        ];
+                        let has_trade_intent = trade_keywords.iter().any(|kw| {
+                            message_text.to_lowercase().contains(kw)
+                        });
+                        if has_trade_intent {
+                            if let Ok(report) = serde_json::from_str::<
+                                crate::skills::investment_analysis::types::InvestmentAnalysisReport,
+                            >(&report_json)
+                            {
+                                if let Some(trade_req) = report.trade_request {
+                                    info!(
+                                        "ReAct report contains trade_request: {:?} for task {}",
+                                        trade_req, task_id
+                                    );
+                                    // Build natural-language input for parameter extraction
+                                    let trade_input = format!(
+                                        "{}，{}，{} USD",
+                                        trade_req.symbol,
+                                        trade_req.side,
+                                        trade_req.notional.unwrap_or_else(|| trade_req.qty.clone().unwrap_or_default())
+                                    );
+                                    // Trigger trade skill execution (will go through approval gate)
+                                    match self.execute_skill_by_id(
+                                        "mcp:alpaca/place_crypto_order",
+                                        &trade_input,
+                                        None,
+                                    )
+                                    .await
+                                    {
+                                        Ok(skill_result) => {
+                                            let mut combined = formatted;
+                                            combined.push('\n');
+                                            combined.push_str("---");
+                                            combined.push('\n');
+                                            combined.push_str(&skill_result.output);
+                                            return Ok((combined, vec![]));
+                                        }
+                                        Err(e) => {
+                                            warn!("Trade execution after ReAct failed: {}", e);
+                                        }
+                                    }
+                                }
                             }
                         }
+
+                        formatted
                     }
                     Err(e) => {
                         warn!(
@@ -2666,7 +2721,7 @@ impl Agent {
                         skill_id
                     );
                     // 🆕 FIX: Enrich input with gateway-provided context (weather_data, etc.)
-                    let enriched_input = if let Some(ref weather) = weather_data {
+                    let mut enriched_input = if let Some(ref weather) = weather_data {
                         if !weather.is_empty() {
                             format!(
                                 "{}\n\n[参考数据] 实时天气：{}\n请基于以上数据回答。",
@@ -2678,6 +2733,26 @@ impl Agent {
                     } else {
                         input_text.clone()
                     };
+
+                    // 🆕 FIX: Inject conversation history into knowledge skill input so
+                    // multi-turn skills (e.g. Travel Planner) can see the full context.
+                    // Without this, the skill only sees the current message and asks for
+                    // information the user already provided in earlier turns.
+                    if !history.is_empty() {
+                        let mut context = String::new();
+                        for (role, content) in &history {
+                            let prefix = match role.as_str() {
+                                "user" => "用户",
+                                "assistant" => "助手",
+                                "system" => "系统",
+                                _ => &role,
+                            };
+                            context.push_str(&format!("{}: {}\n", prefix, content));
+                        }
+                        context.push_str(&format!("用户: {}\n", enriched_input));
+                        enriched_input = context;
+                    }
+
                     let skill_result = self
                         .execute_registered_skill(&registered, &enriched_input, None)
                         .await;
@@ -4298,7 +4373,7 @@ impl Agent {
                             "Approval required but not granted for skill '{}': {}",
                             skill_id, reason
                         );
-                        let request = gate.build_request(&skill_id, &params_json);
+                        let request = gate.build_request(&skill_id, &params_json, input);
                         let req_id = request.request_id.clone();
                         let description = request.description.clone();
                         let risk_level = request.risk_level;
@@ -4520,7 +4595,8 @@ impl Agent {
 
             // ===== STAGE 2: Confirmation & Execution =====
             let is_high_risk = Self::is_high_risk_mcp_skill(&skill_id);
-            if is_high_risk {
+            // 🆕 FIX: Skip approval check if skip_approval flag is set (e.g., Plan C confirmed)
+            if is_high_risk && !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst) {
                 let preview = Self::generate_action_preview(&skill_id, &tool_name, &final_params);
                 let env = std::collections::HashMap::new();
                 let params_json: serde_json::Value = final_params
@@ -4531,6 +4607,10 @@ impl Agent {
 
                 if let Some(ref gate) = self.approval_gate {
                     match gate.evaluate(&skill_id, &params_json, &env) {
+                        crate::security::ApprovalResult::Approved => {
+                            // 🆕 FIX: Approved (no approval needed) — proceed directly
+                            info!("MCP skill '{}' approved without confirmation", skill_id);
+                        }
                         crate::security::ApprovalResult::AutoApproved { rule } => {
                             info!("MCP skill '{}' auto-approved by rule: {}", skill_id, rule);
                             // For paper trading, auto-approve is sufficient; for live trading,
@@ -4553,8 +4633,8 @@ impl Agent {
                             });
                         }
                         _ => {
-                            // Needs confirmation: store pending approval with full params
-                            let request = gate.build_request(&skill_id, &params_json);
+                            // Needs confirmation: store pending approval with full params + original input
+                            let request = gate.build_request(&skill_id, &params_json, input);
                             let req_id = request.request_id.clone();
                             {
                                 let mut pending = self.pending_approvals.write().await;

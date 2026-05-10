@@ -38,6 +38,9 @@ pub struct InvestmentAnalysisReport {
     #[serde(default)]
     pub risk_warnings: Vec<String>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trade_request: Option<TradeRequest>,
+
     pub disclaimer: String,
 }
 
@@ -159,6 +162,21 @@ pub struct UserSpecificNotes {
 pub struct DataSource {
     pub tool: String,
     pub round: usize,
+}
+
+/// Trade request embedded in analysis report
+/// When the user explicitly asks to place an order, the LLM can output
+/// concrete trade parameters here so the agent can trigger execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeRequest {
+    pub symbol: String,
+    pub side: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qty: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notional: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_type: Option<String>,
 }
 
 /// Valid verdict actions

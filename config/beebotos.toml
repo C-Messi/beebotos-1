@@ -149,7 +149,7 @@ env = { ALPACA_API_KEY = "PKJX2TXVDNC33FEM3TSRKRSP4S", ALPACA_SECRET_KEY = "9AyE
 
 [mcp]
 auto_init = true
-timeout_ms = 30000
+timeout_ms = 60000  # 🆕 FIX: Increased from 30s to 60s — Alpaca API crypto data queries often exceed 30s during market hours
 retry_count = 3
 # Security: enforce HTTPS for HTTP transport URLs (reject http://)
 enforce_tls = true

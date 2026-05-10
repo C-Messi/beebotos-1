@@ -33,13 +33,14 @@ pub async fn build_analysis_tools(
                     client_arc.clone(),
                     "alpaca",
                     "get_crypto_snapshot",
-                    "获取指定加密货币的实时快照数据（价格、涨跌幅、成交量等）。参数: symbol (string, 如 BTC/USD)",
+                    "获取指定加密货币的实时快照数据（价格、涨跌幅、成交量等）。参数: symbols (string, 如 BTC/USD), loc (string, 固定值 us)",
                     serde_json::json!({
                         "type": "object",
                         "properties": {
-                            "symbol": { "type": "string", "description": "交易对，如 BTC/USD, ETH/USD" }
+                            "symbols": { "type": "string", "description": "交易对，如 BTC/USD, ETH/USD" },
+                            "loc": { "type": "string", "enum": ["us"], "description": "地区代码，固定为 us" }
                         },
-                        "required": ["symbol"]
+                        "required": ["symbols", "loc"]
                     }),
                 )),
             );
@@ -51,33 +52,34 @@ pub async fn build_analysis_tools(
                     client_arc.clone(),
                     "alpaca",
                     "get_crypto_bars",
-                    "获取加密货币K线数据。参数: symbol (string), timeframe (string: 1m/5m/15m/1h/4h/1d), limit (integer, default 50)",
+                    "获取加密货币K线数据。参数: symbols (string, 如 BTC/USD), timeframe (string: 1Min/5Min/15Min/1Hour/4Hour/1Day), limit (integer, default 50)",
                     serde_json::json!({
                         "type": "object",
                         "properties": {
-                            "symbol": { "type": "string", "description": "交易对" },
-                            "timeframe": { "type": "string", "enum": ["1m","5m","15m","1h","4h","1d"], "description": "时间框架" },
+                            "symbols": { "type": "string", "description": "交易对，如 BTC/USD" },
+                            "timeframe": { "type": "string", "enum": ["1Min","5Min","15Min","1Hour","4Hour","1Day"], "description": "时间框架，注意大小写（如 1Hour, 1Day）" },
                             "limit": { "type": "integer", "default": 50, "description": "返回条数" }
                         },
-                        "required": ["symbol", "timeframe"]
+                        "required": ["symbols", "timeframe"]
                     }),
                 )),
             );
 
-            // get_orderbook → alpaca/get_crypto_quote
+            // get_orderbook → alpaca/get_crypto_latest_orderbook
             tools.insert(
                 "get_orderbook".to_string(),
                 Box::new(McpDataTool::new(
                     client_arc.clone(),
                     "alpaca",
-                    "get_crypto_quote",
-                    "获取加密货币报价数据（买卖盘、价差）。参数: symbol (string)",
+                    "get_crypto_latest_orderbook",
+                    "获取加密货币最新订单簿数据（买卖盘、价差）。参数: symbols (string, 如 BTC/USD), loc (string, 固定值 us)",
                     serde_json::json!({
                         "type": "object",
                         "properties": {
-                            "symbol": { "type": "string", "description": "交易对" }
+                            "symbols": { "type": "string", "description": "交易对，如 BTC/USD" },
+                            "loc": { "type": "string", "enum": ["us"], "description": "地区代码，固定为 us" }
                         },
-                        "required": ["symbol"]
+                        "required": ["symbols", "loc"]
                     }),
                 )),
             );
@@ -89,13 +91,14 @@ pub async fn build_analysis_tools(
                     client_arc,
                     "alpaca",
                     "get_crypto_latest_trade",
-                    "获取加密货币最新成交数据。参数: symbol (string)",
+                    "获取加密货币最新成交数据。参数: symbols (string, 如 BTC/USD), loc (string, 固定值 us)",
                     serde_json::json!({
                         "type": "object",
                         "properties": {
-                            "symbol": { "type": "string", "description": "交易对" }
+                            "symbols": { "type": "string", "description": "交易对，如 BTC/USD" },
+                            "loc": { "type": "string", "enum": ["us"], "description": "地区代码，固定为 us" }
                         },
-                        "required": ["symbol"]
+                        "required": ["symbols", "loc"]
                     }),
                 )),
             );

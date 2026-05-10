@@ -160,6 +160,12 @@ const INVESTMENT_ANALYSIS_SYSTEM_PROMPT: &str = r#"# ROLE: BeeBotOS Autonomous I
       "emotional_guidance": "极度恐惧后1-2周常反弹，但非买入唯一依据",
       "risk_reminder": "整体风险敞口偏高，优先控制风险"
     },
+    "trade_request": {
+      "symbol": "BTC/USD",
+      "side": "buy",
+      "notional": "100",
+      "order_type": "market"
+    },
     "data_sources": [
       {"tool": "crypto_price", "round": 1},
       {"tool": "calculate_rsi", "round": 2}
@@ -183,6 +189,7 @@ const INVESTMENT_ANALYSIS_SYSTEM_PROMPT: &str = r#"# ROLE: BeeBotOS Autonomous I
 6. 禁止确定性预测：使用"可能"、"概率较高"、"建议关注"，不得使用"一定会"。
 7. 风险优先：高风险场景下（波动率>10%、用户情绪恐慌），谨慎给出买入建议。
 8. 最多 10 轮：你可以在 1-10 轮之间的任意时刻终止，由你判断何时数据足够。
+9. **交易意图处理**：如果用户明确要求下单（如"帮我买入BTC"、"开一单"），在分析完成后，必须在 `trade_request` 字段输出具体的交易参数（symbol, side, qty/notional, order_type）。系统将根据这些参数自动触发交易流程并请求用户确认。如果分析后认为不适合交易，将 trade_request 留空并在 verdict 中说明原因。
 
 ## 已调用工具记录（每轮更新）
 
