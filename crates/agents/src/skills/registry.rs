@@ -293,7 +293,9 @@ impl SkillRegistry {
     /// Search skills by name or description with semantic keyword overlap
     /// scoring. 🆕 FIX: Uses keyword overlap instead of simple substring
     /// match for better relevance.
-    pub async fn search(&self, query: &str) -> Vec<RegisteredSkill> {
+    /// Search skills with relevance scores.
+    /// Returns Vec of (score, skill) tuples sorted by score descending.
+    pub async fn search_scored(&self, query: &str) -> Vec<(usize, RegisteredSkill)> {
         let skills = self.skills.read().await;
         let query_lower = query.to_lowercase();
         let query_words: std::collections::HashSet<String> = query_lower
@@ -333,7 +335,15 @@ impl SkillRegistry {
 
         // Sort by score descending
         scored.sort_by(|a, b| b.0.cmp(&a.0));
-        scored.into_iter().map(|(_, s)| s).collect()
+        scored
+    }
+
+    pub async fn search(&self, query: &str) -> Vec<RegisteredSkill> {
+        self.search_scored(query)
+            .await
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect()
     }
 
     /// List all skills

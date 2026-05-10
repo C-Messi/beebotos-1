@@ -65,8 +65,9 @@ impl SkillSelector {
         Self {
             llm,
             registry,
-            // 🆕 FIX: Reduced from 5 to 3 candidates — fewer candidates = faster LLM ranking.
-            max_candidates: 3,
+            // 🆕 FIX: Increased from 3 to 10 candidates — ensure relevant skills
+            // (especially MCP tools with low usage_count) are not truncated out.
+            max_candidates: 10,
             // 🆕 FIX: Increased to 30s — skill selection needs time for LLM ranking
             // of complex queries (e.g. weather, multi-step tasks).
             // Note: Kimi k2.6 can take 15-25s for ranking output at peak load.
@@ -188,28 +189,39 @@ impl SkillSelector {
         Ok(selection)
     }
 
-    /// Step 1: Recall candidates using registry search (embedding future)
+    /// Step 1: Recall candidates using registry search with score preservation.
+    /// 🆕 FIX: Uses search relevance score as primary sort key (not usage_count)
+    /// so low-usage but highly-relevant MCP tools are not truncated out.
     async fn recall_candidates(
         &self,
         query_summary: &str,
     ) -> Result<Vec<RegisteredSkill>, SkillSelectError> {
-        let mut candidates = self.registry.search(query_summary).await;
+        let mut scored = self.registry.search_scored(query_summary).await;
 
-        // 🆕 FIX: If search returns empty (e.g. English query_summary vs Chinese
-        // descriptions), fallback to enabled skills sorted by popularity so
-        // ranking still has candidates.
-        if candidates.is_empty() {
-            candidates = self.registry.list_enabled().await;
+        // 🆕 FIX: If search returns empty, fallback to enabled skills so ranking
+        // still has candidates. All fallback skills get score 0.
+        if scored.is_empty() {
+            let fallback = self.registry.list_enabled().await;
+            scored = fallback.into_iter().map(|s| (0, s)).collect();
         }
 
-        // Sort by usage count (popularity) as secondary sort
-        candidates.sort_by(|a, b| {
-            let usage_cmp = b.usage_count.cmp(&a.usage_count);
+        // Sort by search relevance score descending, then usage_count as tie-breaker
+        scored.sort_by(|a, b| {
+            let score_cmp = b.0.cmp(&a.0);
+            if score_cmp != std::cmp::Ordering::Equal {
+                return score_cmp;
+            }
+            let usage_cmp = b.1.usage_count.cmp(&a.1.usage_count);
             if usage_cmp != std::cmp::Ordering::Equal {
                 return usage_cmp;
             }
-            a.skill.name.cmp(&b.skill.name)
+            a.1.skill.name.cmp(&b.1.skill.name)
         });
+
+        let mut candidates: Vec<RegisteredSkill> = scored
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect();
 
         // Limit to max_candidates
         candidates.truncate(self.max_candidates);

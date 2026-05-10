@@ -1731,16 +1731,14 @@ impl Agent {
                 }
             }
 
-            // 🆕 UNIFIED REACT: Check if this task should use autonomous ReAct planning
-            if should_use_planning {
-                if self.is_planning_ready() {
-                    self.execute_with_planning(task).await
-                } else {
-                    self.handle_llm_task_v2(&task, &intent_v2, &selection).await
-                }
-            } else if self.should_use_react_planning(&message_text, &intent_v2, &selection) {
+            // 🆕 UNIFIED REACT: ReAct autonomous planning takes priority over
+            // traditional P2 Planning. All planning tasks are delegated to LLM
+            // self-decision (ReAct loop).
+            if self.should_use_react_planning(&message_text, &intent_v2, &selection) {
                 self.execute_with_react_planning(&task, &message_text, &intent_v2)
                     .await
+            } else if should_use_planning {
+                self.execute_with_planning(task).await
             } else {
                 self.handle_llm_task_v2(&task, &intent_v2, &selection).await
             }
@@ -1831,10 +1829,10 @@ impl Agent {
         let is_multi_step =
             intent.needs_planning || intent.intent == crate::intent::UserIntent::MultiStepPlanning;
 
-        // Combine: need at least (analysis_keyword OR selected_crypto) AND
-        // (crypto_symbol OR multi_step)
-        let use_react =
-            (has_analysis_keyword || selected_crypto) && (has_crypto_symbol || is_multi_step);
+        // 🆕 FIX: ReAct triggers for ANY crypto-related multi-step task,
+        // regardless of whether an analysis keyword is present.
+        // This ensures "帮我开一单BTC" (no analysis keyword) still routes to ReAct.
+        let use_react = has_crypto_symbol && (has_analysis_keyword || is_multi_step);
 
         if use_react {
             info!(
@@ -1878,7 +1876,7 @@ impl Agent {
 
         if tools.is_empty() {
             warn!("Unified ReAct: no analysis tools available, falling back to direct LLM answer");
-            return self.handle_direct_answer(task).await;
+            return Box::pin(self.handle_direct_answer(task)).await;
         }
 
         // Step 3: Build user context (risk level, positions, emotional state, etc.)
@@ -1957,7 +1955,7 @@ impl Agent {
                     "Unified ReAct: task {} failed: {}. Falling back to direct answer.",
                     task_id, e
                 );
-                self.handle_direct_answer(task).await
+                Box::pin(self.handle_direct_answer(task)).await
             }
         }
     }
@@ -2209,12 +2207,8 @@ impl Agent {
                         self.handle_workflow_task(&task).await
                     }
                     crate::intent::UserIntent::MultiStepPlanning => {
-                        if self.is_planning_ready() {
-                            self.execute_with_planning(task).await
-                        } else {
-                            self.handle_llm_task_with_intent(&task, &intent_analysis)
-                                .await
-                        }
+                        // 🆕 FIX: Legacy P2 Planning replaced by Unified ReAct.
+                        self.execute_with_planning(task).await
                     }
                     crate::intent::UserIntent::SingleToolCall => {
                         self.handle_llm_task_with_intent(&task, &intent_analysis)
@@ -2234,7 +2228,8 @@ impl Agent {
             TaskType::AppLifecycle => self.handle_app_lifecycle_task(&task).await,
             TaskType::WorkflowExecution => self.handle_workflow_task(&task).await,
             TaskType::Custom(type_name) => {
-                if self.is_planning_ready() && self.should_use_planning(&task).await {
+                // 🆕 FIX: All custom planning tasks route through Unified ReAct.
+                if self.should_use_planning(&task).await {
                     self.execute_with_planning(task).await
                 } else {
                     warn!("Unknown custom task type: {}", type_name);
@@ -2289,7 +2284,13 @@ impl Agent {
             || lower.contains("行情")
             || lower.contains("价格");
 
-        if needs_realtime_data {
+        let skip_routing = task
+            .parameters
+            .get("_skip_planning")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        if !skip_routing && needs_realtime_data {
             info!(
                 "Direct answer intercepted for real-time data query: '{}'",
                 input_text
@@ -2301,7 +2302,7 @@ impl Agent {
                         "crypto-data".to_string(),
                         "stock-data".to_string(),
                     ]);
-            return self.handle_llm_task_with_intent(task, &legacy_intent).await;
+            return Box::pin(self.handle_llm_task_with_intent(task, &legacy_intent)).await;
         }
 
         let llm = self
@@ -2438,7 +2439,7 @@ impl Agent {
         task: &Task,
         intent: &crate::intent::IntentAnalysis,
     ) -> Result<(String, Vec<Artifact>), AgentError> {
-        self.handle_llm_task_internal(task, Some(intent)).await
+        Box::pin(self.handle_llm_task_internal(task, Some(intent))).await
     }
 
     /// Original handle_llm_task — delegates to internal implementation
@@ -2515,13 +2516,19 @@ impl Agent {
                 && (has_planning_keywords || has_multi_step_indicators))
             || char_count > long_threshold;
 
-        if self.is_planning_ready() && is_complex {
+        let skip_planning = task
+            .parameters
+            .get("_skip_planning")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        if !skip_planning && is_complex {
             info!(
-                "🧠 Complex LLM task detected (message length: {}), using planning for task {}",
+                "🧠 Complex LLM task detected (message length: {}), using Unified ReAct for task {}",
                 message_text.len(),
                 task.id
             );
-            return self.execute_with_planning(task.clone()).await;
+            return Box::pin(self.execute_with_planning(task.clone())).await;
         }
 
         // 🆕 P2 FIX: Auto-pipeline detection for multi-step skill chaining
@@ -3924,16 +3931,23 @@ impl Agent {
                                 return Ok((output, vec![]));
                             }
                             Err(e) => {
-                                warn!("Skill execution for '{}' failed: {}", resolved_id, e);
-                                return Ok((
-                                    format!("执行 skill '{}' 时出错: {}", resolved_id, e),
-                                    vec![],
-                                ));
+                                let err_str = e.to_string().to_lowercase();
+                                let is_dependency_failure = err_str.contains("mx_apikey")
+                                    || err_str.contains("apikey")
+                                    || err_str.contains("api key")
+                                    || err_str.contains("environment variable")
+                                    || err_str.contains("not set");
+                                if is_dependency_failure {
+                                    warn!("Skill '{}' disabled due to missing dependency: {}", resolved_id, e);
+                                    let _ = registry.disable(&resolved_id).await;
+                                }
+                                warn!("Skill execution for '{}' failed: {}. Falling back to direct answer.", resolved_id, e);
+                                return self.handle_direct_answer(task).await;
                             }
                         }
                     } else {
-                        warn!("LLM requested unknown skill: {}", skill_id);
-                        return Ok((format!("抱歉，找不到 skill '{}'。", skill_id), vec![]));
+                        warn!("LLM requested unknown skill: '{}'. Falling back to direct answer.", skill_id);
+                        return self.handle_direct_answer(task).await;
                     }
                 }
             }
@@ -5126,25 +5140,15 @@ impl Agent {
     }
 
     /// Execute task using planning
+    /// 🆕 UNIFIED REACT: Replaces traditional P2 Planning with LLM self-decision.
+    /// All planning tasks are now delegated to the LLM via either the
+    /// investment-analysis ReAct loop (for crypto tasks) or native tool-calling
+    /// (for general tasks).
     pub async fn execute_with_planning(
         &self,
         task: Task,
     ) -> Result<(String, Vec<Artifact>), AgentError> {
-        let planning_engine = self
-            .planning_engine
-            .as_ref()
-            .ok_or_else(|| AgentError::InvalidConfig("Planning engine not configured".into()))?;
-
-        info!("Using planning for task: {}", task.id);
-
-        // 1. Create plan context with memory injection
-        let context = self.create_plan_context(&task).await?;
-
-        // 2. Determine planning strategy
-        let strategy = self.select_plan_strategy(&task);
-
-        // 3. Create plan using the actual message text as goal
-        let goal = serde_json::from_str::<serde_json::Value>(&task.input)
+        let message_text = serde_json::from_str::<serde_json::Value>(&task.input)
             .ok()
             .and_then(|json| {
                 json.get("message")
@@ -5152,142 +5156,71 @@ impl Agent {
                     .map(|s| s.to_string())
             })
             .unwrap_or_else(|| task.input.clone());
-        // 🆕 OPTIMIZATION PHASE 3: Use memory-aware plan creation
-        let plan = planning_engine
-            .create_plan_with_memory(
-                &goal,
-                &context,
-                Some(strategy),
-                self.memory_system.as_deref(),
-            )
-            .await
-            .map_err(|e| AgentError::Planning(format!("Failed to create plan: {}", e)))?;
-
-        // 🆕 FIX: Store the original user goal so skill matching can use domain
-        // keywords without polluting every step description (which bloats LLM
-        // prompts).
-        {
-            let mut g = self.current_plan_goal.write().await;
-            *g = Some(goal.clone());
-        }
 
         info!(
-            "Created plan {} with {} steps for task {}",
-            plan.id,
-            plan.steps.len(),
+            "🧠 Unified ReAct planning for task {} (legacy P2 Planning removed)",
             task.id
         );
 
-        // 4. Store active plan
-        {
-            let mut active = self.active_plans.write().await;
-            active.insert(plan.id.clone(), plan.clone());
+        let lower = message_text.to_lowercase();
+        let has_crypto = [
+            "btc", "bitcoin", "比特币", "eth", "ethereum", "以太坊",
+            "sol", "xrp", "doge", "加密货币", "crypto", "数字货币",
+        ]
+        .iter()
+        .any(|s| lower.contains(s));
+
+        if has_crypto {
+            // Investment-analysis path: use the multi-round ReAct executor
+            let intent = crate::skill_matching::IntentAnalysisV2 {
+                direct_answer: false,
+                needs_skill: true,
+                needs_planning: true,
+                planning_strategy_hint: None,
+                intent: crate::intent::UserIntent::MultiStepPlanning,
+                entities: std::collections::HashMap::new(),
+                constraints: Vec::new(),
+                confidence: 1.0,
+                query_summary: message_text.clone(),
+                active_toolsets: vec![],
+            };
+            return self
+                .execute_with_react_planning(&task, &message_text, &intent)
+                .await;
         }
 
-        // 🆕 OPTIMIZATION PHASE 3: Initialize ToolTrail for execution visualization
-        let mut tool_trail = crate::planning::ToolTrail::new(plan.id.to_string());
-        for (i, step) in plan.steps.iter().enumerate() {
-            tool_trail.add_step(i, &step.description);
-        }
-
-        // 5. Execute plan with timeout protection
-        // 🆕 FIX: 动态计算超时：每步 30s + 15s 缓冲，上限 180s
-        let step_count = plan.steps.len().max(1);
-        let plan_timeout_secs = task
-            .parameters
-            .get("timeout_secs")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or_else(|| (step_count as u64 * 30 + 15).min(180));
-        let plan_timeout = Duration::from_secs(plan_timeout_secs);
-
-        let result = match timeout(
-            plan_timeout,
-            self.execute_plan_internal_with_trail(&plan, Some(&mut tool_trail)),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => {
-                error!(
-                    "⏱️ Plan execution timed out after {}s for task {}",
-                    plan_timeout.as_secs(),
-                    task.id
-                );
-                tool_trail.finish(crate::planning::TrailStatus::Failed);
-                return Err(AgentError::Execution(format!(
-                    "Plan execution timed out after {}s",
-                    plan_timeout.as_secs()
-                )));
-            }
+        // General path: delegate to LLM with native tool-calling (single-round
+        // autonomous skill selection). The LLM decides which tool to call based
+        // on injected tool descriptions.
+        // 🆕 FIX: Add _skip_planning marker to prevent recursive routing back to
+        // execute_with_planning via handle_llm_task_internal's is_complex check.
+        let mut task = task;
+        task.parameters.insert("_skip_planning".to_string(), "true".to_string());
+        let intent = crate::skill_matching::IntentAnalysisV2 {
+            direct_answer: false,
+            needs_skill: true,
+            needs_planning: true,
+            planning_strategy_hint: None,
+            intent: crate::intent::UserIntent::MultiStepPlanning,
+            entities: std::collections::HashMap::new(),
+            constraints: Vec::new(),
+            confidence: 1.0,
+            query_summary: message_text.clone(),
+            active_toolsets: vec![],
         };
-
-        // 6. Cleanup
-        {
-            let mut active = self.active_plans.write().await;
-            active.remove(&plan.id);
-        }
-
-        match result {
-            Ok(exec_result) => {
-                if exec_result.success {
-                    tool_trail.finish(crate::planning::TrailStatus::Success);
-                } else {
-                    tool_trail.finish(crate::planning::TrailStatus::Failed);
-                }
-
-                if exec_result.success {
-                    let output = exec_result
-                        .data
-                        .and_then(|d| d.get("output").cloned())
-                        .and_then(|o| o.as_str().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "Plan executed successfully".to_string());
-
-                    // 🆕 OPTIMIZATION PHASE 3: Include ToolTrail as artifact
-                    let trail_artifact = Artifact {
-                        id: format!("tool_trail_{}", plan.id),
-                        artifact_type: "tool_trail".to_string(),
-                        content: tool_trail.to_json().into_bytes(),
-                        mime_type: "application/json".to_string(),
-                    };
-
-                    // 🆕 OPTIMIZATION PHASE 3: Solidify experience to memory
-                    self.solidify_experience(&goal, &plan, &tool_trail, &output)
-                        .await;
-
-                    // 🆕 PHASE 2: Auto-distill skill from successful trail
-                    if let Err(e) = self.maybe_distill_skill(&tool_trail, &goal).await {
-                        warn!("Skill distillation failed: {}", e);
-                    }
-
-                    // 🆕 PHASE 5: Evolution scheduler orchestration
-                    if let Some(scheduler) = &self.evolution_scheduler {
-                        match scheduler.on_task_completed(&tool_trail, &goal, true).await {
-                            Ok(summary) => {
-                                if summary.skill_distill_triggered {
-                                    info!("🧬 EvolutionScheduler: skill distillation triggered");
-                                }
-                                if summary.capo_triggered {
-                                    info!("🧬 EvolutionScheduler: CAPO optimization triggered");
-                                }
-                            }
-                            Err(e) => warn!("EvolutionScheduler error: {}", e),
-                        }
-                    }
-
-                    Ok((output, vec![trail_artifact]))
-                } else {
-                    Err(AgentError::Execution(
-                        exec_result
-                            .error
-                            .unwrap_or_else(|| "Plan execution failed".to_string()),
-                    ))
-                }
-            }
-            Err(e) => {
-                tool_trail.finish(crate::planning::TrailStatus::Failed);
-                Err(e)
-            }
-        }
+        let selection = crate::skill_matching::SkillSelection {
+            selected_skill: None,
+            selected_skill_name: None,
+            needs_planning: true,
+            confidence: 0.0,
+            scores: Vec::new(),
+            selection_reasoning: "Unified ReAct general planning".to_string(),
+            disclosure_level: crate::skills::registry::SkillDisclosureLevel::L0,
+        };
+        // 🆕 FIX: Use Box::pin to break the recursive async fn chain
+        // (execute_with_planning → handle_llm_task_v2 → handle_llm_task_internal
+        // → execute_with_planning).
+        Box::pin(self.handle_llm_task_v2(&task, &intent, &selection)).await
     }
 
     /// Create plan context from task
