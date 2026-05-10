@@ -475,6 +475,8 @@ pub struct KernelAgentBuilder {
     with_skill_selector: Option<Arc<crate::skill_matching::SkillSelector>>,
     // 🆕 SKILL MATCHING V2: Trace store for observability
     with_trace_store: Option<Arc<dyn crate::skill_matching::TraceStore>>,
+    // 🆕 System information provider for querying Gateway-layer data
+    with_system_info_provider: Option<Arc<dyn crate::system_info::SystemInfoProvider>>,
 }
 
 impl KernelAgentBuilder {
@@ -497,6 +499,7 @@ impl KernelAgentBuilder {
             with_mcp: None,
             with_skill_selector: None,
             with_trace_store: None,
+            with_system_info_provider: None,
         }
     }
 
@@ -596,6 +599,15 @@ impl KernelAgentBuilder {
         self
     }
 
+    /// 🆕 Set system information provider for querying Gateway-layer data
+    pub fn with_system_info_provider(
+        mut self,
+        provider: Arc<dyn crate::system_info::SystemInfoProvider>,
+    ) -> Self {
+        self.with_system_info_provider = Some(provider);
+        self
+    }
+
     /// Build and spawn the agent in kernel sandbox
     pub async fn spawn(self) -> Result<(TaskId, mpsc::UnboundedSender<KernelTaskRequest>)> {
         let kernel = self.kernel.ok_or_else(|| {
@@ -656,6 +668,11 @@ impl KernelAgentBuilder {
         // 🆕 Attach MCP manager for external tool access
         if let Some(mcp) = self.with_mcp {
             agent = agent.with_mcp(mcp);
+        }
+
+        // 🆕 Attach system information provider for cross-layer queries
+        if let Some(provider) = self.with_system_info_provider {
+            agent = agent.with_system_info_provider(provider);
         }
 
         // Attach kernel for WASM execution

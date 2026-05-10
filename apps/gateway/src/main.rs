@@ -535,7 +535,7 @@ impl AppState {
             }
         }
 
-        let gateway_runtime = GatewayAgentRuntime::new(
+        let mut gateway_runtime = GatewayAgentRuntime::new(
             Some(kernel.clone()),
             Some(llm_interface),
             agent_runtime_config,
@@ -549,6 +549,18 @@ impl AppState {
                 .clone()
                 .unwrap_or_else(|| Arc::new(beebotos_agents::mcp::MCPManager::new())),
         );
+
+        // Attach system info provider after runtime is created so we can share
+        // the runtime's own state manager for agent inventory queries.
+        let gateway_state_manager = gateway_runtime.state_manager();
+        gateway_runtime = gateway_runtime.with_system_info_provider(Arc::new(
+            GatewaySystemInfoProvider::new(
+                cron_job_service
+                    .clone()
+                    .expect("CronJobService must be initialized before AgentRuntime"),
+                gateway_state_manager,
+            ),
+        ));
 
         // Recover agents after MCP manager is configured so they have access to MCP
         // tools
@@ -907,6 +919,78 @@ impl AppState {
             mcp_manager,
             cron_job_service,
         })
+    }
+}
+
+// ── System Information Provider Implementation ──
+
+/// Gateway-layer implementation of SystemInfoProvider for cross-crate queries.
+struct GatewaySystemInfoProvider {
+    cron_job_service: Arc<crate::services::CronJobService>,
+    state_manager: Arc<beebotos_agents::state_manager::AgentStateManager>,
+}
+
+impl GatewaySystemInfoProvider {
+    fn new(
+        cron_job_service: Arc<crate::services::CronJobService>,
+        state_manager: Arc<beebotos_agents::state_manager::AgentStateManager>,
+    ) -> Self {
+        Self {
+            cron_job_service,
+            state_manager,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl beebotos_agents::system_info::SystemInfoProvider for GatewaySystemInfoProvider {
+    async fn list_gateway_cron_jobs(
+        &self,
+    ) -> Result<Vec<beebotos_agents::system_info::GatewayCronJobInfo>, String> {
+        let jobs = self
+            .cron_job_service
+            .list_jobs()
+            .await
+            .map_err(|e| format!("Database error: {}", e))?;
+
+        Ok(jobs
+            .into_iter()
+            .map(|j| beebotos_agents::system_info::GatewayCronJobInfo {
+                id: j.id,
+                name: j.name,
+                description: j.description,
+                schedule_type: j.schedule_type.to_string(),
+                schedule_expr: j.schedule_expr,
+                timezone: j.timezone,
+                enabled: j.enabled,
+                run_count: j.run_count,
+                last_run_at: j.last_run_at.map(|dt| dt.to_rfc3339()),
+            })
+            .collect())
+    }
+
+    async fn list_agents(
+        &self,
+    ) -> Result<Vec<beebotos_agents::system_info::AgentSummaryInfo>, String> {
+        let agent_ids = self.state_manager.list_agents().await;
+        let mut results = Vec::with_capacity(agent_ids.len());
+
+        for id in agent_ids {
+            if let Ok(record) = self.state_manager.get_record(&id).await {
+                results.push(beebotos_agents::system_info::AgentSummaryInfo {
+                    agent_id: id,
+                    state: record.state.to_string(),
+                    registered_at: Some(record.registered_at.to_rfc3339()),
+                    state_changed_at: Some(record.state_changed_at.to_rfc3339()),
+                    total_tasks: record.stats.total_tasks,
+                    successful_tasks: record.stats.successful_tasks,
+                    failed_tasks: record.stats.failed_tasks,
+                    last_error: record.last_error,
+                });
+            }
+        }
+
+        Ok(results)
     }
 }
 

@@ -89,6 +89,8 @@ pub struct Agent {
     pub(crate) skill_feedback_collector: Option<crate::skills::feedback::SkillImprovementEngine>,
     // 🆕 PHASE 5: Evolution scheduler for three-layer co-evolution orchestration
     pub(crate) evolution_scheduler: Option<crate::evolution::scheduler::EvolutionScheduler>,
+    // 🆕 System information provider for querying Gateway-layer data (cron jobs, etc.)
+    pub(crate) system_info_provider: Option<Arc<dyn crate::system_info::SystemInfoProvider>>,
 }
 
 impl Agent {
@@ -137,6 +139,7 @@ impl Agent {
             max_rounds: 10,
             skill_feedback_collector: Some(crate::skills::feedback::SkillImprovementEngine::new()),
             evolution_scheduler: None,
+            system_info_provider: None,
         }
     }
 
@@ -165,6 +168,7 @@ impl Agent {
         child.outbound_router = self.outbound_router.clone();
         child.queue_manager = self.queue_manager.clone();
         child.workflow_registry = self.workflow_registry.clone();
+        child.system_info_provider = self.system_info_provider.clone();
         info!(
             "Spawned sub-agent {} from parent {}",
             child.config.id, self.config.id
@@ -637,6 +641,15 @@ impl Agent {
         registry: Arc<crate::workflow::WorkflowRegistry>,
     ) -> Self {
         self.workflow_registry = Some(registry);
+        self
+    }
+
+    /// 🆕 Attach a system info provider for querying Gateway-layer data
+    pub fn with_system_info_provider(
+        mut self,
+        provider: Arc<dyn crate::system_info::SystemInfoProvider>,
+    ) -> Self {
+        self.system_info_provider = Some(provider);
         self
     }
 
@@ -4351,6 +4364,17 @@ impl Agent {
         let start_time = std::time::Instant::now();
         let skill_id = registered_skill.skill.id.clone();
 
+        // 🆕 System inventory skills: direct query, no LLM overhead
+        match skill_id.as_str() {
+            "tool_inventory" => return self.query_tool_inventory().await,
+            "skill_inventory" => return self.query_skill_inventory().await,
+            "schedule_inventory" => return self.query_schedule_inventory().await,
+            "agent_inventory" => return self.query_agent_inventory().await,
+            "workflow_inventory" => return self.query_workflow_inventory().await,
+            "mcp_inventory" => return self.query_mcp_inventory().await,
+            _ => {}
+        }
+
         // 🆕 OPTIMIZATION PHASE 1: Approval gate for destructive operations
         // 🆕 FIX (Plan C): Store pending approval for multi-step user confirmation
         if !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst) {
@@ -4899,6 +4923,377 @@ impl Agent {
             .execute(&registered_skill.skill, context)
             .await
             .map_err(|e| AgentError::Execution(format!("Skill execution failed: {}", e)))
+    }
+
+    // ── System Inventory Query Methods ──
+
+    /// Safely truncate a string to at most `max_chars` Unicode scalar values
+    /// without splitting in the middle of a grapheme cluster.
+    fn safe_truncate(s: &str, max_chars: usize) -> String {
+        let mut result = String::with_capacity(max_chars * 4);
+        for (i, ch) in s.chars().enumerate() {
+            if i >= max_chars {
+                result.push_str("…");
+                break;
+            }
+            result.push(ch);
+        }
+        result
+    }
+
+    /// 🆕 Query tool inventory — lists all available tools from tool_set.rs
+    async fn query_tool_inventory(&self) -> Result<skills::executor::SkillExecutionResult, AgentError> {
+        let tools = crate::skills::tool_set::default_tool_set(std::path::Path::new("."));
+        let mut lines = vec![
+            "# 本机可用工具清单 (Tools)\n".to_string(),
+            "| 序号 | 工具名 | 描述 | 参数 |
+            ".to_string(),
+            "|------|--------|------|------|".to_string(),
+        ];
+        for (idx, (name, tool)) in tools.iter().enumerate() {
+            let schema = tool.parameters_schema().to_string();
+            let schema_short = Self::safe_truncate(&schema, 60);
+            lines.push(format!(
+                "| {} | `{}` | {} | `{}` |",
+                idx + 1,
+                name,
+                tool.description().trim(),
+                schema_short
+            ));
+        }
+        lines.push(format!("\n**共计 {} 个工具**", tools.len()));
+        lines.push("\n> 💡 提示：如需了解某个工具的详细用法，可以直接问「tool_name 工具怎么用」".to_string());
+
+        Ok(skills::executor::SkillExecutionResult {
+            task_id: "tool_inventory".to_string(),
+            success: true,
+            output: lines.join("\n"),
+            structured_output: None,
+            execution_time_ms: 0,
+        })
+    }
+
+    /// 🆕 Query skill inventory — lists all registered skills from SkillRegistry
+    async fn query_skill_inventory(
+        &self,
+    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
+        let registry = self
+            .skill_registry
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("Skill registry not configured".into()))?;
+
+        let skills = registry.list_enabled().await;
+        let mut lines = vec![
+            "# 本机可用技能清单 (Skills)\n".to_string(),
+            "| 序号 | 技能名 | 分类 | 描述 | 使用次数 |
+            ".to_string(),
+            "|------|--------|------|------|----------|".to_string(),
+        ];
+        for (idx, skill) in skills.iter().enumerate() {
+            let desc = if skill.skill.manifest.description.is_empty() {
+                skill.skill.manifest.name.clone()
+            } else {
+                skill.skill.manifest.description.clone()
+            };
+            let category = if skill.category.is_empty() {
+                "general".to_string()
+            } else {
+                skill.category.clone()
+            };
+            let skill_type = if skill.skill.name.starts_with("mcp:") {
+                "MCP"
+            } else if skill.skill.manifest.prompt_template.is_empty() {
+                "内置"
+            } else {
+                "知识"
+            };
+            lines.push(format!(
+                "| {} | `{}` | {}·{} | {} | {} |",
+                idx + 1,
+                skill.skill.name,
+                category,
+                skill_type,
+                Self::safe_truncate(desc.trim(), 100),
+                skill.usage_count
+            ));
+        }
+        lines.push(format!("\n**共计 {} 个技能**", skills.len()));
+        lines.push("\n> 💡 类型说明：`内置`=系统硬编码技能，`知识`=Markdown 定义技能，`MCP`=外部 MCP 服务桥接".to_string());
+
+        Ok(skills::executor::SkillExecutionResult {
+            task_id: "skill_inventory".to_string(),
+            success: true,
+            output: lines.join("\n"),
+            structured_output: None,
+            execution_time_ms: 0,
+        })
+    }
+
+    /// 🆕 Query schedule inventory — merges Workflow cron triggers + Gateway cron jobs
+    async fn query_schedule_inventory(
+        &self,
+    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
+        use crate::workflow::TriggerType;
+        let mut lines = vec!["# 本机定时任务清单\n".to_string()];
+        let mut total = 0;
+
+        // ── Source A: Workflow Cron Triggers ──
+        lines.push("## Workflow 定时触发器\n".to_string());
+        if let Some(ref registry) = self.workflow_registry {
+            let workflows = registry.list_all();
+            let mut has_cron = false;
+            let mut wf_idx = 1;
+            for def in workflows {
+                for trigger in &def.triggers {
+                    if let TriggerType::Cron { schedule, timezone } = &trigger.trigger_type {
+                        has_cron = true;
+                        total += 1;
+                        lines.push(format!(
+                            "{}. **{}** | 规则: `{}` | 时区: {} | 描述: {}",
+                            wf_idx,
+                            def.name,
+                            schedule,
+                            timezone.as_deref().unwrap_or("UTC"),
+                            def.description
+                        ));
+                        wf_idx += 1;
+                    }
+                }
+            }
+            if !has_cron {
+                lines.push("（无 Workflow 定时触发器）\n".to_string());
+            }
+        } else {
+            lines.push("（Workflow 注册表未配置）\n".to_string());
+        }
+
+        // ── Source B: Gateway Frontend Cron Jobs ──
+        lines.push("\n## 控制栏定时任务\n".to_string());
+        if let Some(ref provider) = self.system_info_provider {
+            match provider.list_gateway_cron_jobs().await {
+                Ok(jobs) if !jobs.is_empty() => {
+                    let mut job_idx = 1;
+                    for job in jobs {
+                        total += 1;
+                        let status = if job.enabled { "🟢 启用" } else { "🔴 停用" };
+                        let last_run = job
+                            .last_run_at
+                            .as_deref()
+                            .map(|t| format!(" | 上次运行: {}", t))
+                            .unwrap_or_default();
+                        lines.push(format!(
+                            "{}. {} **{}** | 类型: `{}` | 规则: `{}` | 时区: {} | 已运行: {} 次{} | {}",
+                            job_idx,
+                            status,
+                            job.name,
+                            job.schedule_type,
+                            job.schedule_expr,
+                            job.timezone,
+                            job.run_count,
+                            last_run,
+                            job.description
+                        ));
+                        job_idx += 1;
+                    }
+                }
+                Ok(_) => {
+                    lines.push("（无控制栏定时任务）\n".to_string());
+                }
+                Err(e) => {
+                    lines.push(format!(
+                        "（查询控制栏定时任务失败: {}）\n",
+                        e
+                    ));
+                }
+            }
+        } else {
+            lines.push(
+                "（系统信息提供者未配置，无法查询控制栏定时任务）\n".to_string(),
+            );
+        }
+
+        if total == 0 {
+            lines.push("\n**当前无任何定时任务配置**".to_string());
+        } else {
+            lines.push(format!("\n**共计 {} 个定时任务**", total));
+        }
+
+        Ok(skills::executor::SkillExecutionResult {
+            task_id: "schedule_inventory".to_string(),
+            success: true,
+            output: lines.join("\n"),
+            structured_output: None,
+            execution_time_ms: 0,
+        })
+    }
+
+    /// 🆕 Query agent inventory — lists all agents and their states
+    async fn query_agent_inventory(
+        &self,
+    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
+        let mut lines = vec![
+            "# 系统中 Agent 状态清单\n".to_string(),
+            "| 序号 | Agent ID | 状态 | 注册时间 | 总任务 | 成功 | 失败 |".to_string(),
+            "|------|----------|------|----------|--------|------|------|".to_string(),
+        ];
+
+        if let Some(ref provider) = self.system_info_provider {
+            match provider.list_agents().await {
+                Ok(agents) if !agents.is_empty() => {
+                    for (idx, agent) in agents.iter().enumerate() {
+                        let registered = agent
+                            .registered_at
+                            .as_deref()
+                            .unwrap_or("未知");
+                        lines.push(format!(
+                            "| {} | `{}` | {} | {} | {} | {} | {} |",
+                            idx + 1,
+                            agent.agent_id,
+                            agent.state,
+                            registered,
+                            agent.total_tasks,
+                            agent.successful_tasks,
+                            agent.failed_tasks
+                        ));
+                    }
+                    lines.push(format!("\n**共计 {} 个 Agent**", agents.len()));
+                }
+                Ok(_) => {
+                    lines.push("\n**当前系统中无任何 Agent**".to_string());
+                }
+                Err(e) => {
+                    lines.push(format!(
+                        "\n（查询 Agent 列表失败: {}）",
+                        e
+                    ));
+                }
+            }
+        } else {
+            lines.push("\n（系统信息提供者未配置，无法查询 Agent 状态）".to_string());
+        }
+
+        Ok(skills::executor::SkillExecutionResult {
+            task_id: "agent_inventory".to_string(),
+            success: true,
+            output: lines.join("\n"),
+            structured_output: None,
+            execution_time_ms: 0,
+        })
+    }
+
+    /// 🆕 Query workflow inventory — lists all registered workflows
+    async fn query_workflow_inventory(
+        &self,
+    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
+        let mut lines = vec![
+            "# 本机 Workflow 清单\n".to_string(),
+            "| 序号 | ID | 名称 | 版本 | 步骤数 | 触发器 | 标签 |".to_string(),
+            "|------|----|------|------|--------|--------|------|".to_string(),
+        ];
+
+        if let Some(ref registry) = self.workflow_registry {
+            let workflows = registry.list_all();
+            for (idx, wf) in workflows.iter().enumerate() {
+                let trigger_count = wf.triggers.len();
+                let step_count = wf.steps.len();
+                let tags = if wf.tags.is_empty() {
+                    "-".to_string()
+                } else {
+                    wf.tags.join(", ")
+                };
+                lines.push(format!(
+                    "| {} | `{}` | {} | {} | {} | {} | {} |",
+                    idx + 1,
+                    wf.id,
+                    wf.name,
+                    wf.version,
+                    step_count,
+                    trigger_count,
+                    tags
+                ));
+            }
+            if workflows.is_empty() {
+                lines.push("\n**当前无任何 Workflow 配置**".to_string());
+            } else {
+                lines.push(format!("\n**共计 {} 个 Workflow**", workflows.len()));
+            }
+        } else {
+            lines.push("\n（Workflow 注册表未配置）".to_string());
+        }
+
+        Ok(skills::executor::SkillExecutionResult {
+            task_id: "workflow_inventory".to_string(),
+            success: true,
+            output: lines.join("\n"),
+            structured_output: None,
+            execution_time_ms: 0,
+        })
+    }
+
+    /// 🆕 Query MCP inventory — lists connected MCP servers and their tools
+    async fn query_mcp_inventory(
+        &self,
+    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
+        let mut lines = vec!["# MCP 服务连接清单\n".to_string()];
+
+        if let Some(ref mcp) = self.mcp_manager {
+            let clients = mcp.list_clients().await;
+            let servers = mcp.list_servers().await;
+
+            if !clients.is_empty() {
+                lines.push("## 已连接的 MCP Clients\n".to_string());
+                for (idx, name) in clients.iter().enumerate() {
+                    let tool_count = match mcp.get_client(name).await {
+                        Some(client) => {
+                            if client.is_initialized() {
+                                match client.list_tools(None).await {
+                                    Ok(result) => format!("{} 个工具", result.tools.len()),
+                                    Err(_) => "无法获取工具列表".to_string(),
+                                }
+                            } else {
+                                "未初始化".to_string()
+                            }
+                        }
+                        None => "无法访问".to_string(),
+                    };
+                    lines.push(format!(
+                        "{}. **{}** | 状态: {} | {}",
+                        idx + 1,
+                        name,
+                        if mcp.get_client(name).await.map(|c| c.is_initialized()).unwrap_or(false) {
+                            "🟢 已初始化"
+                        } else {
+                            "🟡 未初始化"
+                        },
+                        tool_count
+                    ));
+                }
+            } else {
+                lines.push("（无已连接的 MCP Clients）\n".to_string());
+            }
+
+            if !servers.is_empty() {
+                lines.push("\n## 已注册的 MCP Servers\n".to_string());
+                for (idx, name) in servers.iter().enumerate() {
+                    lines.push(format!("{}. **{}**", idx + 1, name));
+                }
+                lines.push(format!("\n**共计 {} 个 Server**", servers.len()));
+            }
+
+            if clients.is_empty() && servers.is_empty() {
+                lines.push("**当前未连接任何 MCP 服务**".to_string());
+            }
+        } else {
+            lines.push("（MCP 管理器未配置）".to_string());
+        }
+
+        Ok(skills::executor::SkillExecutionResult {
+            task_id: "mcp_inventory".to_string(),
+            success: true,
+            output: lines.join("\n"),
+            structured_output: None,
+            execution_time_ms: 0,
+        })
     }
 
     async fn handle_skill_task(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {

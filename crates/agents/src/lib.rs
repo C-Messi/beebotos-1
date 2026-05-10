@@ -79,6 +79,8 @@ pub mod models;
 pub mod skill_matching;
 // 🆕 OPTIMIZATION: Prompt builder for dynamic modular assembly
 pub mod prompt;
+// 🆕 System information provider for cross-layer queries
+pub mod system_info;
 // 🟢 P1 FIX: Planning module - structured agent planning capabilities
 pub mod planning;
 pub mod queue;

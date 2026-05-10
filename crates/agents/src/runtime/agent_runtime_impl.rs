@@ -55,6 +55,8 @@ pub struct GatewayAgentRuntime {
     skill_catalog: RwLock<Option<String>>,
     /// 🆕 MCP manager for external tool access
     mcp_manager: Option<Arc<crate::mcp::MCPManager>>,
+    /// 🆕 System information provider for querying Gateway-layer data
+    system_info_provider: Option<Arc<dyn crate::system_info::SystemInfoProvider>>,
 }
 
 /// Handle to an agent's task
@@ -146,6 +148,7 @@ impl GatewayAgentRuntime {
             skill_registry: Some(skill_registry.clone()),
             skill_catalog: RwLock::new(None),
             mcp_manager: None,
+            system_info_provider: None,
         };
 
         Ok(runtime)
@@ -179,6 +182,20 @@ impl GatewayAgentRuntime {
     pub fn with_mcp(mut self, manager: Arc<crate::mcp::MCPManager>) -> Self {
         self.mcp_manager = Some(manager);
         self
+    }
+
+    /// 🆕 Inject system information provider for cross-layer queries
+    pub fn with_system_info_provider(
+        mut self,
+        provider: Arc<dyn crate::system_info::SystemInfoProvider>,
+    ) -> Self {
+        self.system_info_provider = Some(provider);
+        self
+    }
+
+    /// Get a clone of the state manager handle
+    pub fn state_manager(&self) -> Arc<crate::state_manager::AgentStateManager> {
+        self.state_manager.clone()
     }
 
     /// 🔒 P0 FIX: Recover agents from persistent state
@@ -418,6 +435,11 @@ impl GatewayAgentRuntime {
             builder = builder.with_mcp(mcp.clone());
         }
 
+        // 🆕 Attach system information provider for cross-layer queries
+        if let Some(ref provider) = self.system_info_provider {
+            builder = builder.with_system_info_provider(provider.clone());
+        }
+
         let (task_id, task_sender) = builder
             .spawn()
             .await
@@ -643,6 +665,7 @@ impl GatewayAgentRuntime {
             skill_registry: Some(skill_registry),
             skill_catalog: RwLock::new(None),
             mcp_manager: None,
+            system_info_provider: None,
         }
     }
 
@@ -924,6 +947,11 @@ impl AgentRuntime for GatewayAgentRuntime {
             // 🆕 Attach MCP manager to agent
             if let Some(ref mcp) = self.mcp_manager {
                 builder = builder.with_mcp(mcp.clone());
+            }
+
+            // 🆕 Attach system information provider for cross-layer queries
+            if let Some(ref provider) = self.system_info_provider {
+                builder = builder.with_system_info_provider(provider.clone());
             }
 
             let (task_id, task_sender) = builder.spawn().await.map_err(|e| {

@@ -28,6 +28,16 @@ pub enum ScheduleType {
     Cron,
 }
 
+impl std::fmt::Display for ScheduleType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScheduleType::At => write!(f, "at"),
+            ScheduleType::Every => write!(f, "every"),
+            ScheduleType::Cron => write!(f, "cron"),
+        }
+    }
+}
+
 /// Context execution mode
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]

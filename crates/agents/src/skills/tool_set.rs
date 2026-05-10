@@ -518,6 +518,357 @@ impl SkillTool for WebFetchTool {
     }
 }
 
+/// Edit a file by replacing a unique string
+pub struct FileEditTool;
+
+#[async_trait::async_trait]
+impl SkillTool for FileEditTool {
+    fn name(&self) -> &str {
+        "file_edit"
+    }
+
+    fn description(&self) -> &str {
+        "Perform string replacement in a file. The old_string must appear exactly once. \
+         Parameters: path (string), old_string (string), new_string (string)"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "File path" },
+                "old_string": { "type": "string", "description": "Exact string to replace (must be unique)" },
+                "new_string": { "type": "string", "description": "Replacement string" }
+            },
+            "required": ["path", "old_string", "new_string"]
+        })
+    }
+
+    async fn execute(&self, params: &Value) -> Result<String, String> {
+        let path = params["path"].as_str().ok_or("Missing 'path' parameter")?;
+        let old = params["old_string"]
+            .as_str()
+            .ok_or("Missing 'old_string' parameter")?;
+        let new = params["new_string"]
+            .as_str()
+            .ok_or("Missing 'new_string' parameter")?;
+
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+
+        if old.is_empty() {
+            return Err("'old_string' cannot be empty".to_string());
+        }
+
+        let count = content.matches(old).count();
+        if count == 0 {
+            return Err(format!(
+                "'old_string' not found in file '{}'. The string must exist.",
+                path
+            ));
+        }
+        if count > 1 {
+            return Err(format!(
+                "'old_string' appears {} times in file '{}'. Must be unique to avoid accidental \
+                 replacements.",
+                count, path
+            ));
+        }
+
+        let new_content = content.replacen(old, new, 1);
+        tokio::fs::write(path, new_content)
+            .await
+            .map_err(|e| format!("Failed to write file '{}': {}", path, e))?;
+
+        Ok(format!("File '{}' edited successfully.", path))
+    }
+}
+
+/// Fast file pattern matching using glob patterns
+pub struct FileGlobTool;
+
+#[async_trait::async_trait]
+impl SkillTool for FileGlobTool {
+    fn name(&self) -> &str {
+        "file_glob"
+    }
+
+    fn description(&self) -> &str {
+        "Fast file pattern matching using glob patterns. Parameters: pattern (string, e.g. \
+         'src/**/*.rs'), path (string, optional base directory)"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Glob pattern, e.g. 'src/**/*.rs'" },
+                "path": { "type": "string", "description": "Base directory (default: current)" }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn execute(&self, params: &Value) -> Result<String, String> {
+        let pattern = params["pattern"]
+            .as_str()
+            .ok_or("Missing 'pattern' parameter")?;
+        let base_path = params["path"].as_str().unwrap_or(".");
+
+        let full_pattern = if base_path == "." {
+            pattern.to_string()
+        } else {
+            std::path::Path::new(base_path).join(pattern).to_string_lossy().to_string()
+        };
+
+        let mut results = Vec::new();
+        for entry in glob::glob(&full_pattern)
+            .map_err(|e| format!("Invalid glob pattern '{}': {}", full_pattern, e))?
+        {
+            match entry {
+                Ok(path) => results.push(path.display().to_string()),
+                Err(e) => results.push(format!("Error reading entry: {}", e)),
+            }
+        }
+
+        if results.is_empty() {
+            Ok(format!(
+                "No files matched pattern '{}'",
+                full_pattern
+            ))
+        } else {
+            Ok(format!(
+                "Matched {} file(s) for pattern '{}':\n{}",
+                results.len(),
+                full_pattern,
+                results.join("\n")
+            ))
+        }
+    }
+}
+
+/// Text search using regex patterns
+pub struct TextGrepTool;
+
+#[async_trait::async_trait]
+impl SkillTool for TextGrepTool {
+    fn name(&self) -> &str {
+        "text_grep"
+    }
+
+    fn description(&self) -> &str {
+        "Text search using regex patterns in files or directories. Parameters: pattern (regex \
+         string), path (string), output_mode ('content' or 'files', default 'content')"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Regex pattern to search for" },
+                "path": { "type": "string", "description": "File or directory path" },
+                "output_mode": { "type": "string", "enum": ["content", "files"], "default": "content" }
+            },
+            "required": ["pattern", "path"]
+        })
+    }
+
+    async fn execute(&self, params: &Value) -> Result<String, String> {
+        let pattern = params["pattern"]
+            .as_str()
+            .ok_or("Missing 'pattern' parameter")?;
+        let path = params["path"].as_str().ok_or("Missing 'path' parameter")?;
+        let output_mode = params["output_mode"].as_str().unwrap_or("content");
+
+        let re = Regex::new(pattern).map_err(|e| format!("Invalid regex '{}': {}", pattern, e))?;
+        let path = PathBuf::from(path);
+
+        let mut results = Vec::new();
+        const MAX_RESULTS: usize = 500;
+
+        if path.is_file() {
+            let content = tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| format!("Failed to read file '{}': {}", path.display(), e))?;
+            for (line_num, line) in content.lines().enumerate() {
+                if re.is_match(line) {
+                    if output_mode == "files" {
+                        results.push(path.display().to_string());
+                        break;
+                    } else {
+                        results.push(format!(
+                            "{}:{}: {}",
+                            path.display(),
+                            line_num + 1,
+                            line
+                        ));
+                    }
+                    if results.len() >= MAX_RESULTS {
+                        break;
+                    }
+                }
+            }
+        } else if path.is_dir() {
+            // Recursive directory search using DFS (stack-based)
+            let mut dirs_to_visit = vec![path.clone()];
+            'outer: while let Some(current_dir) = dirs_to_visit.pop() {
+                let mut entries = match tokio::fs::read_dir(&current_dir).await {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    if results.len() >= MAX_RESULTS {
+                        break 'outer;
+                    }
+                    let entry_path = entry.path();
+                    if entry_path.is_dir() {
+                        dirs_to_visit.push(entry_path);
+                    } else if entry_path.is_file() {
+                        if let Ok(content) = tokio::fs::read_to_string(&entry_path).await {
+                            for (line_num, line) in content.lines().enumerate() {
+                                if re.is_match(line) {
+                                    if output_mode == "files" {
+                                        results.push(entry_path.display().to_string());
+                                        break;
+                                    } else {
+                                        results.push(format!(
+                                            "{}:{}: {}",
+                                            entry_path.display(),
+                                            line_num + 1,
+                                            line
+                                        ));
+                                    }
+                                    if results.len() >= MAX_RESULTS {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            return Err(format!(
+                "Path '{}' is not a valid file or directory",
+                path.display()
+            ));
+        }
+
+        if results.is_empty() {
+            Ok(format!(
+                "No matches found for pattern '{}' in '{}'",
+                pattern,
+                path.display()
+            ))
+        } else {
+            let mut output = results.join("\n");
+            if results.len() >= MAX_RESULTS {
+                output.push_str(&format!(
+                    "\n\n...[truncated, {} total matches, limit {} reached]",
+                    results.len(),
+                    MAX_RESULTS
+                ));
+            }
+            Ok(output)
+        }
+    }
+}
+
+/// Search the web for information
+pub struct WebSearchTool;
+
+#[async_trait::async_trait]
+impl SkillTool for WebSearchTool {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search the web for information using DuckDuckGo. Parameters: query (string), \
+         num_results (integer, optional, default 5, max 10)"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query" },
+                "num_results": { "type": "integer", "description": "Number of results to return (max 10)", "default": 5 }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(&self, params: &Value) -> Result<String, String> {
+        let query = params["query"].as_str().ok_or("Missing 'query' parameter")?;
+        let num_results = params["num_results"].as_u64().unwrap_or(5).min(10) as usize;
+
+        let encoded_query = urlencoding::encode(query);
+        let url = format!("https://html.duckduckgo.com/html/?q={}", encoded_query);
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+        let response = client
+            .get(&url)
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (X11; Linux x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0",
+            )
+            .send()
+            .await
+            .map_err(|e| format!("Search request failed: {}", e))?;
+
+        let html = response.text().await.map_err(|e| {
+            format!("Failed to read search response: {}", e)
+        })?;
+
+        let document = scraper::Html::parse_document(&html);
+        let result_selector = scraper::Selector::parse(".result")
+            .map_err(|_| "Failed to parse result selector".to_string())?;
+        let title_selector = scraper::Selector::parse(".result__a")
+            .map_err(|_| "Failed to parse title selector".to_string())?;
+        let snippet_selector = scraper::Selector::parse(".result__snippet")
+            .map_err(|_| "Failed to parse snippet selector".to_string())?;
+
+        let mut results = Vec::new();
+        for (i, element) in document.select(&result_selector).enumerate() {
+            if i >= num_results {
+                break;
+            }
+
+            let title = element
+                .select(&title_selector)
+                .next()
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+
+            let link = element
+                .select(&title_selector)
+                .next()
+                .and_then(|e| e.value().attr("href"))
+                .unwrap_or("#");
+
+            let snippet = element
+                .select(&snippet_selector)
+                .next()
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+
+            results.push(format!("{}. {}\nURL: {}\n{}\n", i + 1, title, link, snippet));
+        }
+
+        if results.is_empty() {
+            Ok("No search results found.".to_string())
+        } else {
+            Ok(results.join("\n"))
+        }
+    }
+}
+
 /// Build the default tool set for skill execution
 pub fn default_tool_set(skill_dir: &Path) -> HashMap<String, Box<dyn SkillTool>> {
     let dirs = vec![skill_dir.to_path_buf()];
@@ -525,12 +876,16 @@ pub fn default_tool_set(skill_dir: &Path) -> HashMap<String, Box<dyn SkillTool>>
     tools.insert("file_read".to_string(), Box::new(FileReadTool));
     tools.insert("file_write".to_string(), Box::new(FileWriteTool));
     tools.insert("file_list".to_string(), Box::new(FileListTool));
+    tools.insert("file_edit".to_string(), Box::new(FileEditTool));
+    tools.insert("file_glob".to_string(), Box::new(FileGlobTool));
+    tools.insert("text_grep".to_string(), Box::new(TextGrepTool));
     tools.insert(
         "process_exec".to_string(),
         Box::new(ProcessExecTool::new(dirs.clone())),
     );
     tools.insert("bash_shell".to_string(), Box::new(BashShellTool::new(dirs)));
     tools.insert("web_fetch".to_string(), Box::new(WebFetchTool));
+    tools.insert("web_search".to_string(), Box::new(WebSearchTool));
     tools
 }
 
