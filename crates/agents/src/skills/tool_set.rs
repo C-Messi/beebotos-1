@@ -23,8 +23,62 @@ pub trait SkillTool: Send + Sync {
     async fn execute(&self, params: &Value) -> Result<String, String>;
 }
 
-/// Read a file from the filesystem
-pub struct FileReadTool;
+/// Normalize a path by resolving `.` and `..` components manually.
+/// This does NOT access the filesystem (no blocking I/O).
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(p) => normalized.push(std::path::Component::Prefix(p)),
+            std::path::Component::RootDir => normalized.push("/"),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(name) => normalized.push(name),
+        }
+    }
+    normalized
+}
+
+/// Resolve a user-supplied path against a working directory with security checks.
+/// - Relative paths are resolved against `work_dir`
+/// - Absolute paths are allowed only if they are within `work_dir`
+/// - Paths containing `..` that escape `work_dir` are rejected
+/// - Uses pure path arithmetic (no blocking filesystem I/O)
+pub fn resolve_work_path(work_dir: &Path, input_path: &str) -> Result<PathBuf, String> {
+    let path = Path::new(input_path);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        work_dir.join(path)
+    };
+
+    // Manually normalize to resolve . and .. before checking boundaries
+    let normalized = normalize_path(&resolved);
+    let work_normalized = normalize_path(work_dir);
+
+    if !normalized.starts_with(&work_normalized) {
+        return Err(format!(
+            "Path '{}' is outside working directory '{}'",
+            input_path,
+            work_dir.display()
+        ));
+    }
+
+    Ok(normalized)
+}
+
+/// Read a file from the filesystem (sandboxed to work_dir)
+pub struct FileReadTool {
+    work_dir: PathBuf,
+}
+
+impl FileReadTool {
+    pub fn new(work_dir: PathBuf) -> Self {
+        Self { work_dir }
+    }
+}
 
 #[async_trait::async_trait]
 impl SkillTool for FileReadTool {
@@ -48,15 +102,23 @@ impl SkillTool for FileReadTool {
 
     async fn execute(&self, params: &Value) -> Result<String, String> {
         let path = params["path"].as_str().ok_or("Missing 'path' parameter")?;
-        let path = PathBuf::from(path);
+        let path = resolve_work_path(&self.work_dir, path)?;
         tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| format!("Failed to read file '{}': {}", path.display(), e))
     }
 }
 
-/// Write text to a file
-pub struct FileWriteTool;
+/// Write text to a file (sandboxed to work_dir)
+pub struct FileWriteTool {
+    work_dir: PathBuf,
+}
+
+impl FileWriteTool {
+    pub fn new(work_dir: PathBuf) -> Self {
+        Self { work_dir }
+    }
+}
 
 #[async_trait::async_trait]
 impl SkillTool for FileWriteTool {
@@ -85,7 +147,7 @@ impl SkillTool for FileWriteTool {
         let content = params["content"]
             .as_str()
             .ok_or("Missing 'content' parameter")?;
-        let path = PathBuf::from(path);
+        let path = resolve_work_path(&self.work_dir, path)?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -98,8 +160,16 @@ impl SkillTool for FileWriteTool {
     }
 }
 
-/// List files in a directory
-pub struct FileListTool;
+/// List files in a directory (sandboxed to work_dir)
+pub struct FileListTool {
+    work_dir: PathBuf,
+}
+
+impl FileListTool {
+    pub fn new(work_dir: PathBuf) -> Self {
+        Self { work_dir }
+    }
+}
 
 #[async_trait::async_trait]
 impl SkillTool for FileListTool {
@@ -123,11 +193,12 @@ impl SkillTool for FileListTool {
 
     async fn execute(&self, params: &Value) -> Result<String, String> {
         let path = params["path"].as_str().ok_or("Missing 'path' parameter")?;
-        let mut entries = tokio::fs::read_dir(path)
+        let path = resolve_work_path(&self.work_dir, path)?;
+        let mut entries = tokio::fs::read_dir(&path)
             .await
-            .map_err(|e| format!("Failed to read directory '{}': {}", path, e))?;
+            .map_err(|e| format!("Failed to read directory '{}': {}", path.display(), e))?;
 
-        let mut lines = vec![format!("Contents of '{}'", path)];
+        let mut lines = vec![format!("Contents of '{}'", path.display())];
         while let Ok(Some(entry)) = entries.next_entry().await {
             let meta = entry.metadata().await.ok();
             let name = entry.file_name().to_string_lossy().to_string();
@@ -518,8 +589,16 @@ impl SkillTool for WebFetchTool {
     }
 }
 
-/// Edit a file by replacing a unique string
-pub struct FileEditTool;
+/// Edit a file by replacing a unique string (sandboxed to work_dir)
+pub struct FileEditTool {
+    work_dir: PathBuf,
+}
+
+impl FileEditTool {
+    pub fn new(work_dir: PathBuf) -> Self {
+        Self { work_dir }
+    }
+}
 
 #[async_trait::async_trait]
 impl SkillTool for FileEditTool {
@@ -553,9 +632,10 @@ impl SkillTool for FileEditTool {
             .as_str()
             .ok_or("Missing 'new_string' parameter")?;
 
-        let content = tokio::fs::read_to_string(path)
+        let path = resolve_work_path(&self.work_dir, path)?;
+        let content = tokio::fs::read_to_string(&path)
             .await
-            .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+            .map_err(|e| format!("Failed to read file '{}': {}", path.display(), e))?;
 
         if old.is_empty() {
             return Err("'old_string' cannot be empty".to_string());
@@ -565,28 +645,36 @@ impl SkillTool for FileEditTool {
         if count == 0 {
             return Err(format!(
                 "'old_string' not found in file '{}'. The string must exist.",
-                path
+                path.display()
             ));
         }
         if count > 1 {
             return Err(format!(
                 "'old_string' appears {} times in file '{}'. Must be unique to avoid accidental \
                  replacements.",
-                count, path
+                count, path.display()
             ));
         }
 
         let new_content = content.replacen(old, new, 1);
-        tokio::fs::write(path, new_content)
+        tokio::fs::write(&path, new_content)
             .await
-            .map_err(|e| format!("Failed to write file '{}': {}", path, e))?;
+            .map_err(|e| format!("Failed to write file '{}': {}", path.display(), e))?;
 
-        Ok(format!("File '{}' edited successfully.", path))
+        Ok(format!("File '{}' edited successfully.", path.display()))
     }
 }
 
-/// Fast file pattern matching using glob patterns
-pub struct FileGlobTool;
+/// Fast file pattern matching using glob patterns (sandboxed to work_dir)
+pub struct FileGlobTool {
+    work_dir: PathBuf,
+}
+
+impl FileGlobTool {
+    pub fn new(work_dir: PathBuf) -> Self {
+        Self { work_dir }
+    }
+}
 
 #[async_trait::async_trait]
 impl SkillTool for FileGlobTool {
@@ -616,11 +704,8 @@ impl SkillTool for FileGlobTool {
             .ok_or("Missing 'pattern' parameter")?;
         let base_path = params["path"].as_str().unwrap_or(".");
 
-        let full_pattern = if base_path == "." {
-            pattern.to_string()
-        } else {
-            std::path::Path::new(base_path).join(pattern).to_string_lossy().to_string()
-        };
+        let base = resolve_work_path(&self.work_dir, base_path)?;
+        let full_pattern = base.join(pattern).to_string_lossy().to_string();
 
         let mut results = Vec::new();
         for entry in glob::glob(&full_pattern)
@@ -648,8 +733,16 @@ impl SkillTool for FileGlobTool {
     }
 }
 
-/// Text search using regex patterns
-pub struct TextGrepTool;
+/// Text search using regex patterns (sandboxed to work_dir)
+pub struct TextGrepTool {
+    work_dir: PathBuf,
+}
+
+impl TextGrepTool {
+    pub fn new(work_dir: PathBuf) -> Self {
+        Self { work_dir }
+    }
+}
 
 #[async_trait::async_trait]
 impl SkillTool for TextGrepTool {
@@ -682,7 +775,7 @@ impl SkillTool for TextGrepTool {
         let output_mode = params["output_mode"].as_str().unwrap_or("content");
 
         let re = Regex::new(pattern).map_err(|e| format!("Invalid regex '{}': {}", pattern, e))?;
-        let path = PathBuf::from(path);
+        let path = resolve_work_path(&self.work_dir, path)?;
 
         let mut results = Vec::new();
         const MAX_RESULTS: usize = 500;
@@ -870,15 +963,15 @@ impl SkillTool for WebSearchTool {
 }
 
 /// Build the default tool set for skill execution
-pub fn default_tool_set(skill_dir: &Path) -> HashMap<String, Box<dyn SkillTool>> {
-    let dirs = vec![skill_dir.to_path_buf()];
+pub fn default_tool_set(work_dir: &Path) -> HashMap<String, Box<dyn SkillTool>> {
+    let dirs = vec![work_dir.to_path_buf()];
     let mut tools: HashMap<String, Box<dyn SkillTool>> = HashMap::new();
-    tools.insert("file_read".to_string(), Box::new(FileReadTool));
-    tools.insert("file_write".to_string(), Box::new(FileWriteTool));
-    tools.insert("file_list".to_string(), Box::new(FileListTool));
-    tools.insert("file_edit".to_string(), Box::new(FileEditTool));
-    tools.insert("file_glob".to_string(), Box::new(FileGlobTool));
-    tools.insert("text_grep".to_string(), Box::new(TextGrepTool));
+    tools.insert("file_read".to_string(), Box::new(FileReadTool::new(work_dir.to_path_buf())));
+    tools.insert("file_write".to_string(), Box::new(FileWriteTool::new(work_dir.to_path_buf())));
+    tools.insert("file_list".to_string(), Box::new(FileListTool::new(work_dir.to_path_buf())));
+    tools.insert("file_edit".to_string(), Box::new(FileEditTool::new(work_dir.to_path_buf())));
+    tools.insert("file_glob".to_string(), Box::new(FileGlobTool::new(work_dir.to_path_buf())));
+    tools.insert("text_grep".to_string(), Box::new(TextGrepTool::new(work_dir.to_path_buf())));
     tools.insert(
         "process_exec".to_string(),
         Box::new(ProcessExecTool::new(dirs.clone())),
@@ -891,10 +984,10 @@ pub fn default_tool_set(skill_dir: &Path) -> HashMap<String, Box<dyn SkillTool>>
 
 /// Build extended tool set including skill_call (requires Agent)
 pub fn extended_tool_set(
-    skill_dir: &Path,
+    work_dir: &Path,
     agent: Arc<Agent>,
 ) -> HashMap<String, Box<dyn SkillTool>> {
-    let mut tools = default_tool_set(skill_dir);
+    let mut tools = default_tool_set(work_dir);
     tools.insert(
         "skill_call".to_string(),
         Box::new(SkillCallTool::new(agent)),

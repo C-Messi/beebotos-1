@@ -424,6 +424,19 @@ impl AppState {
             crate::services::agent_runtime_manager::GatewayLLMInterface::new(llm_service.clone()),
         );
 
+        // 🆕 Create direct LLMClient for native tool calling
+        let llm_client = Arc::new(beebotos_agents::llm::LLMClient::new(
+            llm_service.failover_provider(),
+        ));
+
+        // 🆕 Ensure tool working directory exists
+        let tool_work_dir = std::path::PathBuf::from("/data/workspace");
+        if let Err(e) = tokio::fs::create_dir_all(&tool_work_dir).await {
+            warn!("Failed to create tool working directory {:?}: {}", tool_work_dir, e);
+        } else {
+            info!("✅ Tool working directory ensured at {:?}", tool_work_dir);
+        }
+
         // 🟢 P0 FIX: Initialize SkillRegistry **before** AgentRuntime so it can be
         // injected
         let skill_registry = Arc::new(beebotos_agents::skills::SkillRegistry::new());
@@ -548,7 +561,9 @@ impl AppState {
             mcp_manager
                 .clone()
                 .unwrap_or_else(|| Arc::new(beebotos_agents::mcp::MCPManager::new())),
-        );
+        )
+        .with_llm_client(llm_client)
+        .with_tool_work_dir(tool_work_dir);
 
         // Attach system info provider after runtime is created so we can share
         // the runtime's own state manager for agent inventory queries.

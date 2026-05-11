@@ -91,6 +91,10 @@ pub struct Agent {
     pub(crate) evolution_scheduler: Option<crate::evolution::scheduler::EvolutionScheduler>,
     // 🆕 System information provider for querying Gateway-layer data (cron jobs, etc.)
     pub(crate) system_info_provider: Option<Arc<dyn crate::system_info::SystemInfoProvider>>,
+    // 🆕 Tool working directory for sandboxed file operations
+    pub(crate) tool_work_dir: std::path::PathBuf,
+    // 🆕 Direct LLM client for native tool calling ( bypasses LLMCallInterface stub )
+    pub(crate) llm_client: Option<Arc<crate::llm::LLMClient>>,
 }
 
 impl Agent {
@@ -140,6 +144,8 @@ impl Agent {
             skill_feedback_collector: Some(crate::skills::feedback::SkillImprovementEngine::new()),
             evolution_scheduler: None,
             system_info_provider: None,
+            tool_work_dir: std::path::PathBuf::from("/data/workspace"),
+            llm_client: None,
         }
     }
 
@@ -169,11 +175,26 @@ impl Agent {
         child.queue_manager = self.queue_manager.clone();
         child.workflow_registry = self.workflow_registry.clone();
         child.system_info_provider = self.system_info_provider.clone();
+        child.tool_work_dir = self.tool_work_dir.clone();
+        child.llm_client = self.llm_client.clone();
+
         info!(
             "Spawned sub-agent {} from parent {}",
             child.config.id, self.config.id
         );
         Ok(child)
+    }
+
+    /// 🆕 Set the tool working directory for sandboxed file operations
+    pub fn with_tool_work_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.tool_work_dir = dir.into();
+        self
+    }
+
+    /// 🆕 Attach a direct LLM client for native tool calling
+    pub fn with_llm_client(mut self, client: Arc<crate::llm::LLMClient>) -> Self {
+        self.llm_client = Some(client);
+        self
     }
 
     pub fn with_a2a(mut self, client: a2a::A2AClient) -> Self {
@@ -3634,16 +3655,34 @@ impl Agent {
                     });
                 }
 
+                let skill_tool_count = tools.len();
                 if !tools.is_empty() {
                     native_tools = tools;
+                }
+
+                // 🆕 Append底层 tools so LLM can directly invoke file ops, exec, etc.
+                let bottom_tools =
+                    crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
+                for (name, tool) in &bottom_tools {
+                    if !native_tools.iter().any(|t| &t.name == name) {
+                        native_tools.push(communication::ToolDefinition {
+                            name: name.clone(),
+                            description: tool.description().to_string(),
+                            parameters: tool.parameters_schema(),
+                        });
+                    }
+                }
+
+                if !native_tools.is_empty() {
                     match serde_json::to_string(&native_tools) {
                         Ok(json) => {
                             extra_params.insert("tools_json".to_string(), json);
                             info!(
-                                "handle_llm_task: injected {} / {} tools for native function \
-                                 calling (keywords: {:?})",
+                                "handle_llm_task: injected {} tools ({} skills + {} bottom) for \
+                                 native function calling (keywords: {:?})",
                                 native_tools.len(),
-                                all_skills.len(),
+                                skill_tool_count,
+                                bottom_tools.len(),
                                 keywords
                             );
                         }
@@ -3720,7 +3759,99 @@ impl Agent {
             extra_params.contains_key("tools_json")
         );
 
-        let mut response = if !native_tools.is_empty() && llm.supports_native_tools() {
+        // 🆕 Build底层 tool handlers for real execution via LLMClient
+        let bottom_tool_handlers: Vec<Box<dyn crate::llm::ToolHandler>> =
+            if self.llm_client.is_some() {
+                crate::skills::tool_set::default_tool_set(&self.tool_work_dir)
+                    .into_iter()
+                    .map(|(_, tool)| {
+                        Box::new(crate::llm::SkillToolHandler::new(tool))
+                            as Box<dyn crate::llm::ToolHandler>
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        let mut response = if !bottom_tool_handlers.is_empty() {
+            // 🆕 Use direct LLMClient for native tool calling with real execution
+            info!(
+                "handle_llm_task: using LLMClient native tool calling with {} bottom tools",
+                bottom_tool_handlers.len()
+            );
+            let client = self.llm_client.as_ref().unwrap();
+            let llm_messages: Vec<crate::llm::Message> = messages
+                .iter()
+                .map(|m| {
+                    let content = m.content.clone();
+                    let role = if m.platform == communication::PlatformType::Custom {
+                        // 🆕 FIX: Infer role from text prefix for accurate conversation semantics
+                        if content.starts_with("用户:") || content.starts_with("User:") {
+                            crate::llm::Role::User
+                        } else if content.starts_with("助手:")
+                            || content.starts_with("Assistant:")
+                        {
+                            crate::llm::Role::Assistant
+                        } else {
+                            crate::llm::Role::System
+                        }
+                    } else {
+                        crate::llm::Role::User
+                    };
+                    crate::llm::Message {
+                        role,
+                        content: vec![crate::llm::Content::Text { text: content }],
+                        name: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                    }
+                })
+                .collect();
+            match client
+                .chat_with_tools_react_with_messages(
+                    llm_messages,
+                    bottom_tool_handlers,
+                    10,
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    warn!(
+                        "LLMClient native tool calling failed: {}, falling back to legacy path",
+                        e
+                    );
+                    // Fall through to legacy path
+                    if !native_tools.is_empty() && llm.supports_native_tools() {
+                        match llm
+                            .call_llm_with_tools(
+                                messages.clone(),
+                                native_tools.clone(),
+                                Some(extra_params.clone()),
+                            )
+                            .await
+                        {
+                            Ok(resp) => resp,
+                            Err(e2) => {
+                                return Err(AgentError::Execution(format!(
+                                    "LLM call with tools failed: {}",
+                                    e2
+                                )));
+                            }
+                        }
+                    } else {
+                        llm.call_llm(messages.clone(), Some(extra_params.clone()))
+                            .await
+                            .map_err(|e2| {
+                                AgentError::Execution(format!("LLM call failed: {}", e2))
+                            })?
+                    }
+                }
+            }
+        } else if !native_tools.is_empty() && llm.supports_native_tools() {
             info!(
                 "handle_llm_task: using native function calling with {} tools",
                 native_tools.len()
@@ -4943,7 +5074,7 @@ impl Agent {
 
     /// 🆕 Query tool inventory — lists all available tools from tool_set.rs
     async fn query_tool_inventory(&self) -> Result<skills::executor::SkillExecutionResult, AgentError> {
-        let tools = crate::skills::tool_set::default_tool_set(std::path::Path::new("."));
+        let tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
         let mut lines = vec![
             "# 本机可用工具清单 (Tools)\n".to_string(),
             "| 序号 | 工具名 | 描述 | 参数 |

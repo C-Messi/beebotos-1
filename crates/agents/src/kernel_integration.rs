@@ -477,6 +477,10 @@ pub struct KernelAgentBuilder {
     with_trace_store: Option<Arc<dyn crate::skill_matching::TraceStore>>,
     // 🆕 System information provider for querying Gateway-layer data
     with_system_info_provider: Option<Arc<dyn crate::system_info::SystemInfoProvider>>,
+    // 🆕 Direct LLM client for native tool calling
+    with_llm_client: Option<Arc<crate::llm::LLMClient>>,
+    // 🆕 Tool working directory for sandboxed file operations
+    with_tool_work_dir: Option<std::path::PathBuf>,
 }
 
 impl KernelAgentBuilder {
@@ -500,6 +504,8 @@ impl KernelAgentBuilder {
             with_skill_selector: None,
             with_trace_store: None,
             with_system_info_provider: None,
+            with_llm_client: None,
+            with_tool_work_dir: None,
         }
     }
 
@@ -608,6 +614,18 @@ impl KernelAgentBuilder {
         self
     }
 
+    /// 🆕 Attach direct LLM client for native tool calling
+    pub fn with_llm_client(mut self, client: Arc<crate::llm::LLMClient>) -> Self {
+        self.with_llm_client = Some(client);
+        self
+    }
+
+    /// 🆕 Set tool working directory for sandboxed file operations
+    pub fn with_tool_work_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.with_tool_work_dir = Some(dir.into());
+        self
+    }
+
     /// Build and spawn the agent in kernel sandbox
     pub async fn spawn(self) -> Result<(TaskId, mpsc::UnboundedSender<KernelTaskRequest>)> {
         let kernel = self.kernel.ok_or_else(|| {
@@ -673,6 +691,16 @@ impl KernelAgentBuilder {
         // 🆕 Attach system information provider for cross-layer queries
         if let Some(provider) = self.with_system_info_provider {
             agent = agent.with_system_info_provider(provider);
+        }
+
+        // 🆕 Attach direct LLM client for native tool calling
+        if let Some(client) = self.with_llm_client {
+            agent = agent.with_llm_client(client);
+        }
+
+        // 🆕 Set tool working directory
+        if let Some(dir) = self.with_tool_work_dir {
+            agent = agent.with_tool_work_dir(dir);
         }
 
         // Attach kernel for WASM execution

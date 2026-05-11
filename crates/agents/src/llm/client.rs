@@ -507,6 +507,82 @@ impl LLMClient {
         Err(LLMError::Timeout)
     }
 
+    /// Chat with tool support using an explicit message list (not internal context).
+    ///
+    /// This variant is used when the caller already has a full conversation history
+    /// (e.g. from the main agent loop) and wants to run native tool calling with
+    /// real tool execution.
+    pub async fn chat_with_tools_react_with_messages(
+        &self,
+        messages: Vec<Message>,
+        tool_handlers: Vec<Box<dyn ToolHandler>>,
+        max_rounds: usize,
+        max_tokens: Option<u32>,
+        tool_choice: Option<String>,
+    ) -> LLMResult<String> {
+        let mut messages = messages;
+        // 🆕 FIX: Pre-build name→handler map to avoid O(n²) definition() calls
+        let handler_map: std::collections::HashMap<String, &Box<dyn ToolHandler>> = tool_handlers
+            .iter()
+            .map(|h| (h.definition().function.name.clone(), h))
+            .collect();
+        let tool_definitions: Vec<Tool> =
+            tool_handlers.iter().map(|h| h.definition()).collect();
+
+        for round in 0..max_rounds {
+            let mut config = self.config.clone();
+            if let Some(mt) = max_tokens {
+                config.max_tokens = Some(mt);
+            }
+            if let Some(ref tc) = tool_choice {
+                config.tool_choice = match tc.as_str() {
+                    "required" => Some(ToolChoice::Required("required".to_string())),
+                    "none" => Some(ToolChoice::None("none".to_string())),
+                    _ => Some(ToolChoice::Auto("auto".to_string())),
+                };
+            }
+            let mut request = LLMRequest {
+                messages: messages.clone(),
+                config,
+            };
+            request.config.tools = Some(tool_definitions.clone());
+
+            let response = self.provider.complete(request).await?;
+
+            if let Some(choice) = response.choices.first() {
+                if let Some(tool_calls) = &choice.message.tool_calls {
+                    messages.push(choice.message.clone());
+
+                    for tc in tool_calls {
+                        let result = match handler_map.get(&tc.function.name) {
+                            Some(handler) => {
+                                match handler.execute(&tc.function.arguments).await {
+                                    Ok(r) => r,
+                                    Err(e) => format!("Error: {}", e),
+                                }
+                            }
+                            None => format!("Error: Tool '{}' not found", tc.function.name),
+                        };
+
+                        messages.push(Message {
+                            role: Role::Tool,
+                            content: vec![Content::Text { text: result }],
+                            name: None,
+                            tool_calls: None,
+                            tool_call_id: Some(tc.id.clone()),
+                            reasoning_content: None,
+                        });
+                    }
+                    continue;
+                }
+
+                return Ok(choice.message.text_content());
+            }
+        }
+
+        Err(LLMError::Timeout)
+    }
+
     /// Stream chat response
     pub async fn chat_stream(
         &self,

@@ -155,6 +155,11 @@ impl LlmService {
         })
     }
 
+    /// Get the internal failover provider for creating an LLMClient
+    pub fn failover_provider(&self) -> Arc<beebotos_agents::llm::FailoverProvider> {
+        self.failover_provider.clone()
+    }
+
     /// Validate LLM configuration
     fn validate_config(config: &BeeBotOSConfig) -> Result<(), GatewayError> {
         // Check if default provider is configured

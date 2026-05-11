@@ -57,6 +57,10 @@ pub struct GatewayAgentRuntime {
     mcp_manager: Option<Arc<crate::mcp::MCPManager>>,
     /// 🆕 System information provider for querying Gateway-layer data
     system_info_provider: Option<Arc<dyn crate::system_info::SystemInfoProvider>>,
+    /// 🆕 Direct LLM client for native tool calling
+    llm_client: Option<Arc<crate::llm::LLMClient>>,
+    /// 🆕 Tool working directory for sandboxed file operations
+    tool_work_dir: std::path::PathBuf,
 }
 
 /// Handle to an agent's task
@@ -149,6 +153,8 @@ impl GatewayAgentRuntime {
             skill_catalog: RwLock::new(None),
             mcp_manager: None,
             system_info_provider: None,
+            llm_client: None,
+            tool_work_dir: std::path::PathBuf::from("/data/workspace"),
         };
 
         Ok(runtime)
@@ -196,6 +202,18 @@ impl GatewayAgentRuntime {
     /// Get a clone of the state manager handle
     pub fn state_manager(&self) -> Arc<crate::state_manager::AgentStateManager> {
         self.state_manager.clone()
+    }
+
+    /// 🆕 Inject direct LLM client for native tool calling
+    pub fn with_llm_client(mut self, client: Arc<crate::llm::LLMClient>) -> Self {
+        self.llm_client = Some(client);
+        self
+    }
+
+    /// 🆕 Set tool working directory for sandboxed file operations
+    pub fn with_tool_work_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.tool_work_dir = dir.into();
+        self
     }
 
     /// 🔒 P0 FIX: Recover agents from persistent state
@@ -440,6 +458,12 @@ impl GatewayAgentRuntime {
             builder = builder.with_system_info_provider(provider.clone());
         }
 
+        // 🆕 Attach direct LLM client and tool working directory
+        if let Some(ref client) = self.llm_client {
+            builder = builder.with_llm_client(client.clone());
+        }
+        builder = builder.with_tool_work_dir(self.tool_work_dir.clone());
+
         let (task_id, task_sender) = builder
             .spawn()
             .await
@@ -666,6 +690,8 @@ impl GatewayAgentRuntime {
             skill_catalog: RwLock::new(None),
             mcp_manager: None,
             system_info_provider: None,
+            llm_client: None,
+            tool_work_dir: std::path::PathBuf::from("/data/workspace"),
         }
     }
 
@@ -953,6 +979,12 @@ impl AgentRuntime for GatewayAgentRuntime {
             if let Some(ref provider) = self.system_info_provider {
                 builder = builder.with_system_info_provider(provider.clone());
             }
+
+            // 🆕 Attach direct LLM client and tool working directory
+            if let Some(ref client) = self.llm_client {
+                builder = builder.with_llm_client(client.clone());
+            }
+            builder = builder.with_tool_work_dir(self.tool_work_dir.clone());
 
             let (task_id, task_sender) = builder.spawn().await.map_err(|e| {
                 error!("❌ builder.spawn() failed for agent {}: {}", agent_id, e);

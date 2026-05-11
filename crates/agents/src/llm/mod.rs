@@ -110,6 +110,7 @@ pub mod client;
 pub mod failover;
 pub mod http_client;
 pub mod providers;
+pub mod skill_tool_handler;
 pub mod traits;
 pub mod types;
 
@@ -117,6 +118,7 @@ pub mod types;
 // Re-export main types
 pub use adapter::{LLMClientAdapter, LegacyLLMClientBuilder};
 pub use client::{ClientMetrics, LLMClient, LLMClientBuilder, ToolHandler};
+pub use skill_tool_handler::SkillToolHandler;
 // ARCHITECTURE FIX: Re-export failover types
 pub use failover::{FailoverConfig, FailoverProvider, FailoverProviderBuilder};
 pub use http_client::{LLMHttpClient, OpenAIRequestBuilder, ProviderConfig, ProviderInitParams};
