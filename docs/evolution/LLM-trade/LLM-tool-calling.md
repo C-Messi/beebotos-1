@@ -223,3 +223,52 @@ One more LLM call to generate final answer
 2. Unit test: `file_write` with absolute path `/etc/passwd` is rejected
 3. Integration test: "写一个输出hello world的python文件" → verify `file_write` is called via native function calling
 4. Integration test: "查找本机所有的py文件" → verify `file_glob` is called
+
+
+编译通过 ✅
+
+---
+
+## 检查结果报告
+
+### 修复前状态
+
+| 路径 | 底层工具 | 已注册 Skill | 说明 |
+|------|---------|-------------|------|
+| **General Planning**（非 crypto） | ✅ | ✅ | `_skip_planning=true` → 走 `handle_llm_task_internal` |
+| **Crypto ReAct**（`UnifiedReActExecutor`） | ❌ | ❌ | 只包含 `crypto_price`、`fetch_ohlcv` 等 crypto 工具 |
+
+**关键问题**：在 crypto ReAct 多轮任务中，如果用户说"分析 BTC 走势并把结果保存到文件"，LLM 只能调用 crypto 工具获取数据，**无法调用 `file_write` 保存结果**。
+
+### 修复实施
+
+在 `execute_with_react_planning` 中，将底层工具合并到 `UnifiedReActExecutor` 的工具集：
+
+```rust
+// 🆕 Merge bottom tools so LLM can also use file ops, exec, search, etc.
+let bottom_tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
+for (name, tool) in bottom_tools {
+    if !tools.contains_key(&name) {
+        tools.insert(name, tool);
+        merged_count += 1;
+    }
+}
+```
+
+### 修复后状态
+
+| 路径 | 底层工具 | 已注册 Skill | 机制 |
+|------|---------|-------------|------|
+| **General Planning** | ✅ | ✅ | `chat_with_tools_react_with_messages` + `SKILL:` 解析 |
+| **Crypto ReAct** | ✅ | ❌ | `UnifiedReActExecutor` JSON ReAct 循环直接调用 `SkillTool::execute()` |
+
+**注意**：`UnifiedReActExecutor` 是 **text-based JSON ReAct**，不是 native function calling。它通过 JSON 输出 `{"action":"call_tool","tool_name":"file_write",...}` 来调用工具。LLM 可以在这个循环中**自由组合** crypto 工具和底层工具（例如：先 `fetch_ohlcv` 获取数据，再 `file_write` 保存结果）。
+
+已注册 skill 的调用不在 `UnifiedReActExecutor` 的设计范围内（它只处理 JSON tool calls，不处理 `SKILL:` 文本触发）。如果需要让 ReAct 也能调用已注册 skills，需要额外扩展 `UnifiedReActExecutor` 的 action 类型。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+
+
+
+

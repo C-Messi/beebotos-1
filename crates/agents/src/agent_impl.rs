@@ -1907,9 +1907,27 @@ impl Agent {
             .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
 
         // Step 2: Build analysis tools (MCP crypto tools + computed indicators)
-        let tools =
+        let mut tools =
             crate::skills::investment_analysis::build_analysis_tools(self.mcp_manager.as_deref())
                 .await;
+
+        // 🆕 Merge bottom tools so LLM can also use file ops, exec, search, etc.
+        // during multi-round crypto analysis (e.g. "save the result to a file")
+        let bottom_tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
+        let mut merged_count = 0;
+        for (name, tool) in bottom_tools {
+            if !tools.contains_key(&name) {
+                tools.insert(name, tool);
+                merged_count += 1;
+            }
+        }
+        if merged_count > 0 {
+            info!(
+                "Unified ReAct: merged {} bottom tools into analysis toolkit (total={})",
+                merged_count,
+                tools.len()
+            );
+        }
 
         if tools.is_empty() {
             warn!("Unified ReAct: no analysis tools available, falling back to direct LLM answer");
