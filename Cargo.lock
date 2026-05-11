@@ -2018,6 +2018,7 @@ dependencies = [
  "beebotos-telemetry",
  "beebotos-update-client",
  "chrono",
+ "chrono-tz",
  "colored 2.2.0",
  "config 0.14.1",
  "constant_time_eq 0.3.1",

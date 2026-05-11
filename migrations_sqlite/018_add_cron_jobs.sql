@@ -7,7 +7,7 @@ CREATE TABLE cron_jobs (
     description TEXT DEFAULT '',
     schedule_type TEXT NOT NULL CHECK(schedule_type IN ('at', 'every', 'cron')),
     schedule_expr TEXT NOT NULL,
-    timezone TEXT DEFAULT 'UTC',
+    timezone TEXT DEFAULT 'Asia/Shanghai',
     prompt TEXT NOT NULL,
     enabled INTEGER DEFAULT 1,
     context_mode TEXT DEFAULT 'isolated' CHECK(context_mode IN ('main', 'isolated')),

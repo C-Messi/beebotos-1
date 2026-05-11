@@ -2604,3 +2604,32 @@ async fn restore_skills_from_disk(registry: &Arc<SkillRegistry>) {
 
 > **apps/web 前端只负责"下单"，Gateway 后端负责"收货→拆包→验货→上架"。ZIP 的解码、安全校验和 SkillRegistry 自动注册全部发生在后端，前端无感知。**
 
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+已开始并完成“刷新”修复。
+
+这次补了两边：
+
+后端：`apps/gateway/src/services/cron_job_service.rs`
+- `record_run_start()` 现在会在任务运行时重新计算并写回 `next_run_at`。
+- 所以点“运行”后再点“刷新”，列表里的 `运行次数` 和 `下次执行` 都会从后端拿到新值。
+- `at` 一次性任务运行后 `next_run_at` 会置空，周期任务会重新计算下一次执行时间。
+
+前端：`apps/web/src/pages/cron_jobs.rs`
+- 刷新按钮点击后会显示 `刷新中...`，并临时禁用按钮。
+- API 错误不再被 `.ok()` 静默吞掉，会显示错误框。
+- 增加 `refresh_seq` 明确触发 `LocalResource` 重新执行，避免 refetch 看起来没有动静。
+
+验证：
+- `cargo fmt --manifest-path /root/beebotos/apps/gateway/Cargo.toml`
+- `cargo fmt --manifest-path /root/beebotos/apps/web/Cargo.toml`
+- `cargo check --manifest-path /root/beebotos/apps/web/Cargo.toml`
+- `cargo check --manifest-path /root/beebotos/apps/gateway/Cargo.toml`
+
+两个 check 都通过；gateway 仍有一些仓库既有 warning，和这次修改无关。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+

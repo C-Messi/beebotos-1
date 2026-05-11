@@ -20,13 +20,25 @@ const POLL_INTERVAL_MS: u32 = 10_000;
 #[component]
 pub fn CronJobsPage() -> impl IntoView {
     let app_state = use_app_state();
+    let refresh_seq = RwSignal::new(0_u64);
+    let refreshing = RwSignal::new(false);
+    let refresh_error = RwSignal::new(None::<String>);
 
     // ---- Fetch job list ----
     let jobs = LocalResource::new({
         let app_state = app_state.clone();
         move || {
+            let _ = refresh_seq.get();
             let service = app_state.cron_job_service();
-            async move { service.list_jobs().await.ok() }
+            async move {
+                let result = service.list_jobs().await.map_err(|e| e.to_string());
+                refreshing.set(false);
+                match &result {
+                    Ok(_) => refresh_error.set(None),
+                    Err(e) => refresh_error.set(Some(e.clone())),
+                }
+                result
+            }
         }
     });
 
@@ -46,6 +58,7 @@ pub fn CronJobsPage() -> impl IntoView {
                         continue;
                     }
                 }
+                refresh_seq.update(|n| *n += 1);
                 jobs_r.refetch();
             }
         });
@@ -55,6 +68,9 @@ pub fn CronJobsPage() -> impl IntoView {
     });
 
     let refresh = move || {
+        refreshing.set(true);
+        refresh_error.set(None);
+        refresh_seq.update(|n| *n += 1);
         jobs.refetch();
     };
 
@@ -72,8 +88,12 @@ pub fn CronJobsPage() -> impl IntoView {
                     <p class="page-description">"管理定时执行的自动化任务"</p>
                 </div>
                 <div class="page-header-actions">
-                    <button class="btn btn-secondary" on:click=move |_| refresh()>
-                        "🔄 刷新"
+                    <button
+                        class="btn btn-secondary"
+                        disabled=move || refreshing.get()
+                        on:click=move |_| refresh()
+                    >
+                        {move || if refreshing.get() { "刷新中..." } else { "🔄 刷新" }}
                     </button>
                     <button
                         class="btn btn-primary"
@@ -87,10 +107,14 @@ pub fn CronJobsPage() -> impl IntoView {
                 </div>
             </div>
 
+            <Show when=move || refresh_error.get().is_some()>
+                <div class="error-box">{move || refresh_error.get().unwrap_or_default()}</div>
+            </Show>
+
             <Suspense fallback=|| view! { <TableSkeleton rows=5 /> }>
                 {move || {
-                    jobs.get().map(|j| {
-                        j.map(|list| {
+                    jobs.get().map(|result| {
+                        result.map(|list| {
                             view! {
                                 <JobList
                                     jobs=list
@@ -106,7 +130,7 @@ pub fn CronJobsPage() -> impl IntoView {
                             }
                             .into_any()
                         })
-                        .unwrap_or_else(|| view! { <JobsError /> }.into_any())
+                        .unwrap_or_else(|_| view! { <JobsError /> }.into_any())
                     })
                     .unwrap_or_else(|| view! { <TableSkeleton rows=5 /> }.into_any())
                 }}
@@ -330,7 +354,7 @@ fn JobForm(
     let timezone = RwSignal::new(
         job.as_ref()
             .map(|j| j.timezone.clone())
-            .unwrap_or_else(|| "UTC".to_string()),
+            .unwrap_or_else(|| "Asia/Shanghai".to_string()),
     );
     let prompt = RwSignal::new(job.as_ref().map(|j| j.prompt.clone()).unwrap_or_default());
     let enabled = RwSignal::new(job.as_ref().map(|j| j.enabled).unwrap_or(true));
@@ -409,7 +433,7 @@ fn JobForm(
         (
             ScheduleType::At,
             "定时一次",
-            "ISO 8601 格式，如 2026-05-06T09:00:00Z",
+            "北京时间，如 2026-05-06 09:00:00",
         ),
     ];
 
@@ -481,7 +505,7 @@ fn JobForm(
                         match schedule_type.get() {
                             ScheduleType::Cron => "*/5 * * * *".to_string(),
                             ScheduleType::Every => "30m".to_string(),
-                            ScheduleType::At => "2026-05-06T09:00:00Z".to_string(),
+                            ScheduleType::At => "2026-05-06 09:00:00".to_string(),
                         }
                     }
                 />
@@ -490,7 +514,7 @@ fn JobForm(
                         match schedule_type.get() {
                             ScheduleType::Cron => "5 字段 cron：分 时 日 月 星期".to_string(),
                             ScheduleType::Every => "支持 s/m/h/d，如 30m, 1h, 4h, 1d".to_string(),
-                            ScheduleType::At => "ISO 8601 格式时间".to_string(),
+                            ScheduleType::At => "未带时区时按北京时间解析".to_string(),
                         }
                     }}
                 </span>
@@ -502,7 +526,7 @@ fn JobForm(
                     type="text"
                     prop:value=move || timezone.get()
                     on:input:target=move |ev| timezone.set(ev.target().value())
-                    placeholder="UTC"
+                    placeholder="Asia/Shanghai"
                 />
             </div>
 

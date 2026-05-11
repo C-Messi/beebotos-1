@@ -5,16 +5,21 @@
 //! (expression).
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use chrono_tz::Tz;
+use cron::Schedule;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::error::AppError;
+
+pub const DEFAULT_TIMEZONE: &str = "Asia/Shanghai";
 
 /// Schedule type for cron jobs
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -111,13 +116,18 @@ impl CronJobRequest {
         if self.schedule_expr.trim().is_empty() {
             return Err(AppError::bad_request("Schedule expression cannot be empty"));
         }
-        // Validate cron expression if type is cron
-        if self.schedule_type == ScheduleType::Cron {
-            let parts: Vec<&str> = self.schedule_expr.split_whitespace().collect();
-            if parts.len() != 5 {
-                return Err(AppError::bad_request(
-                    "Cron expression must have exactly 5 fields (min hour day month dow)",
-                ));
+        let timezone = normalize_timezone(self.timezone.as_deref())?;
+        match self.schedule_type {
+            ScheduleType::At => {
+                parse_at_time(&self.schedule_expr, timezone)?;
+            }
+            ScheduleType::Every => {
+                parse_duration(&self.schedule_expr).ok_or_else(|| {
+                    AppError::bad_request("Interval must be a positive duration like 30m, 1h, 1d")
+                })?;
+            }
+            ScheduleType::Cron => {
+                normalize_cron_expr(&self.schedule_expr)?;
             }
         }
         Ok(())
@@ -197,8 +207,11 @@ impl CronJobService {
         let next_run = self.compute_next_run(
             &req.schedule_type,
             &req.schedule_expr,
-            req.timezone.as_deref().unwrap_or("UTC"),
+            req.timezone.as_deref().unwrap_or(DEFAULT_TIMEZONE),
         );
+        let timezone = normalize_timezone(req.timezone.as_deref())?
+            .name()
+            .to_string();
 
         sqlx::query(
             r#"
@@ -214,7 +227,7 @@ impl CronJobService {
         .bind(req.description.as_deref().unwrap_or(""))
         .bind(schedule_type_str)
         .bind(&req.schedule_expr)
-        .bind(req.timezone.as_deref().unwrap_or("UTC"))
+        .bind(&timezone)
         .bind(&req.prompt)
         .bind(if req.enabled.unwrap_or(true) { 1 } else { 0 })
         .bind(context_mode_str)
@@ -247,8 +260,11 @@ impl CronJobService {
         let next_run = self.compute_next_run(
             &req.schedule_type,
             &req.schedule_expr,
-            req.timezone.as_deref().unwrap_or("UTC"),
+            req.timezone.as_deref().unwrap_or(DEFAULT_TIMEZONE),
         );
+        let timezone = normalize_timezone(req.timezone.as_deref())?
+            .name()
+            .to_string();
 
         let result = sqlx::query(
             r#"
@@ -264,7 +280,7 @@ impl CronJobService {
         .bind(req.description.as_deref().unwrap_or(""))
         .bind(schedule_type_str)
         .bind(&req.schedule_expr)
-        .bind(req.timezone.as_deref().unwrap_or("UTC"))
+        .bind(&timezone)
         .bind(&req.prompt)
         .bind(if req.enabled.unwrap_or(true) { 1 } else { 0 })
         .bind(context_mode_str)
@@ -325,8 +341,14 @@ impl CronJobService {
 
     /// Record a job run start
     pub async fn record_run_start(&self, job_id: &str) -> Result<String, AppError> {
+        let job = self.get_job(job_id).await?;
         let run_id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
+        let next_run = if job.schedule_type == ScheduleType::At {
+            None
+        } else {
+            self.compute_next_run(&job.schedule_type, &job.schedule_expr, &job.timezone)
+        };
 
         sqlx::query(
             "INSERT INTO cron_job_runs (id, job_id, status, started_at) VALUES (?1, ?2, \
@@ -339,12 +361,14 @@ impl CronJobService {
         .await
         .map_err(AppError::database)?;
 
-        // Update job last_run and run_count
+        // Update job execution counters and next_run_at so manual refresh shows current
+        // state.
         sqlx::query(
-            "UPDATE cron_jobs SET last_run_at = ?1, run_count = run_count + 1, updated_at = ?1 \
-             WHERE id = ?2",
+            "UPDATE cron_jobs SET last_run_at = ?1, run_count = run_count + 1, next_run_at = ?2, \
+             updated_at = ?1 WHERE id = ?3",
         )
         .bind(&now)
+        .bind(next_run.as_ref().map(|d| d.to_rfc3339()))
         .bind(job_id)
         .execute(&self.db)
         .await
@@ -417,21 +441,20 @@ impl CronJobService {
         &self,
         schedule_type: &ScheduleType,
         expr: &str,
-        _tz: &str,
+        tz: &str,
     ) -> Option<DateTime<Utc>> {
+        let timezone = normalize_timezone(Some(tz)).ok()?;
         match schedule_type {
-            ScheduleType::At => DateTime::parse_from_rfc3339(expr)
-                .ok()
-                .map(|d| d.with_timezone(&Utc)),
+            ScheduleType::At => parse_at_time(expr, timezone).ok(),
             ScheduleType::Every => {
                 // Parse duration like "30m", "1h", "1d"
-                let dur = parse_duration(expr).unwrap_or(chrono::Duration::minutes(5));
+                let dur = parse_duration(expr)?;
                 Some(Utc::now() + dur)
             }
             ScheduleType::Cron => {
-                // For cron, we return now + 1 minute as a placeholder
-                // Real next-run computation is handled by tokio-cron-scheduler
-                Some(Utc::now() + chrono::Duration::minutes(1))
+                let schedule = Schedule::from_str(&normalize_cron_expr(expr).ok()?).ok()?;
+                let now = Utc::now().with_timezone(&timezone);
+                schedule.after(&now).next().map(|d| d.with_timezone(&Utc))
             }
         }
     }
@@ -549,13 +572,16 @@ impl CronJobService {
 }
 
 /// Parse duration string like "30m", "1h", "4h", "1d"
-fn parse_duration(s: &str) -> Option<chrono::Duration> {
+pub fn parse_duration(s: &str) -> Option<chrono::Duration> {
     let s = s.trim();
     if s.len() < 2 {
         return None;
     }
     let (num_str, unit) = s.split_at(s.len() - 1);
     let num: i64 = num_str.parse().ok()?;
+    if num <= 0 {
+        return None;
+    }
     match unit {
         "s" => Some(chrono::Duration::seconds(num)),
         "m" => Some(chrono::Duration::minutes(num)),
@@ -617,11 +643,11 @@ impl From<CronJobRow> for CronJob {
             delivery_target: row.delivery_target,
             max_runs: row.max_runs,
             run_count: row.run_count,
-            last_run_at: row.last_run_at.and_then(|s| s.parse().ok()),
-            next_run_at: row.next_run_at.and_then(|s| s.parse().ok()),
+            last_run_at: row.last_run_at.and_then(|s| parse_db_datetime(&s)),
+            next_run_at: row.next_run_at.and_then(|s| parse_db_datetime(&s)),
             created_by: row.created_by,
-            created_at: row.created_at.parse().unwrap_or_else(|_| Utc::now()),
-            updated_at: row.updated_at.parse().unwrap_or_else(|_| Utc::now()),
+            created_at: parse_db_datetime(&row.created_at).unwrap_or_else(Utc::now),
+            updated_at: parse_db_datetime(&row.updated_at).unwrap_or_else(Utc::now),
         }
     }
 }
@@ -648,7 +674,7 @@ impl From<PendingAtJobRow> for CronJob {
             description: String::new(),
             schedule_type: ScheduleType::At,
             schedule_expr: String::new(),
-            timezone: String::from("UTC"),
+            timezone: String::from(DEFAULT_TIMEZONE),
             prompt: row.prompt,
             enabled: true,
             context_mode: match row.context_mode.as_str() {
@@ -688,9 +714,80 @@ impl From<CronJobRunRow> for CronJobRun {
             status: row.status,
             output: row.output,
             error: row.error,
-            started_at: row.started_at.parse().unwrap_or_else(|_| Utc::now()),
-            completed_at: row.completed_at.and_then(|s| s.parse().ok()),
+            started_at: parse_db_datetime(&row.started_at).unwrap_or_else(Utc::now),
+            completed_at: row.completed_at.and_then(|s| parse_db_datetime(&s)),
             triggered_by: row.triggered_by,
         }
     }
+}
+
+pub fn normalize_timezone(tz: Option<&str>) -> Result<Tz, AppError> {
+    let tz = tz
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_TIMEZONE);
+
+    let normalized = match tz {
+        "Asia/Beijing" | "Asia/Chongqing" | "PRC" | "CST" | "China" | "Beijing" | "UTC+8"
+        | "+08:00" => DEFAULT_TIMEZONE,
+        other => other,
+    };
+
+    normalized.parse::<Tz>().map_err(|_| {
+        AppError::bad_request(format!(
+            "Invalid timezone '{}', expected an IANA timezone like {}",
+            tz, DEFAULT_TIMEZONE
+        ))
+    })
+}
+
+pub fn normalize_cron_expr(expr: &str) -> Result<String, AppError> {
+    let parts: Vec<&str> = expr.split_whitespace().collect();
+    let normalized = match parts.len() {
+        5 => format!("0 {}", parts.join(" ")),
+        6 => parts.join(" "),
+        _ => {
+            return Err(AppError::bad_request(
+                "Cron expression must have 5 fields (min hour day month dow) or 6 fields with \
+                 seconds",
+            ));
+        }
+    };
+
+    Schedule::from_str(&normalized)
+        .map_err(|e| AppError::bad_request(format!("Invalid cron expression: {}", e)))?;
+    Ok(normalized)
+}
+
+fn parse_at_time(expr: &str, timezone: Tz) -> Result<DateTime<Utc>, AppError> {
+    let expr = expr.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc3339(expr) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    let naive = NaiveDateTime::parse_from_str(expr, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(expr, "%Y-%m-%d %H:%M:%S"))
+        .map_err(|_| {
+            AppError::bad_request(
+                "One-shot time must be RFC3339 or local time like 2026-05-06 09:00:00",
+            )
+        })?;
+
+    timezone
+        .from_local_datetime(&naive)
+        .single()
+        .map(|d| d.with_timezone(&Utc))
+        .ok_or_else(|| AppError::bad_request("One-shot time is ambiguous or invalid in timezone"))
+}
+
+fn parse_db_datetime(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|d| d.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+                .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+                .ok()
+                .map(|d| Utc.from_utc_datetime(&d))
+        })
 }

@@ -52,7 +52,7 @@ pub struct CronJob {
 }
 
 fn default_timezone() -> String {
-    "UTC".to_string()
+    "Asia/Shanghai".to_string()
 }
 
 fn default_context_mode() -> ContextMode {
