@@ -2437,5 +2437,170 @@ beebotos-gateway: 0 errors, 30 warnings（无新增）
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+**结论：apps/web 前端本身没有 ZIP 解码流程，但 Gateway 后端有完整的 ZIP 下载→解压→自动注册流水线。**
 
+以下是全链路的分工和流程详解：
+
+---
+
+## 一、前端 (apps/web)：只发 JSON 指令，不碰 ZIP
+
+`apps/web/src/pages/skills.rs:482-506` 中，用户点击 **Install** 后，前端仅构造一个 JSON 请求：
+
+```rust
+let req = InstallSkillRequest {
+    source: skill_id.clone(),      // 技能 ID
+    agent_id: None,
+    version: None,
+    hub: selected_hub.get(),       // "clawhub" 或 "beehub"
+};
+match service.install(req).await { ... }
+```
+
+`SkillService::install` (`apps/web/src/api/services.rs:164-169`) 只是把这个 JSON POST 到 Gateway：
+
+```rust
+pub async fn install(&self, req: InstallSkillRequest) -> Result<InstallSkillResponse, ApiError> {
+    self.client.post(ApiEndpoints::SKILL_INSTALL, &req).await
+}
+```
+
+**前端全程不下载 ZIP、不解压、不注册。**
+
+---
+
+## 二、后端 (Gateway)：完整的 ZIP 解码 + 自动注册流水线
+
+Gateway 的 `install_skill` 处理器 (`apps/gateway/src/handlers/http/skills.rs:151-327`) 负责全部重活：
+
+### 阶段 1：Hub 代理下载 ZIP
+
+```rust
+// 1. 获取技能元数据
+let metadata = client.get_skill(&req.source).await?;
+
+// 2. 从 Hub 下载 ZIP 包
+let download_result = client.download_skill(&req.source, req.version.as_deref()).await;
+```
+
+### 阶段 2：ZIP 解码与安装 (`install_skill_package`)
+
+`apps/gateway/src/handlers/http/skills.rs:969-1118`
+
+```rust
+async fn install_skill_package(metadata: &SkillMetadata, package_bytes: &[u8]) -> Result<...> {
+    // 1. 创建目录: data/skills/{skill_id}/
+    tokio::fs::create_dir_all(&skill_dir).await?;
+
+    // 2. 写入临时 package.zip
+    tokio::fs::write(&package_path, package_bytes).await?;
+
+    // 3. 在 spawn_blocking 中解压，带 ZIP Slip 防护
+    tokio::task::spawn_blocking(move || {
+        let mut archive = zip::ZipArchive::new(file)?;
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i)?;
+            // ZIP Slip 检查: 拒绝 ../、绝对路径
+            if entry_name.contains("..") || entry_name.starts_with('/') { ... }
+            // 二次校验: canonicalize 后仍在目标目录内
+            if !canonical_out.starts_with(&canonical_skill) { ... }
+            // 解压文件
+            std::io::copy(&mut entry, &mut out_file)?;
+        }
+    }).await?;
+
+    // 4. 删除临时 package.zip
+    tokio::fs::remove_file(&package_path).await?;
+
+    // 5. 自动检测技能类型并创建 manifest
+    let has_skill_md = skill_dir.join("SKILL.md").exists();
+    let has_skill_wasm = skill_dir.join("skill.wasm").exists();
+
+    if has_skill_md {
+        // Markdown 技能: 创建 skill.yaml，runtime 类型为 skill_md
+        tokio::fs::write(skill_dir.join("skill.yaml"), manifest).await?;
+    } else if has_skill_wasm {
+        // WASM 技能: 创建 skill.yaml + 安全校验
+        tokio::fs::write(&manifest_path, manifest).await?;
+        let validator = SkillSecurityValidator::new(...);
+        validator.validate(&wasm_bytes)?;  // WASM 安全验证
+    } else {
+        // Fallback: 创建空 manifest
+        tokio::fs::write(&manifest_path, manifest).await?;
+    }
+}
+```
+
+### 阶段 3：自动注册到 SkillRegistry
+
+`apps/gateway/src/handlers/http/skills.rs:278-312`
+
+```rust
+// Load and register to SkillRegistry if available
+if let Some(ref registry) = state.skill_registry {
+    let mut loader = SkillLoader::new();
+    loader.add_path(get_skills_base_dir());
+
+    // 1. 先尝试 WASM 形式加载
+    let skill = match loader.load_skill(&metadata.id).await {
+        Ok(skill) => Some(skill),
+        Err(_) => {
+            // 2. 失败则回退到 Markdown 形式
+            let skill_dir = get_skills_base_dir().join(&metadata.id);
+            load_markdown_skill_from_dir(&skill_dir).await
+        }
+    };
+
+    if let Some(skill) = skill {
+        registry.register(skill, "general", metadata.tags.clone()).await;
+        info!("Registered skill {} to registry", metadata.id);
+    }
+}
+```
+
+---
+
+## 三、启动时自动恢复已安装 Skills
+
+Gateway 启动时 (`main.rs:440-444`) 会执行 `restore_skills_from_disk`，自动扫描 `data/skills/` 目录：
+
+```rust
+async fn restore_skills_from_disk(registry: &Arc<SkillRegistry>) {
+    // 遍历 data/skills/ 下的每个子目录
+    // 1. 尝试 WASM 加载 (skill.yaml + skill.wasm)
+    // 2. 回退到 Markdown 加载 (SKILL.md)
+    // 3. 成功则 registry.register()
+}
+```
+
+这意味着：**即使 Gateway 重启，之前通过 Web 安装的技能也会被自动重新注册，无需再次安装。**
+
+---
+
+## 四、流程图
+
+```
+┌─────────────┐    POST JSON     ┌─────────────────────────────────────────────┐
+│  apps/web   │ ───────────────→ │              Gateway Backend                │
+│  (前端)      │  /skills/install │                                             │
+└─────────────┘                  │  1. get_skill()      → 从 ClawHub/BeeHub 获取元数据 │
+                                 │  2. download_skill() → 下载 ZIP 字节流            │
+                                 │  3. install_skill_package()                   │
+                                 │     ├─ 写入 package.zip                      │
+                                 │     ├─ spawn_blocking 解压 (ZIP Slip 防护)    │
+                                 │     ├─ 检测类型: SKILL.md / skill.wasm        │
+                                 │     ├─ 创建 skill.yaml manifest              │
+                                 │     └─ WASM 安全验证                          │
+                                 │  4. SkillLoader::load_skill()                 │
+                                 │     ├─ 先尝试 WASM                           │
+                                 │     └─ 回退 Markdown                         │
+                                 │  5. SkillRegistry::register()                 │
+                                 └─────────────────────────────────────────────┘
+```
+
+---
+
+## 五、一句话总结
+
+> **apps/web 前端只负责"下单"，Gateway 后端负责"收货→拆包→验货→上架"。ZIP 的解码、安全校验和 SkillRegistry 自动注册全部发生在后端，前端无感知。**
 

@@ -201,18 +201,25 @@ pub async fn install_skill(
     // Check if already installed
     let skill_dir = get_skill_install_path(&metadata.id);
     if skill_dir.exists() {
+        if has_installable_skill_payload(&skill_dir) {
+            warn!(
+                "Skill {} is already installed at {:?}",
+                metadata.id, skill_dir
+            );
+            return Ok(Json(InstallSkillResponse {
+                success: true,
+                skill_id: metadata.id,
+                name: metadata.name,
+                version: metadata.version,
+                message: "Skill is already installed".to_string(),
+                installed_path: skill_dir.to_string_lossy().to_string(),
+            }));
+        }
+
         warn!(
-            "Skill {} is already installed at {:?}",
+            "Existing skill directory for {} has no installable payload; reinstalling into {:?}",
             metadata.id, skill_dir
         );
-        return Ok(Json(InstallSkillResponse {
-            success: true,
-            skill_id: metadata.id,
-            name: metadata.name,
-            version: metadata.version,
-            message: "Skill is already installed".to_string(),
-            installed_path: skill_dir.to_string_lossy().to_string(),
-        }));
     }
 
     // Download skill package (may be optional for metadata-only hubs)
@@ -251,21 +258,18 @@ pub async fn install_skill(
                 })?;
         }
         Err(crate::clients::HubError::DownloadNotSupported) => {
-            // Hub does not support direct downloads — install metadata-only stub
-            info!(
-                "Hub does not support downloads for {}; installing metadata-only stub",
+            warn!(
+                "Hub does not provide a downloadable package for {}; installation aborted",
                 metadata.id
             );
-            let hub_label = match hub_type {
-                HubType::ClawHub => "clawhub",
-                HubType::BeeHub => "beehub",
-            };
-            install_skill_metadata_only(&metadata, hub_label)
-                .await
-                .map_err(|e| GatewayError::Internal {
-                    message: format!("Failed to install skill metadata: {}", e),
-                    correlation_id: uuid::Uuid::new_v4().to_string(),
-                })?;
+            return Err(GatewayError::BadRequest {
+                message: format!(
+                    "Skill '{}' is available in {}, but it does not provide a downloadable \
+                     package. Cannot install a metadata-only skill.",
+                    metadata.id, hub_type
+                ),
+                field: Some("source".to_string()),
+            });
         }
         Err(e) => {
             return Err(GatewayError::Internal {
@@ -931,38 +935,12 @@ pub fn get_skills_base_dir() -> std::path::PathBuf {
 
 /// Check if skill is installed
 fn is_skill_installed(skill_id: &str) -> bool {
-    get_skill_install_path(skill_id).exists()
+    has_installable_skill_payload(&get_skill_install_path(skill_id))
 }
 
-/// Install skill metadata-only stub (no WASM package available from hub)
-async fn install_skill_metadata_only(
-    metadata: &SkillMetadata,
-    hub_label: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let skill_dir = get_skill_install_path(&metadata.id);
-
-    // Create directory
-    tokio::fs::create_dir_all(&skill_dir).await?;
-
-    // Write skill.yaml manifest
-    let manifest_path = skill_dir.join("skill.yaml");
-    let manifest = serde_yaml::to_string(&serde_json::json!({
-        "id": metadata.id,
-        "name": metadata.name,
-        "version": metadata.version,
-        "description": metadata.description,
-        "author": metadata.author,
-        "license": metadata.license,
-        "capabilities": metadata.capabilities,
-        "tags": metadata.tags,
-        "source_hub": hub_label,
-        "entry_point": null,
-    }))?;
-
-    tokio::fs::write(&manifest_path, manifest).await?;
-
-    info!("Installed metadata-only skill stub to {:?}", skill_dir);
-    Ok(())
+fn has_installable_skill_payload(skill_dir: &std::path::Path) -> bool {
+    skill_dir.join("SKILL.md").is_file()
+        || (skill_dir.join("skill.yaml").is_file() && skill_dir.join("skill.wasm").is_file())
 }
 
 /// Install skill package to disk
@@ -992,23 +970,12 @@ async fn install_skill_package(
             let mut entry = archive
                 .by_index(i)
                 .map_err(|e| format!("Failed to read zip entry {}: {}", i, e))?;
-            let entry_name = entry.name();
-
-            // ZIP Slip protection: reject paths containing ".." or absolute paths
-            if entry_name.contains("..")
-                || entry_name.starts_with('/')
-                || entry_name.starts_with('\\')
-            {
-                return Err(format!("ZIP Slip attack detected in entry: {}", entry_name));
-            }
-
-            let out_path = skill_dir_clone.join(entry_name);
-            // Ensure the resolved path is still inside skill_dir
-            let canonical_out = out_path.canonicalize().unwrap_or_else(|_| out_path.clone());
-            let canonical_skill = skill_dir_clone
-                .canonicalize()
-                .unwrap_or_else(|_| skill_dir_clone.clone());
-            if !canonical_out.starts_with(&canonical_skill) {
+            let entry_name = entry.name().to_string();
+            let enclosed_name = entry
+                .enclosed_name()
+                .ok_or_else(|| format!("ZIP entry escapes target directory: {}", entry_name))?;
+            let out_path = skill_dir_clone.join(enclosed_name);
+            if !out_path.starts_with(&skill_dir_clone) {
                 return Err(format!(
                     "ZIP entry escapes target directory: {}",
                     entry_name
@@ -1096,21 +1063,11 @@ async fn install_skill_package(
             .validate(&wasm_bytes)
             .map_err(|e| format!("WASM security validation failed: {}", e))?;
     } else {
-        // Neither SKILL.md nor WASM — create a fallback manifest
-        let manifest_path = skill_dir.join("skill.yaml");
-        if !manifest_path.exists() {
-            let manifest = serde_yaml::to_string(&serde_json::json!({
-                "id": metadata.id,
-                "name": metadata.name,
-                "version": metadata.version,
-                "description": metadata.description,
-                "author": metadata.author,
-                "license": metadata.license,
-                "capabilities": metadata.capabilities,
-                "entry_point": null,
-            }))?;
-            tokio::fs::write(&manifest_path, manifest).await?;
-        }
+        return Err(format!(
+            "Skill package for '{}' is missing SKILL.md or skill.wasm",
+            metadata.id
+        )
+        .into());
     }
 
     info!("Installed skill package to {:?}", skill_dir);
@@ -1160,6 +1117,10 @@ async fn list_installed_skills() -> Result<Vec<SkillInfoResponse>, Box<dyn std::
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if path.is_dir() {
+                if !has_installable_skill_payload(&path) {
+                    continue;
+                }
+
                 let skill_id = path
                     .file_name()
                     .and_then(|n| n.to_str())

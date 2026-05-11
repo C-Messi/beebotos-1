@@ -370,9 +370,13 @@ impl ClawHubClient {
         version: Option<&str>,
     ) -> Result<Vec<u8>, HubError> {
         let path = if let Some(ver) = version {
-            format!("/skills/{}/download?version={}", id, ver)
+            format!(
+                "/download?slug={}&version={}",
+                urlencoding::encode(id),
+                urlencoding::encode(ver)
+            )
         } else {
-            format!("/skills/{}/download", id)
+            format!("/download?slug={}", urlencoding::encode(id))
         };
 
         let req = self.build_request(reqwest::Method::GET, &path);
