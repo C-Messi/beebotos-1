@@ -2237,3 +2237,9 @@ query_schedule_inventory()
 
 **全部 6 个 skill 执行路径一致**: `SkillSelector` LLM 语义评分选中 → `execute_registered_skill` match 拦截 → 直接查询系统状态 → 格式化 Markdown → 返回用户。**全程 0 次 LLM 调用**，毫秒级响应。
 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+
+
