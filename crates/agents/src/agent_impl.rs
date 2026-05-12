@@ -97,6 +97,7 @@ pub struct Agent {
 }
 
 struct AgentSkillDispatcher {
+    config: AgentConfig,
     skill_registry: Option<Arc<skills::SkillRegistry>>,
     mcp_manager: Option<Arc<mcp::MCPManager>>,
     llm_interface: Option<Arc<dyn communication::LLMCallInterface>>,
@@ -148,6 +149,7 @@ struct ParallelDelegateBranchResult {
 impl AgentSkillDispatcher {
     fn from_agent(agent: &Agent) -> Self {
         Self {
+            config: agent.config.clone(),
             skill_registry: agent.skill_registry.clone(),
             mcp_manager: agent.mcp_manager.clone(),
             llm_interface: agent.llm_interface.clone(),
@@ -167,7 +169,7 @@ impl AgentSkillDispatcher {
 
     fn as_agent(&self) -> Agent {
         Agent {
-            config: AgentConfig::default(),
+            config: self.config.clone(),
             a2a_client: None,
             mcp_manager: self.mcp_manager.clone(),
             outbound_router: None,
@@ -325,6 +327,7 @@ impl AgentSkillDispatcher {
 
     fn clone_for_parallel_branch(&self) -> Self {
         Self {
+            config: self.config.clone(),
             skill_registry: self.skill_registry.clone(),
             mcp_manager: self.mcp_manager.clone(),
             llm_interface: self.llm_interface.clone(),
@@ -344,6 +347,24 @@ impl AgentSkillDispatcher {
         self,
         branch: ParallelDelegateBranch,
     ) -> ParallelDelegateBranchResult {
+        if branch
+            .skill_id
+            .as_deref()
+            .map(is_high_risk_write_skill)
+            .unwrap_or(false)
+        {
+            return ParallelDelegateBranchResult {
+                id: branch.id,
+                task: branch.task,
+                result: Err(
+                    "parallel_delegate refuses to execute high-risk write skills. Query required \
+                     data in parallel first, then call the order skill separately so approval and \
+                     confirmation stay in the main flow."
+                        .to_string(),
+                ),
+            };
+        }
+
         let mut config = AgentConfig::default();
         config.name = format!("parallel-delegate-{}", branch.id);
         config.description = format!("Parallel delegate branch for task: {}", branch.task);
@@ -463,6 +484,68 @@ fn format_parallel_delegate_sections(results: &[ParallelDelegateBranchResult]) -
         }
     }
     lines.join("\n")
+}
+
+fn is_high_risk_write_skill(skill_id: &str) -> bool {
+    let lower = skill_id.to_ascii_lowercase();
+    (lower.contains("place_") && lower.contains("_order"))
+        || lower.contains("cancel_order")
+        || lower.contains("cancel_all")
+        || lower.contains("close_position")
+        || lower.contains("close_all_positions")
+        || lower.contains("transfer")
+        || lower.contains("withdraw")
+}
+
+fn should_force_general_react(message_text: &str) -> bool {
+    let lower = message_text.to_ascii_lowercase();
+    let text = message_text.trim();
+    [
+        "互联网",
+        "网上",
+        "搜索",
+        "搜一下",
+        "查一下最新",
+        "实时",
+        "当前行情",
+        "当前价格",
+        "持仓",
+        "下单",
+        "开一单",
+        "买入",
+        "卖出",
+        "order",
+        "trade",
+        "position",
+        "market",
+        "latest",
+        "current",
+        "search",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle) || lower.contains(needle))
+}
+
+fn is_pending_approval_adjustment(message_text: &str) -> bool {
+    let text = message_text.trim();
+    if text.is_empty() || text.len() > 80 {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    let has_amount = text.chars().any(|c| c.is_ascii_digit())
+        && (text.contains("美元")
+            || text.contains("美金")
+            || text.contains("usd")
+            || lower.contains("usd")
+            || text.contains('$'));
+    has_amount
+        && (text.contains("调整")
+            || text.contains("改")
+            || text.contains("金额")
+            || text.contains("换成")
+            || text.contains("设为")
+            || text.contains("改为")
+            || lower.contains("amount"))
 }
 
 async fn call_parallel_delegate_llm_branch(agent: &Agent, task: &str) -> Result<String, String> {
@@ -1922,6 +2005,31 @@ impl Agent {
         // pending operation. This is checked AFTER form submission so that
         // parameter values containing "确认" (e.g., "买入，确认") are handled
         // as form input first.
+        if is_pending_approval_adjustment(&message_text) {
+            let mut approvals = self.pending_approvals.write().await;
+            if let Some((req_id, request)) = approvals
+                .iter_mut()
+                .max_by_key(|(_, request)| request.created_at)
+            {
+                request.original_input = format!(
+                    "{}\n用户补充/调整：{}",
+                    request.original_input,
+                    message_text.trim()
+                );
+                info!(
+                    "Plan C: User adjusted pending approval {} for skill '{}'",
+                    req_id, request.skill_id
+                );
+                let response = format!(
+                    "已更新待确认操作：{}\n\n新的补充信息：{}\n\n请回复「确认」或「同意」执行；\
+                     如需继续修改，请直接说明。",
+                    request.skill_id,
+                    message_text.trim()
+                );
+                return Ok((response, vec![]));
+            }
+        }
+
         let confirmation_words = ["确认", "同意", "yes", "y", "ok", "好", "可以", "执行"];
         let is_confirmation = message_text.trim().len() <= 20
             && confirmation_words
@@ -2007,8 +2115,12 @@ impl Agent {
         let mut trace =
             crate::skill_matching::SkillActivationTrace::new(&message_text, intent_v2.clone());
 
-        // Step 2: Route based on LLM intent (no hardcoded keyword matching)
-        let result = if intent_v2.direct_answer || !intent_v2.needs_skill {
+        // Step 2: Route based on LLM intent.
+        // If the intent needs any skill/tool capability, always enter General
+        // ReAct. SkillSelector is only used as a hint provider; the ReAct loop
+        // decides whether to call a skill, delegate branches, or answer after
+        // gathering data.
+        let result = if !intent_v2.needs_skill {
             // Direct answer path — no skill injection
             self.handle_direct_answer(&task).await
         } else {
@@ -2109,22 +2221,18 @@ impl Agent {
                 }
             }
 
-            // Step 5: Route based on planning need
+            // Step 5: Route skill/tool requests through General ReAct
             // 🆕 ROUTING V3:
-            // - needs_planning=true  → General ReAct (multi-step, up to 30 rounds,
-            //   cancellable)
-            // - needs_planning=false → Direct skill execution (single call, no LLM
-            //   re-selection)
-            // - no skill selected    → Direct answer fallback
-            if selection.needs_planning || intent_v2.needs_planning {
-                self.execute_with_react(&task, &message_text, &intent_v2, &selection)
-                    .await
-            } else if let Some(ref skill_id) = selection.selected_skill {
-                self.execute_single_skill(&task, skill_id, &message_text)
-                    .await
-            } else {
-                self.handle_direct_answer(&task).await
+            // - needs_skill=true     → General ReAct (single or multi-step, up to 30
+            //   rounds, cancellable)
+            // - needs_skill=false    → Direct answer fallback
+            let force_general_react = should_force_general_react(&message_text);
+            if force_general_react || intent_v2.needs_skill {
+                info!("Routing to General ReAct because intent needs skill/tool capability");
             }
+
+            self.execute_with_react(&task, &message_text, &intent_v2, &selection)
+                .await
         };
 
         // Store trace for observability (fire-and-forget, don't fail the task)
@@ -2209,7 +2317,20 @@ impl Agent {
         }
 
         // 2. Build general ReAct system prompt
-        let system_prompt = crate::skills::general_react_prompt::build_general_react_prompt(&tools);
+        let mut system_prompt =
+            crate::skills::general_react_prompt::build_general_react_prompt(&tools);
+        if let Some(catalog) = &self.skill_catalog {
+            system_prompt.push_str(
+                "\n\n## 注册技能目录\n\n以下技能可以通过 `skill_call` 调用。调用时必须使用真实 \
+                 skill_id，不要把命令文本当成最终回答。\n\n",
+            );
+            system_prompt.push_str(catalog);
+            system_prompt.push_str(
+                "\n\n提示：显式要求互联网搜索/浏览网页时，优先调用 `skill_call`，skill_id 可使用 \
+                 `agent_browser` 或 `agent-browser-clawdbot`（以目录中实际存在的 ID \
+                 为准）；如果只是抓取已知 URL，可用 `web_fetch`。",
+            );
+        }
 
         // 3. Get cancellation receiver from session registry
         // 🆕 FIX: Use db_session_id (injected by Gateway) as the cancel key to match

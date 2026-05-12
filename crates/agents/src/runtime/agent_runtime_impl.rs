@@ -512,9 +512,25 @@ impl GatewayAgentRuntime {
                         "Loaded full config from database for agent {}",
                         record.agent_id
                     );
-                    // 🔧 FIX: Fast-sync agents table record only (avoid slow save_config during
-                    // recovery)
-                    let _ = persistence.sync_agents_table(&persisted_config).await;
+                    // Best-effort only: this FK helper write must not block gateway startup if
+                    // SQLite is waiting on a writer lock during recovery.
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(800),
+                        persistence.sync_agents_table(&persisted_config),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => warn!(
+                            "Failed to fast-sync agents table for recovered agent {}: {}",
+                            record.agent_id, e
+                        ),
+                        Err(_) => warn!(
+                            "Timed out fast-syncing agents table for recovered agent {}; \
+                             continuing recovery",
+                            record.agent_id
+                        ),
+                    }
                     return Ok(AgentConfig {
                         id: persisted_config.agent_id,
                         name: persisted_config.name,

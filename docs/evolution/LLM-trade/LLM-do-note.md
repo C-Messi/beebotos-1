@@ -4074,6 +4074,123 @@ cargo check -p beebotos-agents
 
 `cargo check` 通过，只剩仓库里已有的 warning。
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
 
+原因不是 `Loaded full config...` 这条读配置日志本身，而是它后面立刻执行了：
+
+`persistence.sync_agents_table(&persisted_config).await`
+
+对应你日志里的慢 SQL：
+
+```sql
+INSERT INTO agents (...) VALUES (...)
+ON CONFLICT(id) DO UPDATE SET ...
+```
+
+这条写 `agents` 表的 upsert 花了 `119.608s`。所以启动卡 1-2 分钟的直接原因是 SQLite 写锁等待。恢复流程主线程一直 await 这次“恢复期补写 agents 表”的操作，导致后续 agent recovery 都被卡住。
+
+我已经修了：在 [agent_runtime_impl.rs](/root/beebotos/crates/agents/src/runtime/agent_runtime_impl.rs) 里把这次 `sync_agents_table` 改成 best-effort，最多等 `800ms`。超时就 warning 并继续恢复，不再阻塞 Gateway 启动。
+
+验证已通过：
+
+```bash
+cargo fmt -p beebotos-agents
+cargo check -p beebotos-agents
+```
+
+`cargo check` 通过，只有仓库已有 warning。下次启动如果还有锁竞争，应看到类似 “Timed out fast-syncing agents table...” 的 warning，但不会再卡 120 秒。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+  问题1：在互联网上搜索一下，中国人口多少？回复是LLM内容，没有成功调用skill;
+问题2：根据当前行情，帮我开一单BTC市场（单笔金额不要超过100USD），然后告诉我持仓情况，回复：没有连上MCP Server,  当询问是否调整金额？ 回复：50美元，它不知道这50美元用来做什么. 继续询问，没有上下文记忆。   
+分析原因。同时检查parallel_delegate 工作是否正确？
+
+我先从日志结论往代码里对一下：搜索问题像是路由层没有进通用 ReAct；交易问题里 parallel_delegate 是被调用了，但它把“下单”分支提前并行执行，触发了审批 pending，而后续“调整金额”没有被 pending approval 逻辑识别为“修改上一个审批请求”。我去看这几块的实际判断条件。
+
+
+已探索 1 个文件,2 次搜索
+两条问题已经有初步判断：parallel_delegate 本身是工作的，日志中它在 Round 1/2 都被调用并生成了分支；但策略上不该把高风险下单放进并行分支直接执行。另一个搜索问题，是 V2 路由把“互联网搜索”识别成 needs_skill=true 但 needs_planning=false，SkillSelector 又没选到技能，于是走了 direct answer，完全绕开了通用 ReAct 的 web_fetch。我会修路由规则，让显式“搜索/互联网/实时”强制进通用 ReAct。
+
+
+已探索 2 个文件,1 次搜索
+我会直接修两处路由/上下文：一是显式“互联网搜索/实时查询”不能再落到 direct answer；二是有 pending approval 时，用户说“调整金额 50 美元”这类话要先更新待确认操作，而不是当成全新任务。parallel_delegate 我暂时不动执行框架，它从日志看已经跑通，但需要加约束：高风险写操作不应该被它并行抢跑。
+
+我会做三类修复：路由上把“显式互联网搜索/实时查询”强制进通用 ReAct；通用 ReAct prompt 注入 skill catalog，让它知道 agent-browser/MCP 等真实 skill；并修 spawn_sub_agent 共享 MCP/审批上下文，同时禁止 parallel_delegate 并行执行下单这类高风险写操作。这样既能搜索，又避免并行分支把交易审批上下文弄丢。
+
+
+已探索 2 个文件,1 次搜索
+我确认到一个关键细节：agent-browser 在目录里是一个知识型 skill，不是通用 ReAct 的内置可执行搜索工具；以前它会把 agent-browser open ... 当文本吐出来。为了“先正确走工具”，我会让显式搜索请求进入通用 ReAct，并把 skill catalog 放进 ReAct prompt；同时避免直接下单被 parallel 分支提前触发。
+
+
+已编辑 1 个文件,已探索 1 个文件
+现在开始改：我会让 parallel_delegate 拒绝执行 place_*_order 这类高风险写技能，只允许并行查行情/查持仓；高风险动作必须回到主 ReAct 单独调用，这样审批和后续“确认/调整金额”才不会散落在分支里。并且给 pending approval 加“调整补充”处理。
+
+
+已编辑 1 个文件
+这批修改会改变实际行为：搜索类请求会进通用 ReAct；并行代理不会再抢跑下单；待审批时说“调整金额：50美元”会更新原审批请求，之后“确认”会用更新后的自然语言重新抽参。现在我跑格式化和编译。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+分析结论：
+
+问题 1 的原因很明确：  
+“在互联网上搜索一下...” 被 Intent 判成 `needs_skill=true`，但 SkillSelector 没选到技能，且 `needs_planning=false`，于是路由走了 `Direct answer path (no tools)`。所以它根本没进通用 ReAct，也就不会调用 `web_fetch` / `skill_call` / browser skill。
+
+我已修：显式包含 `互联网 / 搜索 / 实时 / 当前行情 / 持仓 / 下单` 等关键词时，强制进入 General ReAct，不再 fallback 到 direct answer。
+
+问题 2 分两层：
+
+1. `parallel_delegate` 工作是正常的。日志里它被调用了：
+   - Round 1 调用 `parallel_delegate`
+   - 创建了 sub-agent
+   - 并行执行分支
+   - Round 2 又继续调用 `parallel_delegate`
+   
+   这说明 wiring 是通的。
+
+2. 但策略有问题：LLM 把 `place_crypto_order` 这种高风险写操作放进了 `parallel_delegate` 分支提前执行，结果触发 approval pending。随后用户说“调整金额：50美元”，系统没有把它识别为“修改上一笔待确认订单”，而是当成新任务，所以丢了上下文。
+
+我已修三处：
+
+- `parallel_delegate` 现在拒绝执行 `place_*_order / cancel / close_position / withdraw` 等高风险写技能。它只能并行查行情、查账户、查持仓、查新闻；真正下单必须回到主 ReAct 单独调用，确保审批链在主流程里。
+- pending approval 存在时，用户说“调整金额：50美元”这类补充，会更新待确认请求的 `original_input`，不会再当新任务。
+- “确认”后会用更新后的自然语言重新抽参执行，例如原请求 + “用户补充/调整：调整金额：50美元”。
+
+另外我把通用 ReAct prompt 补上了 skill catalog，让它知道可通过 `skill_call` 调注册技能，避免只看到默认工具而不知道 `agent_browser`/MCP 技能。
+
+验证已通过：
+
+```bash
+cargo fmt -p beebotos-agents
+cargo check -p beebotos-agents
+```
+
+`cargo check` 通过，只有已有 warning。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+为了通用性，只要“needs_skill=true”，那么强制"needs_planning=true",目的进入通用ReAct.
+
+我按你的“目的进入通用 ReAct”来改：这里实际应该等价于 needs_planning=true 的路由效果，因为当前代码只有 needs_planning=true 才会进 General ReAct。也就是说：只要 Intent 判定 needs_skill=true，就不再走 direct skill/direct answer，统一进入通用 ReAct。
+
+这里我会把路由注释和条件改成：needs_skill=true 就进入 General ReAct；SkillSelector 只提供 hint，不再决定 direct skill 还是 direct answer。这样更通用，也能让通用 ReAct 自己决定 skill_call、parallel_delegate 或其它工具。
+
+路由已经改成 needs_skill=true 统一进通用 ReAct。direct_answer=true 但 needs_skill=true 的冲突情况也会以 needs_skill 为准，避免再次绕过工具。现在跑格式化和检查。
+
+#### 这上面内容重点。gandy 2026-05-13 7:40
+
+已改成更通用的路由：
+
+只要 `intent_v2.needs_skill == true`，就统一进入 `General ReAct`。`SkillSelector` 现在只作为 hint provider，不再决定走 `execute_single_skill` 或 direct answer。
+
+注意我没有把它“强制 `needs_planning=false`”，因为当前代码语义里 `needs_planning=false` 会导致不进 ReAct。实际实现是达到你要的效果：`needs_skill=true => General ReAct`。
+
+验证完成：
+
+```bash
+cargo fmt -p beebotos-agents
+cargo check -p beebotos-agents
+```
+
+通过，只有已有 warning。现在像“互联网搜索”“查行情”“下单”“查持仓”这类只要 Intent 判定需要技能/工具，就不会再绕过通用 ReAct。
 
 
