@@ -399,6 +399,7 @@ pub async fn execute_agent_task(
         task_type: beebotos_agents::TaskType::parse(&req.task_type),
         input: req.input,
         parameters: req.parameters,
+        stream_tx: None,
     };
 
     let result = state

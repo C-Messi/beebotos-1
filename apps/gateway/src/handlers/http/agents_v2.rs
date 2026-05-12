@@ -490,6 +490,7 @@ pub async fn execute_task_v2(
         input: req.input,
         timeout_secs: req.timeout_secs,
         priority: 5,
+        stream_tx: None,
     };
 
     // 🟢 P1 FIX: Use AgentRuntime trait to execute task

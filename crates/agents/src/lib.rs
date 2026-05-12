@@ -89,6 +89,7 @@ pub mod runtime;
 pub mod scheduling;
 pub mod security;
 pub mod session;
+pub mod session_cancellation;
 pub mod skills;
 pub mod spawning;
 // 🟢 P1 FIX: Workflow orchestration module

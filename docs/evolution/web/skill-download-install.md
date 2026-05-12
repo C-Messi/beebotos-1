@@ -22,13 +22,13 @@
 
 ```javascript
 // 1. 搜索技能
-const list = await fetch('https://api.clawhub.ai/api/v1/skills/search?q=crypto&limit=20');
+const list = await fetch('https://clawhub.ai/api/v1/skills/search?q=crypto&limit=20');
 
 // 2. 获取指定技能详情
-const meta = await fetch(`https://api.clawhub.ai/api/v1/skills/${slug}`);
+const meta = await fetch(`https://clawhub.ai/api/v1/skills/${slug}`);
 
-// 3. 下载 ZIP 包
-const zip = await fetch(`https://api.clawhub.ai/api/v1/skills/${id}/download`).then(r => r.blob());
+// 3. 下载 ZIP 包 问题：这个下载链接有错！
+const zip = await fetch(`https://clawhub.ai/api/v1/skills/${id}/download`).then(r => r.blob());
 
 // 4. 提交至本地 Gateway 安装接口，由后端解压到 installed 目录
 await fetch('/api/v1/skills/install', {

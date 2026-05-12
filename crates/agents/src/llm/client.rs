@@ -507,11 +507,12 @@ impl LLMClient {
         Err(LLMError::Timeout)
     }
 
-    /// Chat with tool support using an explicit message list (not internal context).
+    /// Chat with tool support using an explicit message list (not internal
+    /// context).
     ///
-    /// This variant is used when the caller already has a full conversation history
-    /// (e.g. from the main agent loop) and wants to run native tool calling with
-    /// real tool execution.
+    /// This variant is used when the caller already has a full conversation
+    /// history (e.g. from the main agent loop) and wants to run native tool
+    /// calling with real tool execution.
     pub async fn chat_with_tools_react_with_messages(
         &self,
         messages: Vec<Message>,
@@ -526,8 +527,7 @@ impl LLMClient {
             .iter()
             .map(|h| (h.definition().function.name.clone(), h))
             .collect();
-        let tool_definitions: Vec<Tool> =
-            tool_handlers.iter().map(|h| h.definition()).collect();
+        let tool_definitions: Vec<Tool> = tool_handlers.iter().map(|h| h.definition()).collect();
 
         for round in 0..max_rounds {
             let mut config = self.config.clone();
@@ -555,12 +555,10 @@ impl LLMClient {
 
                     for tc in tool_calls {
                         let result = match handler_map.get(&tc.function.name) {
-                            Some(handler) => {
-                                match handler.execute(&tc.function.arguments).await {
-                                    Ok(r) => r,
-                                    Err(e) => format!("Error: {}", e),
-                                }
-                            }
+                            Some(handler) => match handler.execute(&tc.function.arguments).await {
+                                Ok(r) => r,
+                                Err(e) => format!("Error: {}", e),
+                            },
                             None => format!("Error: Tool '{}' not found", tc.function.name),
                         };
 

@@ -1,7 +1,11 @@
 //! 消息项组件
+//!
+//! 渲染单条聊天消息，根据内容类型自动选择渲染器（Markdown / JSON / 纯文本）。
+//! 支持附件图片和文件展示。
 
 use leptos::prelude::*;
 
+use crate::components::webchat::ContentRenderer;
 use crate::webchat::ChatMessage;
 
 /// 消息项组件
@@ -29,9 +33,10 @@ pub fn MessageItem(
                 }}
             </div>
             <div class="message-content-wrapper">
-                <div class="message-content">
-                    {message.content.clone()}
-                </div>
+                <ContentRenderer
+                    content=message.content.clone()
+                    attachments=message.attachments.clone()
+                />
                 <div class="message-meta">
                     <span class="message-time">{format_timestamp(&message.timestamp)}</span>
                     {if let Some(usage) = &message.token_usage {
@@ -47,6 +52,7 @@ pub fn MessageItem(
     }
 }
 
+/// 格式化时间戳为本地时间
 fn format_timestamp(timestamp: &str) -> String {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) {
         let local = dt.with_timezone(&chrono::Local);

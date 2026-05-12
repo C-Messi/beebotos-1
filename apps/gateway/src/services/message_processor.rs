@@ -256,21 +256,6 @@ impl MessageProcessor {
             }
         }
 
-        // 🆕 FIX: 元问题快速路径（如"有哪些skills"），直接回答不走LLM
-        if self
-            .try_answer_meta_question(
-                platform,
-                channel_id,
-                &message,
-                &content,
-                &session.id,
-                &db_session_id,
-            )
-            .await?
-        {
-            return Ok(());
-        }
-
         // 4. 添加用户消息到会话历史
         let image_urls: Vec<String> = images
             .iter()
@@ -372,24 +357,15 @@ impl MessageProcessor {
         }
 
         // 8. 发送回复
-        match self
-            .send_reply(platform, channel_id, &message, &llm_response)
-            .await
+        if let Err(e) = self.send_reply(platform, channel_id, &message, &llm_response).await {
+            warn!(
+                "Failed to send reply via WebSocket (will be available for polling): {}",
+                e
+            );
+        } else if let (Some(ref svc), Some(ref msg_id)) =
+            (self.webchat_service.as_ref(), saved_message_id.as_ref())
         {
-            Ok(()) => {
-                // WebSocket 投递成功，标记已投递
-                if let (Some(ref svc), Some(ref msg_id)) =
-                    (self.webchat_service.as_ref(), saved_message_id.as_ref())
-                {
-                    let _ = svc.mark_ws_delivered(msg_id).await;
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to send reply via WebSocket (will be available for polling): {}",
-                    e
-                );
-            }
+            let _ = svc.mark_ws_delivered(msg_id).await;
         }
 
         // 9. Memory 回写
@@ -443,106 +419,12 @@ impl MessageProcessor {
         Ok(())
     }
 
-    /// 检测并直接回答元问题（如"有哪些skills"），避免走LLM产生不可靠回复
-    async fn try_answer_meta_question(
-        &self,
-        platform: PlatformType,
-        channel_id: &str,
-        original_message: &Message,
-        content: &str,
-        session_id: &str,
-        db_session_id: &str,
-    ) -> Result<bool, GatewayError> {
-        let query_lower = content.to_lowercase();
-        let is_skill_list_query = query_lower.contains("有哪些skill")
-            || query_lower.contains("有什么skill")
-            || query_lower.contains("skill列表")
-            || query_lower.contains("技能列表")
-            || query_lower.contains("你会什么")
-            || query_lower.contains("有什么技能")
-            || query_lower.contains("有哪些技能")
-            || query_lower.contains("本机有哪些")
-            || query_lower.contains("可用skill");
-
-        if !is_skill_list_query {
-            return Ok(false);
-        }
-
-        let mut reply = String::from("本机可用的技能：\n\n");
-        let mut has_skills = false;
-
-        if let Some(ref registry) = self.skill_registry {
-            let skills = registry.list_enabled().await;
-            if skills.is_empty() {
-                reply.push_str("暂无已注册的技能。");
-            } else {
-                for skill in skills {
-                    has_skills = true;
-                    let desc = skill
-                        .skill
-                        .manifest
-                        .description
-                        .chars()
-                        .take(60)
-                        .collect::<String>();
-                    reply.push_str(&format!(
-                        "• {}（{}）\n  {}\n",
-                        skill.skill.name, skill.skill.id, desc
-                    ));
-                }
-            }
-        } else {
-            reply.push_str("暂无已注册的技能。");
-        }
-
-        if !has_skills && reply.ends_with("本机可用的技能：\n\n") {
-            reply.push_str("暂无已注册的技能。");
-        }
-
-        // 添加用户消息到历史
-        self.session_manager
-            .add_message(session_id, "user", content, false, vec![])
-            .await
-            .ok();
-        self.session_manager
-            .add_message(session_id, "assistant", &reply, false, vec![])
-            .await
-            .ok();
-
-        // 持久化
-        let msg_id = if let Some(ref svc) = self.webchat_service {
-            svc.save_message(
-                db_session_id,
-                "assistant",
-                &reply,
-                Some(serde_json::json!({
-                    "platform": platform.to_string(),
-                    "channel_id": channel_id,
-                    "meta_answer": true,
-                })),
-                None,
-            )
-            .await
-            .ok()
-        } else {
-            None
-        };
-
-        // 发送
-        if self
-            .send_reply(platform, channel_id, original_message, &reply)
-            .await
-            .is_ok()
-        {
-            if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
-                let _ = svc.mark_ws_delivered(&id).await;
-            }
-        }
-
-        Ok(true)
-    }
-
     /// 处理消息（通过 AgentRuntime）
+    ///
+    /// 🆕 CRON FIX: When `completion_tx` is provided, the background task will
+    /// send the LLM response (or error) through it when finished. This allows
+    /// cron jobs to synchronously wait for the result while still reusing the
+    /// same processing pipeline as regular user messages.
     pub async fn handle_message_via_agent(
         &self,
         platform: PlatformType,
@@ -550,6 +432,7 @@ impl MessageProcessor {
         message: Message,
         resolver: Arc<AgentResolver>,
         agent_runtime: Arc<dyn gateway::AgentRuntime>,
+        completion_tx: Option<tokio::sync::oneshot::Sender<Result<String, GatewayError>>>,
     ) -> Result<(), GatewayError> {
         // 1. 消息去重检查
         if let Some(msg_id) = message.metadata.get("message_id") {
@@ -635,18 +518,20 @@ impl MessageProcessor {
         // 3. 处理多模态内容（下载图片等）
         let (content, images) = self.process_multimodal(&message).await?;
 
-        // 🆕 FIX: 元问题快速路径（如"有哪些skills"），直接回答不走LLM
-        if self
-            .try_answer_meta_question(
+        // 🆕 FIX: Stop-command detection — cancel any running ReAct loop for this session
+        let stop_keywords = ["停止", "终止", "停下来", "结束", "stop", "cancel", "abort"];
+        let is_stop = stop_keywords
+            .iter()
+            .any(|kw| content.to_lowercase().contains(kw));
+        if is_stop {
+            let _ = beebotos_agents::session_cancellation::cancel(&db_session_id).await;
+            self.send_reply(
                 platform,
                 channel_id,
                 &message,
-                &content,
-                &session.id,
-                &db_session_id,
+                "⏹️ 已收到停止指令，正在中断当前任务...",
             )
-            .await?
-        {
+            .await?;
             return Ok(());
         }
 
@@ -846,6 +731,7 @@ impl MessageProcessor {
             "channel_id": channel_id,
             "user_id": user_id,
             "session_id": session.id,
+            "db_session_id": db_session_id,
             "metadata": message.metadata,
             "memory_context": memory_context,
         });
@@ -876,17 +762,29 @@ impl MessageProcessor {
             }
         }
 
+        // 🆕 STREAMING: Create stream channel for WebChat platform
+        let (stream_tx, stream_rx) = if platform == PlatformType::WebChat {
+            let (tx, rx) = tokio::sync::mpsc::channel::<String>(100);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         let task = gateway::TaskConfig {
             task_type: "llm_chat".to_string(),
             input: task_input,
             timeout_secs: 180,
             priority: 5,
+            stream_tx,
         };
 
-        // 🟢 P2 FIX: 发送"正在思考..."占位消息，然后后台异步执行 Agent
-        let placeholder = "🤖 正在思考，请稍候...";
-        self.send_reply(platform, channel_id, &message, placeholder)
-            .await?;
+        // 🟢 P2 FIX: 发送"正在思考..."占位消息（非 WebChat 平台）。
+        // WebChat 平台通过流式输出提供实时反馈，不需要占位消息。
+        if platform != PlatformType::WebChat {
+            let placeholder = "🤖 正在思考，请稍候...";
+            self.send_reply(platform, channel_id, &message, placeholder)
+                .await?;
+        }
 
         // 克隆需要在后台任务中使用的数据
         let processor = Arc::new(MessageProcessor {
@@ -901,8 +799,14 @@ impl MessageProcessor {
             workflow_registry: self.workflow_registry.as_ref().map(Arc::clone),
             clawhub_client: self.clawhub_client.clone(),
         });
+        // 🆕 FIX: Register cancellation token for this session before spawning background task.
+        // The returned generation token prevents a slow old task from deleting a new task's sender.
+        let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
+        let cancel_gen = beebotos_agents::session_cancellation::register(&db_session_id, cancel_tx).await;
+
         let session_id = session.id.clone();
         let db_session_id_bg = db_session_id.clone();
+        let cancel_gen_bg = cancel_gen;
         let user_id_bg = user_id.clone();
         let content_bg = content.clone();
         let channel_id_bg = channel_id.to_string();
@@ -911,30 +815,95 @@ impl MessageProcessor {
         let platform_bg = platform;
         let agent_runtime_bg = Arc::clone(&agent_runtime);
 
+        // 🆕 STREAMING: Spawn a task to consume stream chunks and send to WebSocket
+        if let Some(stream_rx) = stream_rx {
+            let channel_id_stream = channel_id_bg.clone();
+            let processor_stream = Arc::clone(&processor);
+            tokio::spawn(async move {
+                let mut rx = stream_rx;
+                let mut chunk_count = 0;
+                while let Some(chunk) = rx.recv().await {
+                    chunk_count += 1;
+                    match processor_stream
+                        .channel_registry
+                        .get_channel_by_platform(PlatformType::WebChat)
+                        .await
+                    {
+                        Some(channel) => {
+                            let guard = channel.read().await;
+                            if let Some(webchat) = guard.as_any()
+                                .downcast_ref::<beebotos_agents::communication::channel::WebChatChannel>()
+                            {
+                                let _ = webchat.send_stream_chunk(&channel_id_stream, &chunk, false).await;
+                            }
+                        }
+                        None => {
+                            warn!(
+                                "Stream chunk dropped ({} bytes): WebChat channel not available",
+                                chunk.len()
+                            );
+                        }
+                    }
+                }
+                info!(
+                    "Stream consumer finished for session {}: {} chunks processed",
+                    channel_id_stream, chunk_count
+                );
+                // Send finished=true when stream ends
+                match processor_stream
+                    .channel_registry
+                    .get_channel_by_platform(PlatformType::WebChat)
+                    .await
+                {
+                    Some(channel) => {
+                        let guard = channel.read().await;
+                        if let Some(webchat) = guard.as_any()
+                            .downcast_ref::<beebotos_agents::communication::channel::WebChatChannel>()
+                        {
+                            let _ = webchat.send_stream_chunk(&channel_id_stream, "", true).await;
+                        }
+                    }
+                    None => {
+                        warn!(
+                            "Failed to send finished=true for session {}: WebChat channel not available",
+                            channel_id_stream
+                        );
+                    }
+                }
+            });
+        }
+
         tokio::spawn(async move {
             info!("🤖 [BG] Agent {} 开始后台处理消息", agent_id_bg);
             let start = std::time::Instant::now();
 
             let result = agent_runtime_bg.execute_task(&agent_id_bg, task).await;
-            let llm_response = match result {
-                Ok(r) if r.success => r
-                    .output
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .or_else(|| {
-                        r.output
-                            .get("response")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_else(|| "Agent returned empty response".to_string()),
-                Ok(r) => r
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "Agent processing failed".to_string()),
+            let (llm_response, completion_result) = match result {
+                Ok(r) if r.success => {
+                    let response = r
+                        .output
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            r.output
+                                .get("response")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .unwrap_or_else(|| "Agent returned empty response".to_string());
+                    (response.clone(), Ok(response))
+                }
+                Ok(r) => {
+                    let err = r
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Agent processing failed".to_string());
+                    (err.clone(), Err(GatewayError::internal(err)))
+                }
                 Err(e) => {
                     error!("❌ [BG] Agent execution failed: {}", e);
-                    format!("处理失败: {}", e)
+                    let err = format!("处理失败: {}", e);
+                    (err.clone(), Err(GatewayError::internal(err)))
                 }
             };
 
@@ -971,26 +940,25 @@ impl MessageProcessor {
                 }
             }
 
-            // 发送最终回复
-            match processor
-                .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
-                .await
-            {
-                Ok(()) => {
-                    if let (Some(ref svc), Some(ref msg_id)) = (
-                        processor.webchat_service.as_ref(),
-                        saved_message_id.as_ref(),
-                    ) {
-                        let _ = svc.mark_ws_delivered(msg_id).await;
-                    }
-                }
-                Err(e) => {
+            // 🆕 STREAMING: For non-WebChat platforms, send the full reply directly.
+            // For WebChat, the stream consumer task already sent chunks + finished=true.
+            if platform_bg != PlatformType::WebChat {
+                if let Err(e) = processor
+                    .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
+                    .await
+                {
                     warn!(
-                        "[BG] Failed to send reply via WebSocket (will be available for polling): \
-                         {}",
+                        "[BG] Failed to send reply (will be available for polling): {}",
                         e
                     );
                 }
+            }
+            // Mark as delivered for WebChat
+            if let (Some(ref svc), Some(ref msg_id)) = (
+                processor.webchat_service.as_ref(),
+                saved_message_id.as_ref(),
+            ) {
+                let _ = svc.mark_ws_delivered(msg_id).await;
             }
 
             // Memory 回写
@@ -1035,11 +1003,20 @@ impl MessageProcessor {
                         m.insert("channel".to_string(), platform_bg.to_string());
                         m
                     },
-                    session_id: Some(db_session_id_bg),
+                    session_id: Some(db_session_id_bg.clone()),
                 };
                 let _ = memory
                     .store(MemoryFileType::Core, &assistant_entry, None)
                     .await;
+            }
+
+            // 🆕 FIX: Unregister cancellation token when background task completes.
+            // Only remove if the generation matches, preventing race with newer tasks.
+            beebotos_agents::session_cancellation::unregister(&db_session_id_bg, cancel_gen_bg).await;
+
+            // 🆕 CRON FIX: Notify synchronous waiter if completion channel was provided
+            if let Some(tx) = completion_tx {
+                let _ = tx.send(completion_result);
             }
         });
 

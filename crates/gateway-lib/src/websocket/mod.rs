@@ -674,25 +674,28 @@ impl WebSocketManager {
         &self,
         channel: &str,
         payload: serde_json::Value,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         // Send the raw payload directly so clients receive the expected format
         let json = serde_json::to_string(&payload)
             .map_err(|e| GatewayError::internal(format!("Serialization error: {}", e)))?;
 
         let states = self.states.read().await;
         let connections = self.connections.read().await;
+        let mut delivered = 0;
 
         for (id, state) in states.iter() {
             if state.channels.iter().any(|c| c == channel) {
                 if let Some(tx) = connections.get(id) {
                     if tx.send(InternalMessage::Text(json.clone())).is_err() {
                         warn!(connection_id = %id, "Failed to send broadcast to connection");
+                    } else {
+                        delivered += 1;
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok(delivered)
     }
 
     /// Broadcast to all connected clients

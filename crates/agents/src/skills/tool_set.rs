@@ -41,7 +41,8 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-/// Resolve a user-supplied path against a working directory with security checks.
+/// Resolve a user-supplied path against a working directory with security
+/// checks.
 /// - Relative paths are resolved against `work_dir`
 /// - Absolute paths are allowed only if they are within `work_dir`
 /// - Paths containing `..` that escape `work_dir` are rejected
@@ -652,7 +653,8 @@ impl SkillTool for FileEditTool {
             return Err(format!(
                 "'old_string' appears {} times in file '{}'. Must be unique to avoid accidental \
                  replacements.",
-                count, path.display()
+                count,
+                path.display()
             ));
         }
 
@@ -718,10 +720,7 @@ impl SkillTool for FileGlobTool {
         }
 
         if results.is_empty() {
-            Ok(format!(
-                "No files matched pattern '{}'",
-                full_pattern
-            ))
+            Ok(format!("No files matched pattern '{}'", full_pattern))
         } else {
             Ok(format!(
                 "Matched {} file(s) for pattern '{}':\n{}",
@@ -790,12 +789,7 @@ impl SkillTool for TextGrepTool {
                         results.push(path.display().to_string());
                         break;
                     } else {
-                        results.push(format!(
-                            "{}:{}: {}",
-                            path.display(),
-                            line_num + 1,
-                            line
-                        ));
+                        results.push(format!("{}:{}: {}", path.display(), line_num + 1, line));
                     }
                     if results.len() >= MAX_RESULTS {
                         break;
@@ -878,8 +872,8 @@ impl SkillTool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web for information using DuckDuckGo. Parameters: query (string), \
-         num_results (integer, optional, default 5, max 10)"
+        "Search the web for information using DuckDuckGo. Parameters: query (string), num_results \
+         (integer, optional, default 5, max 10)"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -894,7 +888,9 @@ impl SkillTool for WebSearchTool {
     }
 
     async fn execute(&self, params: &Value) -> Result<String, String> {
-        let query = params["query"].as_str().ok_or("Missing 'query' parameter")?;
+        let query = params["query"]
+            .as_str()
+            .ok_or("Missing 'query' parameter")?;
         let num_results = params["num_results"].as_u64().unwrap_or(5).min(10) as usize;
 
         let encoded_query = urlencoding::encode(query);
@@ -909,15 +905,17 @@ impl SkillTool for WebSearchTool {
             .get(&url)
             .header(
                 "User-Agent",
-                "Mozilla/5.0 (X11; Linux x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0",
+                "Mozilla/5.0 (X11; Linux x64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                 Chrome/120.0.0.0",
             )
             .send()
             .await
             .map_err(|e| format!("Search request failed: {}", e))?;
 
-        let html = response.text().await.map_err(|e| {
-            format!("Failed to read search response: {}", e)
-        })?;
+        let html = response
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read search response: {}", e))?;
 
         let document = scraper::Html::parse_document(&html);
         let result_selector = scraper::Selector::parse(".result")
@@ -951,7 +949,13 @@ impl SkillTool for WebSearchTool {
                 .map(|e| e.text().collect::<String>().trim().to_string())
                 .unwrap_or_default();
 
-            results.push(format!("{}. {}\nURL: {}\n{}\n", i + 1, title, link, snippet));
+            results.push(format!(
+                "{}. {}\nURL: {}\n{}\n",
+                i + 1,
+                title,
+                link,
+                snippet
+            ));
         }
 
         if results.is_empty() {
@@ -966,12 +970,30 @@ impl SkillTool for WebSearchTool {
 pub fn default_tool_set(work_dir: &Path) -> HashMap<String, Box<dyn SkillTool>> {
     let dirs = vec![work_dir.to_path_buf()];
     let mut tools: HashMap<String, Box<dyn SkillTool>> = HashMap::new();
-    tools.insert("file_read".to_string(), Box::new(FileReadTool::new(work_dir.to_path_buf())));
-    tools.insert("file_write".to_string(), Box::new(FileWriteTool::new(work_dir.to_path_buf())));
-    tools.insert("file_list".to_string(), Box::new(FileListTool::new(work_dir.to_path_buf())));
-    tools.insert("file_edit".to_string(), Box::new(FileEditTool::new(work_dir.to_path_buf())));
-    tools.insert("file_glob".to_string(), Box::new(FileGlobTool::new(work_dir.to_path_buf())));
-    tools.insert("text_grep".to_string(), Box::new(TextGrepTool::new(work_dir.to_path_buf())));
+    tools.insert(
+        "file_read".to_string(),
+        Box::new(FileReadTool::new(work_dir.to_path_buf())),
+    );
+    tools.insert(
+        "file_write".to_string(),
+        Box::new(FileWriteTool::new(work_dir.to_path_buf())),
+    );
+    tools.insert(
+        "file_list".to_string(),
+        Box::new(FileListTool::new(work_dir.to_path_buf())),
+    );
+    tools.insert(
+        "file_edit".to_string(),
+        Box::new(FileEditTool::new(work_dir.to_path_buf())),
+    );
+    tools.insert(
+        "file_glob".to_string(),
+        Box::new(FileGlobTool::new(work_dir.to_path_buf())),
+    );
+    tools.insert(
+        "text_grep".to_string(),
+        Box::new(TextGrepTool::new(work_dir.to_path_buf())),
+    );
     tools.insert(
         "process_exec".to_string(),
         Box::new(ProcessExecTool::new(dirs.clone())),
@@ -979,6 +1001,10 @@ pub fn default_tool_set(work_dir: &Path) -> HashMap<String, Box<dyn SkillTool>> 
     tools.insert("bash_shell".to_string(), Box::new(BashShellTool::new(dirs)));
     tools.insert("web_fetch".to_string(), Box::new(WebFetchTool));
     tools.insert("web_search".to_string(), Box::new(WebSearchTool));
+    tools.insert(
+        "cron_job_manager".to_string(),
+        Box::new(crate::skills::CronJobManagerTool::new()),
+    );
     tools
 }
 

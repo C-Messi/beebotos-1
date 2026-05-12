@@ -92,7 +92,8 @@ pub struct ApprovalRequest {
     pub request_id: String,
     pub skill_id: String,
     pub params: serde_json::Value,
-    /// 🆕 FIX: Original user input preserved for parameter re-extraction after confirmation
+    /// 🆕 FIX: Original user input preserved for parameter re-extraction after
+    /// confirmation
     pub original_input: String,
     /// Risk level: low/medium/high/critical
     pub risk_level: RiskLevel,
@@ -256,7 +257,12 @@ impl ApprovalGate {
     }
 
     /// Build an approval request
-    pub fn build_request(&self, skill_id: &str, params: &serde_json::Value, original_input: &str) -> ApprovalRequest {
+    pub fn build_request(
+        &self,
+        skill_id: &str,
+        params: &serde_json::Value,
+        original_input: &str,
+    ) -> ApprovalRequest {
         ApprovalRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
             skill_id: skill_id.to_string(),

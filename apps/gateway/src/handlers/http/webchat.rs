@@ -442,25 +442,139 @@ pub async fn import_session(
     Ok((StatusCode::CREATED, Json(SessionResponse::from(session))))
 }
 
-/// Send a streaming message (stub — returns a stream ID)
+/// Send a streaming message via SSE
+///
+/// Returns a Server-Sent Events stream that yields response chunks in
+/// real-time.
 pub async fn send_message_streaming(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     user: AuthUser,
-    Path(id): Path<String>,
-    Json(_req): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, GatewayError> {
+    Path(session_id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<
+    axum::response::sse::Sse<
+        tokio_stream::wrappers::ReceiverStream<
+            Result<axum::response::sse::Event, std::convert::Infallible>,
+        >,
+    >,
+    GatewayError,
+> {
+    use std::time::Duration;
+
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use beebotos_agents::communication::{Message as ChannelMessage, PlatformType};
+    use tokio_stream::wrappers::ReceiverStream;
+    use uuid::Uuid;
+
     require_any_role(&user, &["user", "admin"])?;
 
-    let stream_id = format!("stream_{}", uuid::Uuid::new_v4());
+    let content = req
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
-    info!("Streaming message request for session {} (stub)", id);
+    if content.is_empty() {
+        return Err(GatewayError::bad_request("Content is required"));
+    }
 
-    Ok(Json(json!({
-        "stream_id": stream_id,
-        "status": "started",
-        "message": "Streaming endpoint is a stub. Use regular message send for now.",
-        "session_id": id,
-    })))
+    info!(
+        "Streaming message request for session {} from user {}",
+        session_id, user.user_id
+    );
+
+    // Save user message to session
+    if let Some(ref svc) = state.webchat_service {
+        let _ = svc
+            .save_message(
+                &session_id,
+                "user",
+                &content,
+                Some(json!({"platform": "webchat"})),
+                None,
+            )
+            .await;
+    }
+
+    // Construct channel message for LLM service
+    let message = ChannelMessage::new(Uuid::new_v4(), PlatformType::WebChat, content.clone());
+
+    // Get streaming receiver from LLM service
+    let mut stream_rx = state
+        .llm_service
+        .process_message_stream(&message)
+        .await
+        .map_err(|e| GatewayError::internal(format!("Failed to start streaming: {}", e)))?;
+
+    // Channel for SSE events
+    let (event_tx, event_rx) =
+        tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(100);
+    let webchat_service = state.webchat_service.clone();
+
+    // Spawn task to consume LLM stream and emit SSE events
+    tokio::spawn(async move {
+        let _ = event_tx
+            .send(Ok(Event::default().event("start").data(
+                json!({
+                    "session_id": &session_id,
+                    "status": "started"
+                })
+                .to_string(),
+            )))
+            .await;
+
+        let mut full_content = String::new();
+
+        while let Some(chunk) = stream_rx.recv().await {
+            full_content.push_str(&chunk);
+            if event_tx
+                .send(Ok(Event::default().event("chunk").data(
+                    json!({
+                        "content": chunk,
+                        "finished": false
+                    })
+                    .to_string(),
+                )))
+                .await
+                .is_err()
+            {
+                // Client disconnected
+                return;
+            }
+        }
+
+        // Persist assistant response
+        if let Some(svc) = webchat_service {
+            let _ = svc
+                .save_message(
+                    &session_id,
+                    "assistant",
+                    &full_content,
+                    Some(json!({"platform": "webchat"})),
+                    None,
+                )
+                .await;
+        }
+
+        let _ = event_tx
+            .send(Ok(Event::default().event("end").data(
+                json!({
+                    "session_id": &session_id,
+                    "content": full_content,
+                    "finished": true
+                })
+                .to_string(),
+            )))
+            .await;
+    });
+
+    let stream = ReceiverStream::new(event_rx);
+
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("{\"type\":\"heartbeat\"}"),
+    ))
 }
 
 /// Get undelivered assistant messages (for WebSocket reconnect recovery)

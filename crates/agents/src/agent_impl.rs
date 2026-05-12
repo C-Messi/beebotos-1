@@ -1574,49 +1574,6 @@ impl Agent {
             task_id
         );
 
-        // 🆕 FIX (Plan B): Skill introspection shortcut — when user asks about
-        // available skills, directly query the registry instead of relying on
-        // LLM knowledge (which is stale). This handles queries like
-        // "有哪些skills", "本机技能", "你有什么能力" etc.
-        let query_lower = message_text.to_lowercase();
-        let is_skill_query = query_lower.contains("skill")
-            || query_lower.contains("技能")
-            || query_lower.contains("有哪些能力")
-            || query_lower.contains("你能做什么")
-            || query_lower.contains("会什么")
-            || (query_lower.contains("有哪些")
-                && (query_lower.contains("功能") || query_lower.contains("工具")))
-            || query_lower.contains("list skills")
-            || query_lower.contains("available skills")
-            || query_lower.contains("what can you do");
-
-        if is_skill_query {
-            if let Some(ref registry) = self.skill_registry {
-                let skills = registry.list_enabled().await;
-                let mut lines = vec![
-                    format!("🛠️ 本机共有 {} 个可用技能 (enabled skills):", skills.len()),
-                    String::new(),
-                ];
-                for skill in &skills {
-                    let manifest = &skill.skill.manifest;
-                    lines.push(format!("• **{}** (`{}`)", skill.skill.name, skill.skill.id));
-                    if !manifest.description.is_empty() {
-                        lines.push(format!("  - {}", manifest.description));
-                    }
-                    if !manifest.capabilities.is_empty() {
-                        lines.push(format!("  - 能力: {}", manifest.capabilities.join(", ")));
-                    }
-                    lines.push(String::new());
-                }
-                let response = lines.join("\n");
-                info!(
-                    "Plan B: Skill introspection shortcut answered query with {} skills",
-                    skills.len()
-                );
-                return Ok((response, vec![]));
-            }
-        }
-
         // Initialize trace for observability
         let mut trace =
             crate::skill_matching::SkillActivationTrace::new(&message_text, intent_v2.clone());
@@ -1639,26 +1596,10 @@ impl Agent {
                 Ok(sel) => sel,
                 Err(e) => {
                     warn!(
-                        "V2 Skill selection failed for task {} ({}), continuing without skill \
-                         injection",
+                        "V2 Skill selection failed for task {} ({}), falling back to direct answer",
                         task_id, e
                     );
-                    // Fallback: proceed without skill hint, let LLM handle directly
-                    return self
-                        .handle_llm_task_v2(
-                            &task,
-                            &intent_v2,
-                            &crate::skill_matching::SkillSelection {
-                                selected_skill: None,
-                                selected_skill_name: None,
-                                needs_planning: intent_v2.needs_planning,
-                                confidence: 0.0,
-                                scores: Vec::new(),
-                                selection_reasoning: format!("Skill selection failed: {}", e),
-                                disclosure_level: crate::skills::registry::SkillDisclosureLevel::L0,
-                            },
-                        )
-                        .await;
+                    return self.handle_direct_answer(&task).await;
                 }
             };
 
@@ -1739,45 +1680,18 @@ impl Agent {
                 }
             }
 
-            // Step 5: Route to handler based on planning need
-            let mut should_use_planning = intent_v2.needs_planning || selection.needs_planning;
-
-            // 🆕 FIX: If selected skill is a knowledge skill (no executable scripts),
-            // skip planning and execute it directly. Planning is only useful for
-            // multi-step code execution or skill composition.
-            if should_use_planning
-                && selection.selected_skill.is_some()
-                && selection.confidence >= 0.5
-            {
-                if let Some(ref registry) = self.skill_registry {
-                    if let Some(skill) = registry
-                        .get(selection.selected_skill.as_ref().unwrap())
-                        .await
-                    {
-                        let source = &skill.skill.source_path;
-                        let is_knowledge = !source.as_os_str().is_empty() && !source.is_dir();
-                        if is_knowledge {
-                            info!(
-                                "Selected skill '{}' is a knowledge skill (no scripts). Skipping \
-                                 planning and executing directly.",
-                                skill.skill.id
-                            );
-                            should_use_planning = false;
-                        }
-                    }
-                }
-            }
-
-            // 🆕 UNIFIED REACT: ReAct autonomous planning takes priority over
-            // traditional P2 Planning. All planning tasks are delegated to LLM
-            // self-decision (ReAct loop).
-            if self.should_use_react_planning(&message_text, &intent_v2, &selection) {
-                self.execute_with_react_planning(&task, &message_text, &intent_v2)
+            // Step 5: Route based on planning need
+            // 🆕 ROUTING V3:
+            // - needs_planning=true  → General ReAct (multi-step, up to 30 rounds, cancellable)
+            // - needs_planning=false → Direct skill execution (single call, no LLM re-selection)
+            // - no skill selected    → Direct answer fallback
+            if selection.needs_planning || intent_v2.needs_planning {
+                self.execute_with_react(&task, &message_text, &intent_v2, &selection)
                     .await
-            } else if should_use_planning {
-                self.execute_with_planning(task).await
+            } else if let Some(ref skill_id) = selection.selected_skill {
+                self.execute_single_skill(&task, skill_id, &message_text).await
             } else {
-                self.handle_llm_task_v2(&task, &intent_v2, &selection).await
+                self.handle_direct_answer(&task).await
             }
         };
 
@@ -1792,7 +1706,120 @@ impl Agent {
     }
 
     // =====================================================================
-    // 🆕 UNIFIED REACT: Autonomous Planning & Investment Analysis
+    // 🆕 ROUTING V3: Single-skill direct execution
+    // =====================================================================
+
+    /// Execute a single skill directly without multi-step ReAct planning.
+    /// Used when SkillSelector determines needs_planning=false.
+    async fn execute_single_skill(
+        &self,
+        task: &Task,
+        skill_id: &str,
+        message_text: &str,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        let result = self.execute_skill_by_id(skill_id, message_text, None).await?;
+        let output = self.synthesize_skill_output(message_text, &result.output, skill_id);
+
+        // 🆕 STREAMING: If stream_tx is set, stream the formatted output in chunks
+        if let Some(ref stream_tx) = task.stream_tx {
+            let chars: Vec<char> = output.chars().collect();
+            let chunk_size = 10;
+            for chunk in chars.chunks(chunk_size) {
+                let chunk_str: String = chunk.iter().collect();
+                if stream_tx.send(chunk_str).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        }
+
+        Ok((output, vec![]))
+    }
+
+    // =====================================================================
+    // 🆕 UNIFIED REACT V3: General-purpose ReAct (domain-agnostic)
+    // =====================================================================
+
+    /// Execute a task using the general-purpose ReAct executor.
+    /// Works for any multi-step task, not limited to crypto/investment analysis.
+    async fn execute_with_react(
+        &self,
+        task: &Task,
+        message_text: &str,
+        _intent: &crate::skill_matching::IntentAnalysisV2,
+        _selection: &crate::skill_matching::SkillSelection,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        let task_id = task.id.clone();
+        info!(
+            "General ReAct: executing task {} (multi-step)",
+            task_id
+        );
+
+        let llm = self
+            .llm_interface
+            .clone()
+            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
+
+        // 1. Load all available tools (not limited to crypto analysis tools)
+        let tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
+
+        if tools.is_empty() {
+            warn!(
+                "General ReAct: no tools available, falling back to direct answer"
+            );
+            return Box::pin(self.handle_direct_answer(task)).await;
+        }
+
+        // 2. Build general ReAct system prompt
+        let system_prompt =
+            crate::skills::general_react_prompt::build_general_react_prompt(&tools);
+
+        // 3. Get cancellation receiver from session registry
+        // 🆕 FIX: Use db_session_id (injected by Gateway) as the cancel key to match
+        // the key used in session_cancellation::register. Fallback to session_id or task_id.
+        let cancel_key = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+            json.get("db_session_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| json.get("session_id").and_then(|v| v.as_str()))
+                .unwrap_or(&task_id)
+                .to_string()
+        } else {
+            task_id.clone()
+        };
+        let cancel_rx = crate::session_cancellation::get_receiver(&cancel_key).await;
+
+        // 4. Execute ReAct loop
+        let executor = crate::skills::UnifiedReActExecutor::new(llm).with_config(
+            crate::skills::UnifiedReActConfig {
+                max_rounds: 30,
+                round_timeout_sec: 30,
+                enable_reflection: true,
+                require_structured_output: false,
+                cancel_rx,
+                stream_tx: task.stream_tx.clone(),
+            },
+        );
+
+        let react_result = executor.execute(&system_prompt, message_text, &tools).await;
+
+        match react_result {
+            Ok(content) => {
+                info!(
+                    "General ReAct: task {} completed, result length={}",
+                    task_id,
+                    content.len()
+                );
+                Ok((content, vec![]))
+            }
+            Err(e) => {
+                warn!("General ReAct: task {} failed: {}", task_id, e);
+                Err(e)
+            }
+        }
+    }
+
+    // =====================================================================
+    // 🆕 UNIFIED REACT: Autonomous Planning & Investment Analysis (legacy)
     // =====================================================================
 
     /// Determine whether a task should use the Unified ReAct executor
@@ -1964,6 +1991,8 @@ impl Agent {
                 round_timeout_sec: 30,
                 enable_reflection: true,
                 require_structured_output: true,
+                cancel_rx: None,
+                stream_tx: None,
             },
         );
 
@@ -1978,33 +2007,38 @@ impl Agent {
                 );
 
                 // Step 6: Post-process the final answer (safety checks)
-                let mut processed = match crate::skills::investment_analysis::post_process_final_answer(
-                    &raw_content,
-                    user_risk_level,
-                ) {
-                    Ok(report_json) => {
-                        // Step 7: Format as user-friendly Markdown
-                        let formatted = match crate::skills::investment_analysis::format_report_for_user(
-                            &report_json,
-                        ) {
-                            Ok(formatted) => formatted,
-                            Err(e) => {
-                                warn!("Failed to format report: {}. Returning raw JSON.", e);
-                                report_json.clone()
-                            }
-                        };
+                let mut processed =
+                    match crate::skills::investment_analysis::post_process_final_answer(
+                        &raw_content,
+                        user_risk_level,
+                    ) {
+                        Ok(report_json) => {
+                            // Step 7: Format as user-friendly Markdown
+                            let formatted =
+                                match crate::skills::investment_analysis::format_report_for_user(
+                                    &report_json,
+                                ) {
+                                    Ok(formatted) => formatted,
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to format report: {}. Returning raw JSON.",
+                                            e
+                                        );
+                                        report_json.clone()
+                                    }
+                                };
 
-                        // 🆕 FIX: If user originally requested a trade, try to extract
-                        // trade_request from the ReAct report and trigger execution.
-                        let trade_keywords = [
-                            "开单", "下单", "买入", "卖出", "交易", "买", "卖",
-                            "order", "buy", "sell", "place", "trade",
-                        ];
-                        let has_trade_intent = trade_keywords.iter().any(|kw| {
-                            message_text.to_lowercase().contains(kw)
-                        });
-                        if has_trade_intent {
-                            if let Ok(report) = serde_json::from_str::<
+                            // 🆕 FIX: If user originally requested a trade, try to extract
+                            // trade_request from the ReAct report and trigger execution.
+                            let trade_keywords = [
+                                "开单", "下单", "买入", "卖出", "交易", "买", "卖", "order", "buy",
+                                "sell", "place", "trade",
+                            ];
+                            let has_trade_intent = trade_keywords
+                                .iter()
+                                .any(|kw| message_text.to_lowercase().contains(kw));
+                            if has_trade_intent {
+                                if let Ok(report) = serde_json::from_str::<
                                 crate::skills::investment_analysis::types::InvestmentAnalysisReport,
                             >(&report_json)
                             {
@@ -2042,18 +2076,18 @@ impl Agent {
                                     }
                                 }
                             }
-                        }
+                            }
 
-                        formatted
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Post-processing failed for task {}: {}. Returning raw LLM output.",
-                            task_id, e
-                        );
-                        raw_content
-                    }
-                };
+                            formatted
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Post-processing failed for task {}: {}. Returning raw LLM output.",
+                                task_id, e
+                            );
+                            raw_content
+                        }
+                    };
 
                 Ok((processed, vec![]))
             }
@@ -2439,6 +2473,20 @@ impl Agent {
         let mut context = std::collections::HashMap::new();
         context.insert("max_tokens".to_string(), "1024".to_string());
 
+        // 🆕 STREAMING: If stream_tx is set, use call_llm_stream for real-time output
+        if let Some(ref stream_tx) = task.stream_tx {
+            let mut rx = llm
+                .call_llm_stream(messages, Some(context))
+                .await
+                .map_err(|e| AgentError::Execution(format!("LLM stream failed: {}", e)))?;
+            let mut full_response = String::new();
+            while let Some(chunk) = rx.recv().await {
+                full_response.push_str(&chunk);
+                let _ = stream_tx.send(chunk).await;
+            }
+            return Ok((full_response, vec![]));
+        }
+
         let response = llm
             .call_llm(messages, Some(context))
             .await
@@ -2546,7 +2594,22 @@ impl Agent {
         task: &Task,
         intent: &crate::intent::IntentAnalysis,
     ) -> Result<(String, Vec<Artifact>), AgentError> {
-        Box::pin(self.handle_llm_task_internal(task, Some(intent))).await
+        let result = Box::pin(self.handle_llm_task_internal(task, Some(intent))).await?;
+
+        // 🆕 STREAMING: If stream_tx is set, stream the result in chunks
+        if let Some(ref stream_tx) = task.stream_tx {
+            let chars: Vec<char> = result.0.chars().collect();
+            let chunk_size = 10;
+            for chunk in chars.chunks(chunk_size) {
+                let chunk_str: String = chunk.iter().collect();
+                if stream_tx.send(chunk_str).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        }
+
+        Ok(result)
     }
 
     /// Original handle_llm_task — delegates to internal implementation
@@ -2631,7 +2694,8 @@ impl Agent {
 
         if !skip_planning && is_complex {
             info!(
-                "🧠 Complex LLM task detected (message length: {}), using Unified ReAct for task {}",
+                "🧠 Complex LLM task detected (message length: {}), using Unified ReAct for task \
+                 {}",
                 message_text.len(),
                 task.id
             );
@@ -3679,8 +3743,7 @@ impl Agent {
                 }
 
                 // 🆕 Append底层 tools so LLM can directly invoke file ops, exec, etc.
-                let bottom_tools =
-                    crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
+                let bottom_tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
                 for (name, tool) in &bottom_tools {
                     if !native_tools.iter().any(|t| &t.name == name) {
                         native_tools.push(communication::ToolDefinition {
@@ -3806,8 +3869,7 @@ impl Agent {
                         // 🆕 FIX: Infer role from text prefix for accurate conversation semantics
                         if content.starts_with("用户:") || content.starts_with("User:") {
                             crate::llm::Role::User
-                        } else if content.starts_with("助手:")
-                            || content.starts_with("Assistant:")
+                        } else if content.starts_with("助手:") || content.starts_with("Assistant:")
                         {
                             crate::llm::Role::Assistant
                         } else {
@@ -4175,15 +4237,25 @@ impl Agent {
                                     || err_str.contains("environment variable")
                                     || err_str.contains("not set");
                                 if is_dependency_failure {
-                                    warn!("Skill '{}' disabled due to missing dependency: {}", resolved_id, e);
+                                    warn!(
+                                        "Skill '{}' disabled due to missing dependency: {}",
+                                        resolved_id, e
+                                    );
                                     let _ = registry.disable(&resolved_id).await;
                                 }
-                                warn!("Skill execution for '{}' failed: {}. Falling back to direct answer.", resolved_id, e);
+                                warn!(
+                                    "Skill execution for '{}' failed: {}. Falling back to direct \
+                                     answer.",
+                                    resolved_id, e
+                                );
                                 return self.handle_direct_answer(task).await;
                             }
                         }
                     } else {
-                        warn!("LLM requested unknown skill: '{}'. Falling back to direct answer.", skill_id);
+                        warn!(
+                            "LLM requested unknown skill: '{}'. Falling back to direct answer.",
+                            skill_id
+                        );
                         return self.handle_direct_answer(task).await;
                     }
                 }
@@ -4768,7 +4840,8 @@ impl Agent {
 
             // ===== STAGE 2: Confirmation & Execution =====
             let is_high_risk = Self::is_high_risk_mcp_skill(&skill_id);
-            // 🆕 FIX: Skip approval check if skip_approval flag is set (e.g., Plan C confirmed)
+            // 🆕 FIX: Skip approval check if skip_approval flag is set (e.g., Plan C
+            // confirmed)
             if is_high_risk && !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst) {
                 let preview = Self::generate_action_preview(&skill_id, &tool_name, &final_params);
                 let env = std::collections::HashMap::new();
@@ -4806,7 +4879,8 @@ impl Agent {
                             });
                         }
                         _ => {
-                            // Needs confirmation: store pending approval with full params + original input
+                            // Needs confirmation: store pending approval with full params +
+                            // original input
                             let request = gate.build_request(&skill_id, &params_json, input);
                             let req_id = request.request_id.clone();
                             {
@@ -5091,12 +5165,15 @@ impl Agent {
     }
 
     /// 🆕 Query tool inventory — lists all available tools from tool_set.rs
-    async fn query_tool_inventory(&self) -> Result<skills::executor::SkillExecutionResult, AgentError> {
+    async fn query_tool_inventory(
+        &self,
+    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
         let tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
         let mut lines = vec![
             "# 本机可用工具清单 (Tools)\n".to_string(),
             "| 序号 | 工具名 | 描述 | 参数 |
-            ".to_string(),
+            "
+            .to_string(),
             "|------|--------|------|------|".to_string(),
         ];
         for (idx, (name, tool)) in tools.iter().enumerate() {
@@ -5111,7 +5188,10 @@ impl Agent {
             ));
         }
         lines.push(format!("\n**共计 {} 个工具**", tools.len()));
-        lines.push("\n> 💡 提示：如需了解某个工具的详细用法，可以直接问「tool_name 工具怎么用」".to_string());
+        lines.push(
+            "\n> 💡 提示：如需了解某个工具的详细用法，可以直接问「tool_name 工具怎么用」"
+                .to_string(),
+        );
 
         Ok(skills::executor::SkillExecutionResult {
             task_id: "tool_inventory".to_string(),
@@ -5122,7 +5202,8 @@ impl Agent {
         })
     }
 
-    /// 🆕 Query skill inventory — lists all registered skills from SkillRegistry
+    /// 🆕 Query skill inventory — lists all registered skills from
+    /// SkillRegistry
     async fn query_skill_inventory(
         &self,
     ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
@@ -5135,7 +5216,8 @@ impl Agent {
         let mut lines = vec![
             "# 本机可用技能清单 (Skills)\n".to_string(),
             "| 序号 | 技能名 | 分类 | 描述 | 使用次数 |
-            ".to_string(),
+            "
+            .to_string(),
             "|------|--------|------|------|----------|".to_string(),
         ];
         for (idx, skill) in skills.iter().enumerate() {
@@ -5167,7 +5249,11 @@ impl Agent {
             ));
         }
         lines.push(format!("\n**共计 {} 个技能**", skills.len()));
-        lines.push("\n> 💡 类型说明：`内置`=系统硬编码技能，`知识`=Markdown 定义技能，`MCP`=外部 MCP 服务桥接".to_string());
+        lines.push(
+            "\n> 💡 类型说明：`内置`=系统硬编码技能，`知识`=Markdown 定义技能，`MCP`=外部 MCP \
+             服务桥接"
+                .to_string(),
+        );
 
         Ok(skills::executor::SkillExecutionResult {
             task_id: "skill_inventory".to_string(),
@@ -5178,7 +5264,8 @@ impl Agent {
         })
     }
 
-    /// 🆕 Query schedule inventory — merges Workflow cron triggers + Gateway cron jobs
+    /// 🆕 Query schedule inventory — merges Workflow cron triggers + Gateway
+    /// cron jobs
     async fn query_schedule_inventory(
         &self,
     ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
@@ -5224,14 +5311,19 @@ impl Agent {
                     let mut job_idx = 1;
                     for job in jobs {
                         total += 1;
-                        let status = if job.enabled { "🟢 启用" } else { "🔴 停用" };
+                        let status = if job.enabled {
+                            "🟢 启用"
+                        } else {
+                            "🔴 停用"
+                        };
                         let last_run = job
                             .last_run_at
                             .as_deref()
                             .map(|t| format!(" | 上次运行: {}", t))
                             .unwrap_or_default();
                         lines.push(format!(
-                            "{}. {} **{}** | 类型: `{}` | 规则: `{}` | 时区: {} | 已运行: {} 次{} | {}",
+                            "{}. {} **{}** | 类型: `{}` | 规则: `{}` | 时区: {} | 已运行: {} 次{} \
+                             | {}",
                             job_idx,
                             status,
                             job.name,
@@ -5249,16 +5341,11 @@ impl Agent {
                     lines.push("（无控制栏定时任务）\n".to_string());
                 }
                 Err(e) => {
-                    lines.push(format!(
-                        "（查询控制栏定时任务失败: {}）\n",
-                        e
-                    ));
+                    lines.push(format!("（查询控制栏定时任务失败: {}）\n", e));
                 }
             }
         } else {
-            lines.push(
-                "（系统信息提供者未配置，无法查询控制栏定时任务）\n".to_string(),
-            );
+            lines.push("（系统信息提供者未配置，无法查询控制栏定时任务）\n".to_string());
         }
 
         if total == 0 {
@@ -5290,10 +5377,7 @@ impl Agent {
             match provider.list_agents().await {
                 Ok(agents) if !agents.is_empty() => {
                     for (idx, agent) in agents.iter().enumerate() {
-                        let registered = agent
-                            .registered_at
-                            .as_deref()
-                            .unwrap_or("未知");
+                        let registered = agent.registered_at.as_deref().unwrap_or("未知");
                         lines.push(format!(
                             "| {} | `{}` | {} | {} | {} | {} | {} |",
                             idx + 1,
@@ -5311,10 +5395,7 @@ impl Agent {
                     lines.push("\n**当前系统中无任何 Agent**".to_string());
                 }
                 Err(e) => {
-                    lines.push(format!(
-                        "\n（查询 Agent 列表失败: {}）",
-                        e
-                    ));
+                    lines.push(format!("\n（查询 Agent 列表失败: {}）", e));
                 }
             }
         } else {
@@ -5409,7 +5490,12 @@ impl Agent {
                         "{}. **{}** | 状态: {} | {}",
                         idx + 1,
                         name,
-                        if mcp.get_client(name).await.map(|c| c.is_initialized()).unwrap_or(false) {
+                        if mcp
+                            .get_client(name)
+                            .await
+                            .map(|c| c.is_initialized())
+                            .unwrap_or(false)
+                        {
                             "🟢 已初始化"
                         } else {
                             "🟡 未初始化"
@@ -5764,10 +5850,10 @@ impl Agent {
     }
 
     /// Execute task using planning
-    /// 🆕 UNIFIED REACT: Replaces traditional P2 Planning with LLM self-decision.
-    /// All planning tasks are now delegated to the LLM via either the
-    /// investment-analysis ReAct loop (for crypto tasks) or native tool-calling
-    /// (for general tasks).
+    /// 🆕 UNIFIED REACT: Replaces traditional P2 Planning with LLM
+    /// self-decision. All planning tasks are now delegated to the LLM via
+    /// either the investment-analysis ReAct loop (for crypto tasks) or
+    /// native tool-calling (for general tasks).
     pub async fn execute_with_planning(
         &self,
         task: Task,
@@ -5788,8 +5874,18 @@ impl Agent {
 
         let lower = message_text.to_lowercase();
         let has_crypto = [
-            "btc", "bitcoin", "比特币", "eth", "ethereum", "以太坊",
-            "sol", "xrp", "doge", "加密货币", "crypto", "数字货币",
+            "btc",
+            "bitcoin",
+            "比特币",
+            "eth",
+            "ethereum",
+            "以太坊",
+            "sol",
+            "xrp",
+            "doge",
+            "加密货币",
+            "crypto",
+            "数字货币",
         ]
         .iter()
         .any(|s| lower.contains(s));
@@ -5819,7 +5915,8 @@ impl Agent {
         // 🆕 FIX: Add _skip_planning marker to prevent recursive routing back to
         // execute_with_planning via handle_llm_task_internal's is_complex check.
         let mut task = task;
-        task.parameters.insert("_skip_planning".to_string(), "true".to_string());
+        task.parameters
+            .insert("_skip_planning".to_string(), "true".to_string());
         let intent = crate::skill_matching::IntentAnalysisV2 {
             direct_answer: false,
             needs_skill: true,
@@ -7674,6 +7771,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Hello".to_string(),
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -7690,6 +7788,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "x".repeat(201), // > 200 chars
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -7709,6 +7808,7 @@ mod planning_integration_tests {
             task_type: TaskType::SkillExecution,
             input: "Short".to_string(),
             parameters: params,
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -7727,6 +7827,7 @@ mod planning_integration_tests {
             task_type: TaskType::PlanCreation,
             input: "Short".to_string(),
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -7740,6 +7841,7 @@ mod planning_integration_tests {
             task_type: TaskType::PlanExecution,
             input: "".to_string(),
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -7753,6 +7855,7 @@ mod planning_integration_tests {
             task_type: TaskType::PlanAdaptation,
             input: "Adapt".to_string(),
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -7773,6 +7876,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "x".repeat(300), // Complex task
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         // Should not use planning if not configured
@@ -7787,6 +7891,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "x".repeat(300), // Complex task
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         // Should use planning for complex tasks
@@ -7804,6 +7909,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Short".to_string(), // Simple task
             parameters: params,
+            stream_tx: None,
         };
 
         // Should use planning if explicitly requested
@@ -7952,6 +8058,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Test".to_string(),
             parameters: params,
+            stream_tx: None,
         };
 
         assert_eq!(agent.select_plan_strategy(&task), PlanStrategy::ReAct);
@@ -7968,6 +8075,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Test".to_string(),
             parameters: params,
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -7984,6 +8092,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Test".to_string(),
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(agent.select_plan_strategy(&task), PlanStrategy::Hybrid);

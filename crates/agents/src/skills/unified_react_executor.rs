@@ -26,7 +26,7 @@ use crate::skills::tool_set::SkillTool;
 /// Configuration for the Unified ReAct Executor
 #[derive(Debug, Clone)]
 pub struct UnifiedReActConfig {
-    /// Maximum number of rounds (hard cap). Default: 10.
+    /// Maximum number of rounds (hard cap). Default: 30.
     pub max_rounds: usize,
     /// Timeout per LLM call in seconds. Default: 30.
     pub round_timeout_sec: u64,
@@ -34,15 +34,23 @@ pub struct UnifiedReActConfig {
     pub enable_reflection: bool,
     /// Whether the final answer must be valid JSON. Default: true.
     pub require_structured_output: bool,
+    /// Optional cancellation receiver. When the watched value becomes true,
+    /// the loop terminates early and returns the collected content so far.
+    pub cancel_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Optional streaming output channel. When set, the final answer content
+    /// is streamed in chunks as it becomes available.
+    pub stream_tx: Option<tokio::sync::mpsc::Sender<String>>,
 }
 
 impl Default for UnifiedReActConfig {
     fn default() -> Self {
         Self {
-            max_rounds: 10,
+            max_rounds: 30,
             round_timeout_sec: 30,
             enable_reflection: true,
             require_structured_output: true,
+            cancel_rx: None,
+            stream_tx: None,
         }
     }
 }
@@ -129,6 +137,24 @@ impl UnifiedReActExecutor {
         );
 
         for round in 1..=self.config.max_rounds {
+            // Check for external cancellation signal
+            if let Some(ref rx) = self.config.cancel_rx {
+                if *rx.borrow() {
+                    info!(
+                        "ReAct loop cancelled by user at round {}/{} ({} rounds executed)",
+                        round,
+                        self.config.max_rounds,
+                        rounds.len()
+                    );
+                    let content = self.build_interrupted_answer(&rounds, user_request);
+                    // 🆕 FIX: Stream the interrupted answer so the user sees the summary
+                    if let Some(ref stream_tx) = self.config.stream_tx {
+                        let _ = stream_tx.send(content.clone()).await;
+                    }
+                    return Ok(content);
+                }
+            }
+
             // Build the round prompt (includes history of all previous rounds)
             let round_prompt = self.build_round_prompt(&rounds, user_request);
             messages.push(CommMessage::new(
@@ -334,6 +360,19 @@ impl UnifiedReActExecutor {
                         timestamp: Instant::now(),
                     });
 
+                    // 🆕 STREAMING: If stream_tx is set, stream the final answer in chunks
+                    if let Some(ref stream_tx) = self.config.stream_tx {
+                        let chars: Vec<char> = content.chars().collect();
+                        let chunk_size = 10;
+                        for chunk in chars.chunks(chunk_size) {
+                            let chunk_str: String = chunk.iter().collect();
+                            if stream_tx.send(chunk_str).await.is_err() {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                        }
+                    }
+
                     return Ok(content);
                 }
             }
@@ -348,8 +387,11 @@ impl UnifiedReActExecutor {
         messages.push(CommMessage::new(
             uuid::Uuid::new_v4(),
             PlatformType::Custom,
-            "[System] 已达到最大思考轮数（10轮）。请基于已收集的所有数据，\
-             立即输出最终分析结论（final_answer），不允许再调用工具。"
+            format!(
+                "[System] 已达到最大思考轮数（{}轮）。请基于已收集的所有数据，\
+                 立即输出最终分析结论（final_answer），不允许再调用工具。",
+                self.config.max_rounds
+            )
                 .to_string(),
         ));
 
@@ -360,17 +402,31 @@ impl UnifiedReActExecutor {
             .map_err(|e| AgentError::Execution(format!("Forced final_answer failed: {}", e)))?;
 
         // Try to parse as final_answer
-        match parse_react_response(&forced_response) {
+        let final_content = match parse_react_response(&forced_response) {
             Ok(parsed) => {
                 if let ReActAction::FinalAnswer { content } = parsed.action {
-                    return Ok(content);
+                    content
+                } else {
+                    forced_response
                 }
             }
-            Err(_) => {}
+            Err(_) => forced_response,
+        };
+
+        // 🆕 STREAMING: If stream_tx is set, stream the final answer in chunks
+        if let Some(ref stream_tx) = self.config.stream_tx {
+            let chars: Vec<char> = final_content.chars().collect();
+            let chunk_size = 10;
+            for chunk in chars.chunks(chunk_size) {
+                let chunk_str: String = chunk.iter().collect();
+                if stream_tx.send(chunk_str).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
         }
 
-        // If parsing fails, return the raw response
-        Ok(forced_response)
+        Ok(final_content)
     }
 
     /// Build the prompt for a specific round, including history
@@ -423,6 +479,66 @@ impl UnifiedReActExecutor {
         history.push_str("请输出 JSON 格式。");
 
         history
+    }
+
+    /// Build an answer when the loop is interrupted by user cancellation.
+    /// Summarizes the tools called and their observations into a natural-language reply.
+    fn build_interrupted_answer(&self, rounds: &[ReActRound], _user_request: &str) -> String {
+        if rounds.is_empty() {
+            return "⏹️ 任务已中断，尚未开始执行。".to_string();
+        }
+
+        let mut lines = vec![
+            "⏹️ 任务已根据您的指令中断。以下是已执行的操作和收集到的信息：".to_string(),
+            String::new(),
+        ];
+
+        for round in rounds {
+            match &round.action {
+                ReActAction::CallTool {
+                    tool_name,
+                    arguments,
+                    reasoning,
+                } => {
+                    lines.push(format!(
+                        "**第 {} 轮** — 调用工具 `{}`",
+                        round.round_number, tool_name
+                    ));
+                    lines.push(format!("- 目的：{}", reasoning));
+                    lines.push(format!(
+                        "- 参数：{}",
+                        serde_json::to_string(arguments).unwrap_or_default()
+                    ));
+                    if let Some(obs) = &round.observation {
+                        let display = if obs.len() > 500 {
+                            format!("{}...", &obs[..500])
+                        } else {
+                            obs.clone()
+                        };
+                        lines.push(format!("- 结果：{}", display));
+                    }
+                    lines.push(String::new());
+                }
+                ReActAction::FinalAnswer { content } => {
+                    lines.push(format!(
+                        "**第 {} 轮** — 已输出最终答案（部分）",
+                        round.round_number
+                    ));
+                    let display = if content.len() > 500 {
+                        format!("{}...", &content[..500])
+                    } else {
+                        content.clone()
+                    };
+                    lines.push(display);
+                    lines.push(String::new());
+                }
+            }
+        }
+
+        lines.push("---".to_string());
+        lines.push("由于任务被中断，以上信息可能不完整。如需继续，请重新发送您的请求。".to_string());
+
+        lines.join("\n")
     }
 }
 

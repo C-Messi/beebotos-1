@@ -1111,6 +1111,7 @@ impl AgentRuntime for GatewayAgentRuntime {
             task_type: self.convert_task_type(&task.task_type),
             input: task.input.to_string(),
             parameters,
+            stream_tx: task.stream_tx.clone(),
         };
 
         // Create oneshot channel for result

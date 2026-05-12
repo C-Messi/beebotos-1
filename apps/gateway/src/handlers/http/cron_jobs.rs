@@ -439,78 +439,69 @@ async fn execute_cron_job_inner(
     state: &Arc<AppState>,
     job: &crate::services::cron_job_service::CronJob,
 ) -> Result<String, GatewayError> {
-    use beebotos_agents::communication::PlatformType;
+    use beebotos_agents::communication::{PlatformType, MessageType, Message};
 
-    let platform = PlatformType::WebChat;
+    // 🆕 FIX: Cron jobs now go through the unified message entry point
+    // (MessageProcessor::handle_message_via_agent) instead of directly calling
+    // AgentRuntime or LLM.
+    let platform = PlatformType::Custom;
     let channel_id = format!("cron:{}", job.id);
     let user_id = "cron";
 
-    if let Some(ref resolver) = state.agent_resolver {
-        let agent_id = resolver.resolve(platform, &channel_id, user_id).await?;
-        let context_mode = match job.context_mode {
-            crate::services::cron_job_service::ContextMode::Main => "main",
-            crate::services::cron_job_service::ContextMode::Isolated => "isolated",
-        };
-
-        let task = gateway::TaskConfig {
-            task_type: "llm_chat".to_string(),
-            input: serde_json::json!({
-                "message": job.prompt,
-                "history": [],
-                "images": [],
-                "platform": platform.to_string(),
-                "channel_id": channel_id,
-                "user_id": user_id,
-                "session_id": format!("cron:{}", job.id),
-                "metadata": {
-                    "sender_id": user_id,
-                    "cron_job_id": job.id,
-                    "cron_job_name": job.name,
-                    "context_mode": context_mode,
-                },
-            }),
-            timeout_secs: 55,
-            priority: 5,
-        };
-
-        let result = state.agent_runtime.execute_task(&agent_id, task).await?;
-        if result.success {
-            let output = task_output_to_string(&result.output);
-            if output.trim().is_empty() {
-                return Err(GatewayError::internal("Agent returned empty response"));
-            }
-            Ok(output)
-        } else {
-            Err(GatewayError::internal(result.error.unwrap_or_else(|| {
-                "Agent task failed without error details".to_string()
-            })))
+    let (processor, resolver) = match (
+        state.message_processor.as_ref(),
+        state.agent_resolver.as_ref(),
+    ) {
+        (Some(p), Some(r)) => (p.clone(), r.clone()),
+        _ => {
+            return Err(GatewayError::internal(
+                "MessageProcessor or AgentResolver not available for cron job execution"
+            ));
         }
-    } else {
-        use beebotos_agents::llm::Message as LLMMessage;
+    };
 
-        let response = state
-            .llm_service
-            .chat(
-                vec![
-                    LLMMessage::system(format!(
-                        "你正在执行 BeeBotOS \
-                         定时任务：{}。请直接完成任务并返回可记录到任务历史的结果。",
-                        job.name
-                    )),
-                    LLMMessage::user(job.prompt.clone()),
-                ],
-                None,
-                None,
-                None,
-                None,
-            )
-            .await?;
-        if response.trim().is_empty() {
-            Err(GatewayError::internal("LLM returned empty response"))
-        } else {
-            Ok(response)
-        }
-    }
+    // Construct a synthetic user message that reuses the same pipeline
+    let message = Message {
+        id: uuid::Uuid::new_v4(),
+        thread_id: uuid::Uuid::new_v4(),
+        platform,
+        message_type: MessageType::Text,
+        content: job.prompt.clone(),
+        metadata: {
+            let mut m = std::collections::HashMap::new();
+            m.insert("sender_id".to_string(), user_id.to_string());
+            m.insert("cron_job_id".to_string(), job.id.clone());
+            m.insert("cron_job_name".to_string(), job.name.clone());
+            m.insert("message_id".to_string(), format!("cron:{}:{}", job.id, chrono::Utc::now().timestamp()));
+            m.insert("session_id".to_string(), format!("cron:{}", job.id));
+            m
+        },
+        timestamp: chrono::Utc::now(),
+    };
+
+    // Create a oneshot channel to receive the result synchronously
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+    // Submit the message through the unified entry point
+    processor.handle_message_via_agent(
+        platform,
+        &channel_id,
+        message,
+        resolver,
+        state.agent_runtime.clone(),
+        Some(completion_tx),
+    ).await?;
+
+    // Wait for the background task to complete (with a generous timeout)
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        completion_rx,
+    )
+    .await
+    .map_err(|_| GatewayError::internal("Cron job execution timed out"))?
+    .map_err(|_| GatewayError::internal("Cron job completion channel closed"))?;
+
+    result
 }
 
 fn task_output_to_string(output: &serde_json::Value) -> String {

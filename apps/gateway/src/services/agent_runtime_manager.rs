@@ -26,25 +26,21 @@ impl GatewayLLMInterface {
     pub fn new(llm_service: Arc<crate::services::llm_service::LlmService>) -> Self {
         Self { llm_service }
     }
-}
 
-#[async_trait]
-impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
-    async fn call_llm(
+    /// Convert agent communication messages to LLM messages, extracting system
+    /// prompts and handling role prefixes (用户:/助手:/系统:).
+    fn convert_messages(
         &self,
         messages: Vec<beebotos_agents::communication::Message>,
-        _context: Option<std::collections::HashMap<String, String>>,
-    ) -> beebotos_agents::error::Result<String> {
+    ) -> Vec<beebotos_agents::llm::Message> {
         use beebotos_agents::llm::Message as LLMMessage;
 
-        // 🆕 FIX: 避免 double-flattening，保留 system/user/assistant 角色分离
         let mut system_parts = Vec::new();
         let mut llm_messages = Vec::new();
 
         for (idx, msg) in messages.iter().enumerate() {
             let content = msg.content.trim();
             if idx == 0 {
-                // 第一条消息通常是 agent persona，放入 system
                 system_parts.push(content.to_string());
             } else if content.starts_with("[系统提示")
                 || content.starts_with("以下是与当前对话相关的历史记忆")
@@ -60,32 +56,37 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
             } else if let Some(rest) = content.strip_prefix("系统:") {
                 system_parts.push(rest.trim().to_string());
             } else {
-                // 默认作为 user message
                 llm_messages.push(LLMMessage::user(content.to_string()));
             }
         }
 
-        let final_messages = if !system_parts.is_empty() {
+        if !system_parts.is_empty() {
             let system_text = system_parts.join("\n\n");
             let mut msgs = vec![LLMMessage::system(system_text)];
             msgs.extend(llm_messages);
             msgs
         } else {
             llm_messages
-        };
+        }
+    }
+}
 
-        // 🆕 FIX: Pass max_tokens override from Agent extra_params to control output
-        // length
+#[async_trait]
+impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
+    async fn call_llm(
+        &self,
+        messages: Vec<beebotos_agents::communication::Message>,
+        _context: Option<std::collections::HashMap<String, String>>,
+    ) -> beebotos_agents::error::Result<String> {
+        let final_messages = self.convert_messages(messages);
+
         let max_tokens_override = _context
             .as_ref()
             .and_then(|c| c.get("max_tokens"))
             .and_then(|t| t.parse::<u32>().ok());
 
-        // 🆕 FIX: Support model override for fast/cheap tasks (e.g. skill ranking)
         let model_override = _context.as_ref().and_then(|c| c.get("model")).cloned();
 
-        // 🆕 FIX: Support native function calling via tools_json in extra_params
-        // Agent sends Vec<communication::ToolDefinition>, convert to llm::Tool here.
         let tools: Option<Vec<beebotos_agents::llm::Tool>> = _context
             .as_ref()
             .and_then(|c| c.get("tools_json"))
@@ -129,12 +130,27 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
 
     async fn call_llm_stream(
         &self,
-        _messages: Vec<beebotos_agents::communication::Message>,
+        messages: Vec<beebotos_agents::communication::Message>,
         _context: Option<std::collections::HashMap<String, String>>,
     ) -> beebotos_agents::error::Result<tokio::sync::mpsc::Receiver<String>> {
-        Err(beebotos_agents::error::AgentError::Execution(
-            "Streaming not supported via gateway".into(),
-        ))
+        let final_messages = self.convert_messages(messages);
+
+        let max_tokens_override = _context
+            .as_ref()
+            .and_then(|c| c.get("max_tokens"))
+            .and_then(|t| t.parse::<u32>().ok());
+
+        let model_override = _context.as_ref().and_then(|c| c.get("model")).cloned();
+
+        self.llm_service
+            .chat_stream(final_messages, max_tokens_override, model_override)
+            .await
+            .map_err(|e| {
+                beebotos_agents::error::AgentError::Execution(format!(
+                    "LLM stream failed: {}",
+                    e
+                ))
+            })
     }
 }
 

@@ -432,7 +432,10 @@ impl AppState {
         // 🆕 Ensure tool working directory exists
         let tool_work_dir = std::path::PathBuf::from("/data/workspace");
         if let Err(e) = tokio::fs::create_dir_all(&tool_work_dir).await {
-            warn!("Failed to create tool working directory {:?}: {}", tool_work_dir, e);
+            warn!(
+                "Failed to create tool working directory {:?}: {}",
+                tool_work_dir, e
+            );
         } else {
             info!("✅ Tool working directory ensured at {:?}", tool_work_dir);
         }
@@ -568,14 +571,13 @@ impl AppState {
         // Attach system info provider after runtime is created so we can share
         // the runtime's own state manager for agent inventory queries.
         let gateway_state_manager = gateway_runtime.state_manager();
-        gateway_runtime = gateway_runtime.with_system_info_provider(Arc::new(
-            GatewaySystemInfoProvider::new(
+        gateway_runtime =
+            gateway_runtime.with_system_info_provider(Arc::new(GatewaySystemInfoProvider::new(
                 cron_job_service
                     .clone()
                     .expect("CronJobService must be initialized before AgentRuntime"),
                 gateway_state_manager,
-            ),
-        ));
+            )));
 
         // Recover agents after MCP manager is configured so they have access to MCP
         // tools
@@ -1433,7 +1435,7 @@ async fn main() -> anyhow::Result<()> {
     // 🆕 FIX (P2): Reduced interval from 30s to 5s for more accurate one-shot job
     // triggering
     handlers::http::cron_jobs::start_at_job_checker(app_state.clone(), 5).await;
-    info!("✅ Cron at-job checker started (30s interval)");
+    info!("✅ Cron at-job checker started (5s interval)");
 
     // 🟢 P2 FIX: Start TriggerEngine event listener for event-based workflow
     // triggers
@@ -1506,6 +1508,7 @@ async fn main() -> anyhow::Result<()> {
                                         message.clone(),
                                         resolver.clone(),
                                         app_state_clone.agent_runtime.clone(),
+                                        None, // regular messages don't need completion callback
                                     ).await {
                                         error!("❌ Agent message processing error: {}", e);
                                     }

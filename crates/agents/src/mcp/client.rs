@@ -27,8 +27,8 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             server_url: "http://localhost:3000".to_string(),
-            timeout_ms: 60000,  // 🆕 FIX: Increased from 30s to 60s — Alpaca API responses
-                                   // for crypto data queries often take 30-35s during market hours
+            timeout_ms: 60000, // 🆕 FIX: Increased from 30s to 60s — Alpaca API responses
+            // for crypto data queries often take 30-35s during market hours
             retry_count: 3,
         }
     }

@@ -54,7 +54,7 @@ impl Default for HttpTransportConfig {
             base_url: String::new(),
             auth_token: None,
             headers: HashMap::new(),
-            timeout_ms: 60000,  // 🆕 FIX: Increased from 30s to 60s — matches ClientConfig default
+            timeout_ms: 60000, // 🆕 FIX: Increased from 30s to 60s — matches ClientConfig default
             use_sse: false,
         }
     }

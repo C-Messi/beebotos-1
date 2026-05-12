@@ -35,8 +35,8 @@ impl ToolHandler for SkillToolHandler {
     }
 
     async fn execute(&self, arguments: &str) -> Result<String, String> {
-        let params: serde_json::Value =
-            serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON arguments: {}", e))?;
+        let params: serde_json::Value = serde_json::from_str(arguments)
+            .map_err(|e| format!("Invalid JSON arguments: {}", e))?;
         self.tool.execute(&params).await
     }
 }

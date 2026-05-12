@@ -668,6 +668,55 @@ impl LlmService {
         }
     }
 
+    /// Stream LLM response as text chunks
+    ///
+    /// Sets `stream: true` in the request config and forwards chunks from the
+    /// failover provider's `complete_stream` to a new `mpsc::Receiver<String>`.
+    pub async fn chat_stream(
+        &self,
+        messages: Vec<LLMMessage>,
+        max_tokens_override: Option<u32>,
+        model_override: Option<String>,
+    ) -> Result<tokio::sync::mpsc::Receiver<String>, GatewayError> {
+        let request_config = RequestConfig {
+            model: model_override.unwrap_or_else(|| self.get_default_model()),
+            temperature: self.get_default_temperature(),
+            max_tokens: max_tokens_override.or(Some(self.config.models.max_tokens)),
+            stream: Some(true),
+            ..Default::default()
+        };
+
+        let request = beebotos_agents::llm::types::LLMRequest {
+            messages,
+            config: request_config,
+        };
+
+        let mut chunk_rx = self
+            .failover_provider
+            .complete_stream(request)
+            .await
+            .map_err(|e| GatewayError::Internal {
+                message: format!("LLM stream request failed: {}", e),
+                correlation_id: uuid::Uuid::new_v4().to_string(),
+            })?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(100);
+        tokio::spawn(async move {
+            while let Some(chunk) = chunk_rx.recv().await {
+                if let Some(content) = chunk.content() {
+                    if !content.is_empty() && tx.send(content.to_string()).await.is_err() {
+                        break;
+                    }
+                }
+                if chunk.finish_reason().is_some() {
+                    break;
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+
     /// Execute LLM request with processed multimodal content
     async fn execute_llm_request(
         &self,

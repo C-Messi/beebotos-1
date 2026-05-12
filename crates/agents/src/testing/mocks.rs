@@ -245,6 +245,7 @@ pub mod helpers {
             task_type: TaskType::LlmChat,
             input: input.to_string(),
             parameters: std::collections::HashMap::new(),
+            stream_tx: None,
         }
     }
 
@@ -255,6 +256,7 @@ pub mod helpers {
             task_type: TaskType::LlmChat,
             input: "x".repeat(250), // Long input triggers complexity
             parameters: std::collections::HashMap::new(),
+            stream_tx: None,
         }
     }
 
@@ -268,6 +270,7 @@ pub mod helpers {
             task_type: TaskType::LlmChat,
             input: input.to_string(),
             parameters: params,
+            stream_tx: None,
         }
     }
 

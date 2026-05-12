@@ -8,15 +8,12 @@ use gloo_storage::{LocalStorage, Storage};
 use leptos::prelude::*;
 use leptos::view;
 use leptos_meta::Title;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
 
 use crate::api::{create_client, create_webchat_service};
 use crate::components::webchat::{
-    MessageInput, MessageList, SessionList, SidePanel, UsagePanelComponent,
+    use_websocket_chat, MessageInput, MessageList, SessionList, SidePanel, UsagePanelComponent,
 };
 use crate::state::{use_auth_state, use_chat_ui_state, use_webchat_state};
-use crate::utils::get_user_id;
 use crate::webchat::{ChatMessage, MessageRole};
 
 /// 获取或创建持久化的会话 ID（仅作本地缓存，后端为准）
@@ -146,158 +143,8 @@ pub fn WebchatPage() -> impl IntoView {
         });
     });
 
-    // WebSocket 连接：订阅 webchat 频道接收 Agent 回复
-    let chat_state_for_effect = chat_state.clone();
-    let auth_state_for_ws = auth_state.clone();
-    let ws_needs_reconnect = RwSignal::new(true);
-    Effect::new(move |_| {
-        if !ws_needs_reconnect.get() {
-            return Some(());
-        }
-        ws_needs_reconnect.set(false);
-
-        let window = web_sys::window()?;
-        let location = window.location();
-        let protocol = location.protocol().ok()?;
-        let hostname = location.hostname().ok()?;
-        let port = location.port().ok().unwrap_or_default();
-        let ws_protocol = if protocol == "https:" { "wss" } else { "ws" };
-        // Web 服务器(8090)不代理 WebSocket，需要直连 Gateway(8000)
-        let ws_host = if port == "8090" {
-            format!("{}:8000", hostname)
-        } else if port.is_empty() {
-            hostname
-        } else {
-            format!("{}:{}", hostname, port)
-        };
-        let ws_url = format!("{}://{}/ws", ws_protocol, ws_host);
-
-        let ws = web_sys::WebSocket::new(&ws_url).ok()?;
-        ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
-
-        let chat_state_clone = chat_state_for_effect.clone();
-        let onmessage = Closure::wrap(Box::new(move |e: web_sys::MessageEvent| {
-            if let Ok(text) = e.data().dyn_into::<js_sys::JsString>() {
-                let text_str = text.as_string().unwrap_or_default();
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text_str) {
-                    if json.get("type").and_then(|v| v.as_str()) == Some("chat_message") {
-                        if let Some(msg_json) = json.get("message") {
-                            if let Ok(message) =
-                                serde_json::from_value::<ChatMessage>(msg_json.clone())
-                            {
-                                chat_state_clone.add_message(message);
-                                chat_state_clone.is_sending.set(false);
-                            }
-                        }
-                    }
-                }
-            }
-        }) as Box<dyn FnMut(_)>);
-        ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-        onmessage.forget();
-
-        let ws_for_open = ws.clone();
-        let user_id = auth_state_for_ws
-            .user
-            .get()
-            .as_ref()
-            .map(|u| u.id.clone())
-            .unwrap_or_else(get_user_id);
-        let chat_state_for_open = chat_state_for_effect.clone();
-        let auth_state_for_open = auth_state_for_ws.clone();
-        let onopen = Closure::wrap(Box::new(move |_e: web_sys::Event| {
-            let subscribe = serde_json::json!({
-                "type": "subscribe",
-                "channel": "webchat",
-                "user_id": user_id
-            });
-            let _ = ws_for_open.send_with_str(&subscribe.to_string());
-
-            // 重连后拉取最新消息，补全可能丢失的 Agent 回复
-            let chat_state_refresh = chat_state_for_open.clone();
-            let auth_state_refresh = auth_state_for_open.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                gloo_timers::future::TimeoutFuture::new(500).await;
-                let client = create_client();
-                client.set_auth_token(auth_state_refresh.get_token());
-                let service = create_webchat_service(client);
-                if let Some(session_id) = chat_state_refresh.current_session_id.get() {
-                    // 1. 先刷新全部消息
-                    match service.get_messages(&session_id).await {
-                        Ok(msgs) => {
-                            chat_state_refresh.current_messages.set(msgs.clone());
-                            chat_state_refresh.message_cache.update(|cache| {
-                                cache.insert(session_id.clone(), msgs);
-                            });
-                        }
-                        Err(e) => {
-                            let _ = web_sys::console::warn_1(
-                                &format!("[webchat] refresh messages failed: {}", e).into(),
-                            );
-                        }
-                    }
-
-                    // 2. 拉取 WebSocket 断开期间未投递的助手消息并补全
-                    match service.get_undelivered_messages(&session_id).await {
-                        Ok(undelivered) => {
-                            if !undelivered.is_empty() {
-                                let _ = web_sys::console::log_1(
-                                    &format!(
-                                        "[webchat] recovering {} undelivered messages",
-                                        undelivered.len()
-                                    )
-                                    .into(),
-                                );
-                                chat_state_refresh.current_messages.update(|msgs| {
-                                    let existing_ids: std::collections::HashSet<String> =
-                                        msgs.iter().map(|m| m.id.clone()).collect();
-                                    for msg in undelivered {
-                                        if !existing_ids.contains(&msg.id) {
-                                            msgs.push(msg.clone());
-                                            // 3. 标记为已投递，避免下次重复拉取
-                                            let msg_id = msg.id.clone();
-                                            let svc = create_webchat_service(create_client());
-                                            wasm_bindgen_futures::spawn_local(async move {
-                                                let _ = svc.ack_message(&msg_id).await;
-                                            });
-                                        }
-                                    }
-                                });
-                                chat_state_refresh.is_sending.set(false);
-                            }
-                        }
-                        Err(e) => {
-                            let _ = web_sys::console::warn_1(
-                                &format!("[webchat] get undelivered messages failed: {}", e).into(),
-                            );
-                        }
-                    }
-                }
-            });
-        }) as Box<dyn FnMut(_)>);
-        ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
-        onopen.forget();
-
-        let chat_state_err = chat_state_for_effect.clone();
-        let onerror = Closure::wrap(Box::new(move |_e: web_sys::Event| {
-            chat_state_err.set_error(Some("WebSocket connection error".to_string()));
-        }) as Box<dyn FnMut(_)>);
-        ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-        onerror.forget();
-
-        let ws_needs_reconnect_err = ws_needs_reconnect.clone();
-        let onclose = Closure::wrap(Box::new(move |_e: web_sys::Event| {
-            // 延迟 3 秒后触发重连
-            wasm_bindgen_futures::spawn_local(async move {
-                gloo_timers::future::TimeoutFuture::new(3_000).await;
-                ws_needs_reconnect_err.set(true);
-            });
-        }) as Box<dyn FnMut(_)>);
-        ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
-        onclose.forget();
-
-        Some(())
-    });
+    // WebSocket 连接：使用封装好的 Hook
+    let _ws_status = use_websocket_chat();
 
     // 发送消息处理
     let chat_state_for_send = chat_state.clone();
@@ -341,11 +188,40 @@ pub fn WebchatPage() -> impl IntoView {
                 .unwrap_or_default();
             match service.send_message(&session_id, &content, &user_id).await {
                 Ok(_) => {
-                    // HTTP 发送成功，但保持 is_sending=true 等待 WebSocket 回复
-                    // 如果 WebSocket 长时间无响应，允许 30 秒后自动解除锁定
+                    // HTTP 发送成功，但保持 is_sending=true 等待 WebSocket 回复。
+                    // 如果最终 WebSocket 包丢失，短轮询当前会话消息兜底补回。
                     let chat_state_send = chat_state_send.clone();
+                    let auth_state_poll = auth_state_send.clone();
+                    let session_id_poll = session_id.clone();
                     wasm_bindgen_futures::spawn_local(async move {
-                        gloo_timers::future::TimeoutFuture::new(30_000).await;
+                        let client = create_client();
+                        client.set_auth_token(auth_state_poll.get_token());
+                        let service = create_webchat_service(client);
+                        for _ in 0..20 {
+                            gloo_timers::future::TimeoutFuture::new(1_500).await;
+                            if !chat_state_send.is_sending.get() {
+                                return;
+                            }
+                            if let Ok(msgs) = service.get_messages(&session_id_poll).await {
+                                let existing: std::collections::HashSet<String> = chat_state_send
+                                    .current_messages
+                                    .with(|current| current.iter().map(|m| m.id.clone()).collect());
+                                let has_new_assistant = msgs.iter().any(|msg| {
+                                    msg.role == MessageRole::Assistant
+                                        && !existing.contains(&msg.id)
+                                        && msg.content != "🤖 正在思考，请稍候..."
+                                });
+                                if has_new_assistant {
+                                    chat_state_send.current_messages.set(msgs.clone());
+                                    chat_state_send.message_cache.update(|cache| {
+                                        cache.insert(session_id_poll.clone(), msgs);
+                                    });
+                                    chat_state_send.is_sending.set(false);
+                                    chat_state_send.is_streaming.set(false);
+                                    return;
+                                }
+                            }
+                        }
                         if chat_state_send.is_sending.get() {
                             chat_state_send.is_sending.set(false);
                         }

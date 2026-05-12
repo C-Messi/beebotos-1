@@ -5,12 +5,14 @@
 pub mod builtin_loader;
 pub mod code_executor;
 pub mod command_handler;
+pub mod cron_job_tool;
 // 🟢 P1 FIX: Skill composition patterns (pipeline, parallel, conditional, loop)
 pub mod composition;
 pub mod discovery;
 pub mod dynamic;
 pub mod executor;
 pub mod feedback;
+pub mod general_react_prompt;
 pub mod hub;
 pub mod instance_manager;
 pub mod investment_analysis;
@@ -51,6 +53,7 @@ pub use rating::{RatingSummary, SkillRating, SkillRatingStore};
 pub use react_executor::ReActExecutor;
 pub use registry::{RegisteredSkill, SkillDefinition, SkillRegistry, Version, VersionError};
 pub use security::{SandboxMode, SkillSecurityPolicy, SkillSecurityValidator, ValidationError};
+pub use cron_job_tool::CronJobManagerTool;
 pub use tool_set::{
     default_tool_set, BashShellTool, FileListTool, FileReadTool, FileWriteTool, ProcessExecTool,
     SkillTool,

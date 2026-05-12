@@ -186,6 +186,60 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
+    // 🆕 SECURITY FIX: Internal service token for agent-to-gateway loopback calls.
+    // Configured via INTERNAL_SERVICE_TOKEN env var. If set, requests bearing this
+    // token are treated as an internal service user (admin) without JWT validation.
+    // This isolates internal tool auth from the hard-coded demo-token.
+    if let Ok(internal_token) = std::env::var("INTERNAL_SERVICE_TOKEN") {
+        if !internal_token.is_empty() && token == internal_token {
+            let client_ip = request
+                .extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|info| info.0.ip().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // 🛡️ Optional: restrict internal service token to loopback only
+            let is_loopback = client_ip == "127.0.0.1" || client_ip == "::1" || client_ip == "unknown";
+            if !is_loopback {
+                warn!(
+                    request_id = %request_id,
+                    client_ip = %client_ip,
+                    "Internal service token used from non-loopback address — rejecting"
+                );
+                return GatewayError::unauthorized("Internal token restricted to localhost")
+                    .into_response();
+            }
+
+            let claims = Claims {
+                sub: "internal-service".to_string(),
+                jti: Uuid::new_v4().to_string(),
+                iat: Utc::now().timestamp(),
+                exp: (Utc::now() + ChronoDuration::hours(24)).timestamp(),
+                iss: state.config.jwt.issuer.clone(),
+                aud: state.config.jwt.audience.clone(),
+                roles: vec!["admin".to_string()],
+                token_type: TokenType::Access,
+                session_id: None,
+            };
+
+            let auth_user = AuthUser {
+                user_id: claims.sub.clone(),
+                roles: claims.roles.clone(),
+                claims,
+                client_ip,
+                request_id: request_id.clone(),
+            };
+
+            debug!(
+                request_id = %request_id,
+                user_id = %auth_user.user_id,
+                "Internal service authenticated"
+            );
+            request.extensions_mut().insert(auth_user);
+            return next.run(request).await;
+        }
+    }
+
     // Validate token
     let claims = match validate_token(token, &state.config.jwt) {
         Ok(c) => c,

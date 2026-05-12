@@ -194,8 +194,9 @@ impl SkillSelector {
     }
 
     /// Step 1: Recall candidates using registry search with score preservation.
-    /// 🆕 FIX: Uses search relevance score as primary sort key (not usage_count)
-    /// so low-usage but highly-relevant MCP tools are not truncated out.
+    /// 🆕 FIX: Uses search relevance score as primary sort key (not
+    /// usage_count) so low-usage but highly-relevant MCP tools are not
+    /// truncated out.
     async fn recall_candidates(
         &self,
         query_summary: &str,
@@ -222,10 +223,7 @@ impl SkillSelector {
             a.1.skill.name.cmp(&b.1.skill.name)
         });
 
-        let mut candidates: Vec<RegisteredSkill> = scored
-            .into_iter()
-            .map(|(_, s)| s)
-            .collect();
+        let mut candidates: Vec<RegisteredSkill> = scored.into_iter().map(|(_, s)| s).collect();
 
         // Limit to max_candidates
         candidates.truncate(self.max_candidates);

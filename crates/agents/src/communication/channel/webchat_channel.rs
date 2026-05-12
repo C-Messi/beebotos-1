@@ -96,6 +96,42 @@ impl WebChatChannel {
         info!("WebChatChannel: WebSocket manager attached");
     }
 
+    /// Send a streaming content chunk over WebSocket
+    pub async fn send_stream_chunk(
+        &self,
+        channel_id: &str,
+        content: &str,
+        finished: bool,
+    ) -> Result<()> {
+        let ws = self.ws_manager.read().await;
+        if let Some(ref manager) = *ws {
+            let payload = serde_json::json!({
+                "type": "chat_stream",
+                "session_id": channel_id,
+                "content": content,
+                "finished": finished,
+            });
+            manager
+                .broadcast_to_channel("webchat", payload)
+                .await
+                .map_err(|e| {
+                    AgentError::platform(format!("WebSocket stream broadcast failed: {}", e))
+                })?;
+            debug!(
+                "WebChatChannel: stream chunk broadcasted to channel {} (finished={}, len={})",
+                channel_id,
+                finished,
+                content.len()
+            );
+            Ok(())
+        } else {
+            warn!("WebChatChannel: WebSocket manager not set, cannot send stream chunk");
+            Err(AgentError::platform(
+                "WebSocket manager not attached to WebChatChannel",
+            ))
+        }
+    }
+
     /// Build the payload sent over WebSocket
     fn build_payload(&self, channel_id: &str, message: &Message) -> serde_json::Value {
         let role = match message.message_type {
@@ -149,10 +185,15 @@ impl Channel for WebChatChannel {
         let ws = self.ws_manager.read().await;
         if let Some(ref manager) = *ws {
             let payload = self.build_payload(channel_id, message);
-            manager
+            let delivered = manager
                 .broadcast_to_channel("webchat", payload)
                 .await
                 .map_err(|e| AgentError::platform(format!("WebSocket broadcast failed: {}", e)))?;
+            if delivered == 0 {
+                return Err(AgentError::platform(
+                    "WebSocket broadcast had no subscribed webchat clients",
+                ));
+            }
             debug!(
                 "WebChatChannel: reply broadcasted to channel {}",
                 channel_id

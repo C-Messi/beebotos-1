@@ -385,6 +385,7 @@ impl BatchTaskBuilder {
                 task_type: task_type.clone(),
                 input,
                 parameters: HashMap::new(),
+                stream_tx: None,
             };
             self.tasks.push(task);
         }
@@ -483,6 +484,7 @@ mod tests {
                 task_type: TaskType::LlmChat,
                 input: format!("input-{}", i),
                 parameters: HashMap::new(),
+                stream_tx: None,
             })
             .collect();
 

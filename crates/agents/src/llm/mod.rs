@@ -118,7 +118,6 @@ pub mod types;
 // Re-export main types
 pub use adapter::{LLMClientAdapter, LegacyLLMClientBuilder};
 pub use client::{ClientMetrics, LLMClient, LLMClientBuilder, ToolHandler};
-pub use skill_tool_handler::SkillToolHandler;
 // ARCHITECTURE FIX: Re-export failover types
 pub use failover::{FailoverConfig, FailoverProvider, FailoverProviderBuilder};
 pub use http_client::{LLMHttpClient, OpenAIRequestBuilder, ProviderConfig, ProviderInitParams};
@@ -136,6 +135,7 @@ pub use providers::{
     GeminiProvider, KimiConfig, KimiProvider, OllamaConfig, OllamaProvider, OpenAIConfig,
     OpenAIProvider, ProviderFactory, QwenConfig, QwenProvider, ZhipuConfig, ZhipuProvider,
 };
+pub use skill_tool_handler::SkillToolHandler;
 pub use traits::{
     ContextManager, LLMProvider, MetricsCollector, ModelCapabilities, ModelInfo,
     ProviderCapabilities, RetryPolicy, ToolExecutor,
