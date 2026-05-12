@@ -159,6 +159,13 @@ pub fn WebchatPage() -> impl IntoView {
         }
         let session_id = session_id.unwrap();
 
+        // 🆕 FIX: If a streaming reply is still in progress, finalize it before
+        // adding the new user message so the AI reply appears before the new
+        // user message in the list.
+        if chat_state_for_send.is_streaming.get() {
+            chat_state_for_send.finish_streaming();
+        }
+
         // 本地添加用户消息
         let user_message = ChatMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -357,8 +364,8 @@ pub fn WebchatPage() -> impl IntoView {
                     {move || view! {
                         <MessageList
                             messages=chat_state.current_messages.into()
-                            is_streaming=chat_state.is_streaming.get()
-                            streaming_content=chat_state.streaming_content.get()
+                            is_streaming=chat_state.is_streaming.into()
+                            streaming_content=chat_state.streaming_content.into()
                         />
                     }}
                     <MessageInput

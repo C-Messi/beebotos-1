@@ -199,7 +199,7 @@ pub fn use_websocket_chat() -> ReadSignal<WsConnectionStatus> {
                                 chat_state_msg.append_streaming_content(content);
                             }
                             if json.get("finished").and_then(|v| v.as_bool()) == Some(true) {
-                                chat_state_msg.is_streaming.set(false);
+                                chat_state_msg.finish_streaming();
                             }
                         }
                         _ => {}

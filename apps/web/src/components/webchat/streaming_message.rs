@@ -18,9 +18,6 @@ pub fn StreamingMessage(
             <div class="message-avatar">"🤖"</div>
             <div class="message-content-wrapper">
                 <ContentRenderer content=content attachments=vec![] />
-                <div class="streaming-indicator">
-                    <span class="cursor">"▋"</span>
-                </div>
             </div>
         </div>
     }

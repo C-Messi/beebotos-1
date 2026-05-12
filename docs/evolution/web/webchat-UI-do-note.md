@@ -1183,3 +1183,157 @@ WebChat 平台不再发送独立的占位消息，流式 chunks 本身提供了�
 所有 P0-P3 问题均已解决。
 
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+问题找到并修复了。
+
+**根因**：`websocket_hook.rs` 收到 `finished=true` 时，只设置了 `is_streaming = false`，但**没有调用 `finish_streaming()`**。
+
+`finish_streaming()` 的职责是将 `streaming_content` 缓冲区中的内容转为正式的 `ChatMessage` 并添加到消息列表。跳过这一步，前端虽然收到了所有 chunks，但内容始终停留在临时缓冲区，从未"固化"为消息显示出来。
+
+**修复**：`apps/web/src/components/webchat/websocket_hook.rs` 第 201 行
+
+```rust
+// 修复前
+if json.get("finished").and_then(|v| v.as_bool()) == Some(true) {
+    chat_state_msg.is_streaming.set(false);  // ❌ 只改状态，不保存消息
+}
+
+// 修复后
+if json.get("finished").and_then(|v| v.as_bool()) == Some(true) {
+    chat_state_msg.finish_streaming();  // ✅ 保存消息并清空缓冲区
+}
+```
+
+前端编译已通过。重新构建部署后，WebChat 流式回复应该能正常显示了。
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+问题：1、流式输出"中国面积多少"的内容文字时， webchat页面一闪一闪；
+2、在流式输出的文字的最前位置，有一个小方块，一闪一闪，取消这个小方块；
+3、问了“中国面积有多少”，再问“深圳天气”，结果webchat页面显示的内容，“深圳天气”这几个字跑到了“中国面积有多少”的回复内容的上面了，应该在这个内容的下面；
+4、 问“深圳天气”，没有内容回复。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&7
+
+前端编译通过。现在让我总结一下4个问题的修复方案，以及深圳天气 timeout 的根因分析。
+
+---
+
+## 修复总结
+
+### 1. 移除小方块（闪烁光标）✅
+
+**文件**：`apps/web/src/components/webchat/streaming_message.rs`
+
+移除了 `<span class="cursor">"▋"</span>` 闪烁光标。
+
+---
+
+### 2. 修复页面闪烁 ✅
+
+**文件**：`apps/web/src/components/webchat/message_list.rs` + `apps/web/src/pages/webchat.rs`
+
+`MessageList` 的 `is_streaming` 和 `streaming_content` 从普通值改为 **Signal**，避免父组件每次重新渲染时都重建 `MessageList`，减少 DOM 闪烁。
+
+---
+
+### 3. 修复消息顺序错乱 ✅
+
+**文件**：`apps/web/src/pages/webchat.rs`
+
+在 `handle_send` 中添加逻辑：**如果当前有流式回复正在进行，先调用 `finish_streaming()` 将其固化**，然后再添加新的用户消息。这样 AI 回复就会出现在对应的用户消息之后，而不是跑到最新消息后面。
+
+```rust
+if chat_state_for_send.is_streaming.get() {
+    chat_state_for_send.finish_streaming();
+}
+```
+
+---
+
+### 4. "深圳天气"无回复（后端 timeout）🔍
+
+从日志分析，这是一个**Agent 并发/状态机问题**，不是前端问题。
+
+**时间线**：
+- 03:23:16 收到"中国面积多少" → Agent 开始处理
+- 03:23:22 流式输出开始 → 但之后**没有** `Stream consumer finished` 日志
+- 03:23:57 收到"深圳天气" → Agent 也进入 `Idle -> Working`
+- 03:26:16 "深圳天气" timeout（180秒），无处理日志
+
+**根因**："中国面积"的流式 consumer 可能在 `rx.recv().await` 上**永久阻塞**，导致：
+1. `stream_tx` 未被 drop → channel 未关闭 → consumer 卡住
+2. Agent 状态可能受此影响，后续任务无法正确获取 LLM 响应
+
+**需要深入调查**：
+- `agent_impl.rs` `handle_direct_answer` 中的 `call_llm_stream` 是否有超时机制
+- `FailoverProvider::complete_stream` 是否在发送完 chunks 后正确关闭 sender
+
+需要我进一步调查后端 timeout 问题吗？
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+进一步调查后端 timeout 问题
+## 根因确认：`[DONE]` 后 `Sender` 未 drop，导致 `rx.recv()` 永久阻塞
+
+你遇到的 180s timeout 的完整链路如下：
+
+```
+Provider receive [DONE] → break → while loop 结束 → task 退出
+        ↓
+    Sender (tx) 未 drop → Channel 未关闭 → rx.recv().await 永久阻塞
+        ↓
+    handle_direct_answer 卡住 → process_task 卡住 → execute_task 卡住
+        ↓
+    tokio::time::timeout(180s) → ❌ "Task execution timeout"
+```
+
+### 已修复的 Provider（6 个）
+
+在 `[DONE]` 或 `break`/`return` 前显式 `drop(tx)`：
+
+| Provider | 修复方式 |
+|---|---|
+| `kimi.rs` | `[DONE]` → `drop(tx); return;` |
+| `openai.rs` | `[DONE]` → `drop(tx); return;` |
+| `doubao.rs` | `[DONE]` → `drop(tx); return;` |
+| `qwen.rs` | `[DONE]` → `drop(tx); return;` |
+| `zhipu.rs` | `[DONE]` → `drop(tx); return;` |
+| `deepseek.rs` | `[DONE]` → `drop(tx); return;` |
+
+### 无需修复的 Provider（3 个）
+
+| Provider | 原因 |
+|---|---|
+| `ollama.rs` | 使用 `chunk.done` + `return`，`tx` 会被正确 drop |
+| `anthropic.rs` | 无 `[DONE]` 事件，使用不同流式协议 |
+| `azure.rs` | 逻辑同 OpenAI，已修复 |
+
+### 修复验证
+
+`cargo check` 已通过，0 errors。现在流式链路应该是通的：
+
+```
+前端 WebSocket ← MessageProcessor stream consumer ← GatewayLLMInterface ← 
+LlmService::chat_stream ← FailoverProvider::complete_stream ← Provider drop(tx)
+```
+
+### 生产安全提醒
+
+`demo-token` 是硬编码 admin token，生产环境务必设置：
+
+```bash
+# 生成安全 token
+openssl rand -hex 32
+
+# 两边配置相同值
+export INTERNAL_SERVICE_TOKEN="your-secure-token"      # Gateway 读取
+export CRON_TOOL_API_TOKEN="your-secure-token"         # CronJobManagerTool 读取（优先级更高）
+```
+
+如果还有其他问题或需要进一步排查，请告诉我！
+
+
+

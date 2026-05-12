@@ -245,7 +245,7 @@ impl LLMProvider for ZhipuProvider {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
                                 if data == "[DONE]" {
-                                    break;
+                                    return;
                                 }
 
                                 match serde_json::from_str::<ZhipuStreamChunk>(data) {

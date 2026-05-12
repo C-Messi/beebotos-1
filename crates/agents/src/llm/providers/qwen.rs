@@ -188,7 +188,7 @@ impl LLMProvider for QwenProvider {
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
                                 if data == "[DONE]" {
-                                    break;
+                                    return;
                                 }
                                 if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
                                     if tx.send(chunk).await.is_err() {

@@ -11,11 +11,11 @@ use crate::webchat::ChatMessage;
 #[component]
 pub fn MessageList(
     messages: Signal<Vec<ChatMessage>>,
-    #[prop(optional)] streaming_content: Option<String>,
-    #[prop(optional)] is_streaming: Option<bool>,
+    #[prop(default = Signal::derive(|| String::new()))]
+    streaming_content: Signal<String>,
+    #[prop(default = Signal::derive(|| false))]
+    is_streaming: Signal<bool>,
 ) -> impl IntoView {
-    let is_streaming = is_streaming.unwrap_or(false);
-
     view! {
         <div class="message-list">
             <For
@@ -28,12 +28,14 @@ pub fn MessageList(
                 }
             />
 
-            {if is_streaming {
-                view! {
-                    <StreamingMessage content=streaming_content.unwrap_or_default() />
-                }.into_any()
-            } else {
-                view! { <div /> }.into_any()
+            {move || {
+                if is_streaming.get() {
+                    view! {
+                        <StreamingMessage content=streaming_content.get() />
+                    }.into_any()
+                } else {
+                    view! { <div /> }.into_any()
+                }
             }}
         </div>
     }

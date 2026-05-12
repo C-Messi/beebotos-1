@@ -228,7 +228,7 @@ impl LLMProvider for OpenAIProvider {
                                 let data = &line[6..];
 
                                 if data == "[DONE]" {
-                                    break;
+                                    return;
                                 }
 
                                 match serde_json::from_str::<StreamChunk>(data) {
