@@ -5,12 +5,14 @@
 //! (e.g. ReAct loops).
 //!
 //! Usage:
-//! - Gateway calls `register(session_id, sender)` before spawning a background task.
-//!   It receives a generation token that must be passed to `unregister`.
+//! - Gateway calls `register(session_id, sender)` before spawning a background
+//!   task. It receives a generation token that must be passed to `unregister`.
 //! - Gateway calls `cancel(session_id)` when the user sends a stop command.
-//! - Agent calls `get_receiver(session_id)` inside its ReAct loop to check for cancellation.
-//! - Gateway calls `unregister(session_id, generation)` when the background task completes.
-//!   Only the task that owns the matching generation can remove the entry.
+//! - Agent calls `get_receiver(session_id)` inside its ReAct loop to check for
+//!   cancellation.
+//! - Gateway calls `unregister(session_id, generation)` when the background
+//!   task completes. Only the task that owns the matching generation can remove
+//!   the entry.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,7 +33,10 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 /// (the old task will no longer receive cancellation signals).
 pub async fn register(key: &str, sender: watch::Sender<bool>) -> u64 {
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
-    REGISTRY.write().await.insert(key.to_string(), (sender, generation));
+    REGISTRY
+        .write()
+        .await
+        .insert(key.to_string(), (sender, generation));
     generation
 }
 

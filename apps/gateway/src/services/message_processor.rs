@@ -942,6 +942,8 @@ impl MessageProcessor {
 
             // 🆕 STREAMING: For non-WebChat platforms, send the full reply directly.
             // For WebChat, the stream consumer task already sent chunks + finished=true.
+            // 🆕 FIX: If the task failed for WebChat, send the error message directly so
+            // the user isn't left hanging with an empty stream.
             if platform_bg != PlatformType::WebChat {
                 if let Err(e) = processor
                     .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
@@ -951,6 +953,13 @@ impl MessageProcessor {
                         "[BG] Failed to send reply (will be available for polling): {}",
                         e
                     );
+                }
+            } else if completion_result.is_err() {
+                if let Err(e) = processor
+                    .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
+                    .await
+                {
+                    warn!("[BG] Failed to send error reply to WebChat: {}", e);
                 }
             }
             // Mark as delivered for WebChat

@@ -2,7 +2,7 @@
 //!
 //! Executes "code-driven" skills (SKILL.md + .py/.js/.sh scripts) by
 //! loading the markdown document, listing available scripts, and
-//! delegating script execution to the ReAct executor.
+//! delegating script execution to the unified ReAct executor.
 //!
 //! 🟢 P1 OPTIMIZE: Single-shot command generation for simple requests
 //! avoids the expensive multi-turn ReAct loop (~60s → ~15s).
@@ -14,7 +14,6 @@ use tracing::{debug, info};
 
 use crate::communication::{LLMCallInterface, Message as CommMessage, PlatformType};
 use crate::error::AgentError;
-use crate::skills::react_executor::ReActExecutor;
 use crate::skills::tool_set::{default_tool_set, ProcessExecTool, SkillTool};
 
 /// Executor for code-based skills
@@ -97,25 +96,37 @@ impl CodeSkillExecutor {
             }
         }
 
-        // Fallback: full ReAct loop
+        // Fallback: unified ReAct loop
         // 🆕 FIX: Strip SKILL.md down to essential script usage to prevent LLM from
         // outputting skill self-introduction instead of executing the tool.
         let skill_instructions = extract_skill_usage(&skill_md);
+        let tools = default_tool_set(&skill_path);
+        let tools_prompt = crate::skills::general_react_prompt::build_general_react_prompt(&tools);
         let system_prompt = format!(
-            "You are the '{}' skill executor. Your ONLY job is to run the appropriate script to \
-             fulfill the user's request. Do NOT introduce yourself, describe your capabilities, \
-             or explain what you are.\n\n{scripts_info}\n\nWhen constructing commands, use the \
-             absolute skill directory path: {skill_dir_str}\n\nScript usage \
+            "{tools_prompt}\n\n## Code Skill Context\n\nYou are the '{}' skill executor. Your \
+             ONLY job is to run the appropriate script to fulfill the user's request. Do NOT \
+             introduce yourself, describe your capabilities, or explain what you \
+             are.\n\n{scripts_info}\n\nWhen constructing commands, use the absolute skill \
+             directory path: {skill_dir_str}\n\nScript usage \
              instructions:\n{skill_instructions}\n\nIMPORTANT: If the user has provided enough \
-             information, execute the script immediately using the process_exec tool. Do not ask \
-             follow-up questions unless critical information is missing.",
+             information, execute the script immediately using the process_exec tool via \
+             action=call_tool. Do not ask follow-up questions unless critical information is \
+             missing.",
             skill_path.file_name().unwrap_or_default().to_string_lossy(),
         );
 
-        let tools = default_tool_set(&skill_path);
-        let executor = ReActExecutor::new(self.llm.clone(), tools);
+        let executor = crate::skills::UnifiedReActExecutor::new(self.llm.clone()).with_config(
+            crate::skills::UnifiedReActConfig {
+                max_rounds: 6,
+                round_timeout_sec: 30,
+                enable_reflection: false,
+                require_structured_output: false,
+                cancel_rx: None,
+                stream_tx: None,
+            },
+        );
 
-        executor.execute(&system_prompt, user_input).await
+        executor.execute(&system_prompt, user_input, &tools).await
     }
 
     /// 🟢 P1 OPTIMIZE: Single-shot command generation.

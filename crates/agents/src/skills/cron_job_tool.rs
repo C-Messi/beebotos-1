@@ -5,7 +5,8 @@
 //!
 //! Authentication token priority:
 //! 1. `CRON_TOOL_API_TOKEN` environment variable (recommended for production)
-//! 2. `INTERNAL_SERVICE_TOKEN` environment variable (shared with other internal tools)
+//! 2. `INTERNAL_SERVICE_TOKEN` environment variable (shared with other internal
+//!    tools)
 //! 3. Fallback to `demo-token` (logs a warning — insecure in production)
 //!
 //! Supported actions: list, create, update, delete, run, history.
@@ -38,7 +39,8 @@ impl CronJobManagerTool {
         self
     }
 
-    /// Resolve auth token from environment (secure) or fallback to demo token (insecure).
+    /// Resolve auth token from environment (secure) or fallback to demo token
+    /// (insecure).
     fn resolve_auth_token() -> String {
         if let Ok(token) = std::env::var("CRON_TOOL_API_TOKEN") {
             if !token.is_empty() {
@@ -51,8 +53,8 @@ impl CronJobManagerTool {
             }
         }
         tracing::warn!(
-            "CronJobManagerTool: CRON_TOOL_API_TOKEN and INTERNAL_SERVICE_TOKEN not set. \
-             Falling back to hard-coded demo-token. This is INSECURE in production!"
+            "CronJobManagerTool: CRON_TOOL_API_TOKEN and INTERNAL_SERVICE_TOKEN not set. Falling \
+             back to hard-coded demo-token. This is INSECURE in production!"
         );
         DEMO_TOKEN.to_string()
     }
@@ -104,9 +106,9 @@ impl SkillTool for CronJobManagerTool {
     }
 
     fn description(&self) -> &str {
-        "Manage scheduled cron jobs via Gateway HTTP API. \
-         Actions: list (all jobs), create (new job), update (modify job), \
-         delete (remove job), run (trigger immediately), history (execution logs)."
+        "Manage scheduled cron jobs via Gateway HTTP API. Actions: list (all jobs), create (new \
+         job), update (modify job), delete (remove job), run (trigger immediately), history \
+         (execution logs)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -174,7 +176,9 @@ impl SkillTool for CronJobManagerTool {
     }
 
     async fn execute(&self, params: &Value) -> Result<String, String> {
-        let action = params["action"].as_str().ok_or("Missing 'action' parameter")?;
+        let action = params["action"]
+            .as_str()
+            .ok_or("Missing 'action' parameter")?;
         match action {
             "list" => self.list_jobs().await,
             "create" => self.create_job(params).await,
@@ -232,13 +236,15 @@ impl CronJobManagerTool {
     /// Update merges provided fields with current job values, then sends a
     /// complete `CronJobRequest` so the backend deserialization succeeds.
     async fn update_job(&self, params: &Value) -> Result<String, String> {
-        let id = params["id"]
-            .as_str()
-            .ok_or("'id' is required for update")?;
+        let id = params["id"].as_str().ok_or("'id' is required for update")?;
 
         // 1. Fetch current job
         let current_json = self
-            .request(reqwest::Method::GET, &format!("/api/v1/cron/jobs/{}", id), None)
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/v1/cron/jobs/{}", id),
+                None,
+            )
             .await?;
         let current: Value = serde_json::from_str(&current_json)
             .map_err(|e| format!("Failed to parse current job: {}", e))?;
@@ -319,9 +325,7 @@ impl CronJobManagerTool {
     }
 
     async fn delete_job(&self, params: &Value) -> Result<String, String> {
-        let id = params["id"]
-            .as_str()
-            .ok_or("'id' is required for delete")?;
+        let id = params["id"].as_str().ok_or("'id' is required for delete")?;
         self.request(
             reqwest::Method::DELETE,
             &format!("/api/v1/cron/jobs/{}", id),
@@ -331,9 +335,7 @@ impl CronJobManagerTool {
     }
 
     async fn run_job(&self, params: &Value) -> Result<String, String> {
-        let id = params["id"]
-            .as_str()
-            .ok_or("'id' is required for run")?;
+        let id = params["id"].as_str().ok_or("'id' is required for run")?;
         self.request(
             reqwest::Method::POST,
             &format!("/api/v1/cron/jobs/{}/run", id),

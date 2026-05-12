@@ -89,6 +89,19 @@ pub struct ParsedReActResponse {
 pub struct UnifiedReActExecutor {
     llm: Arc<dyn LLMCallInterface>,
     config: UnifiedReActConfig,
+    tool_dispatcher: Option<Arc<dyn ToolDispatcher>>,
+}
+
+/// Optional host-side dispatcher for tools that need Agent-level services
+/// (for example `skill_call`, which needs the skill registry, MCP manager,
+/// approval gate, and pending form state).
+#[async_trait::async_trait]
+pub trait ToolDispatcher: Send + Sync {
+    async fn dispatch(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, String>;
 }
 
 impl UnifiedReActExecutor {
@@ -96,11 +109,17 @@ impl UnifiedReActExecutor {
         Self {
             llm,
             config: UnifiedReActConfig::default(),
+            tool_dispatcher: None,
         }
     }
 
     pub fn with_config(mut self, config: UnifiedReActConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    pub fn with_tool_dispatcher(mut self, dispatcher: Arc<dyn ToolDispatcher>) -> Self {
+        self.tool_dispatcher = Some(dispatcher);
         self
     }
 
@@ -248,33 +267,12 @@ impl UnifiedReActExecutor {
                         )
                     } else {
                         // Execute the tool
-                        match available_tools.get(&tool_name) {
-                            Some(tool) => {
-                                let params = serde_json::Value::Object(arguments.clone());
-                                match tool.execute(&params).await {
-                                    Ok(result) => {
-                                        if result.len() > 4000 {
-                                            format!(
-                                                "{}...[truncated {} chars]",
-                                                &result[..4000],
-                                                result.len() - 4000
-                                            )
-                                        } else {
-                                            result
-                                        }
-                                    }
-                                    Err(e) => {
-                                        format!("[Error] Tool execution failed: {}", e)
-                                    }
-                                }
-                            }
-                            None => {
-                                let available: Vec<_> = available_tools.keys().cloned().collect();
-                                format!(
-                                    "[Error] Tool '{}' not found. Available tools: {:?}",
-                                    tool_name, available
-                                )
-                            }
+                        match self
+                            .execute_tool(&tool_name, arguments.clone(), available_tools)
+                            .await
+                        {
+                            Ok(result) => truncate_observation(result),
+                            Err(e) => format!("[Error] Tool execution failed: {}", e),
                         }
                     };
 
@@ -343,6 +341,26 @@ impl UnifiedReActExecutor {
                 }
 
                 ReActAction::FinalAnswer { content } => {
+                    let content = sanitize_final_answer(&content);
+                    if looks_like_internal_output(&content) {
+                        warn!(
+                            "Round {}: final_answer looked like internal process output; asking \
+                             LLM to retry",
+                            round
+                        );
+                        messages.push(CommMessage::new(
+                            uuid::Uuid::new_v4(),
+                            PlatformType::Custom,
+                            "[System] 你的 final_answer 包含思考过程、工具命令或内部 \
+                             JSON，不能直接发给用户。请重新输出严格 \
+                             JSON：{\"thought\":\"已整理结果\",\"action\":\"final_answer\",\"\
+                             content\":\"只包含给用户看的最终答复；如果尚未执行必要工具，请改为 \
+                             call_tool。\"}"
+                                .to_string(),
+                        ));
+                        continue;
+                    }
+
                     info!(
                         "ReAct loop terminated by LLM at round {}/{}, total_rounds: {}",
                         round,
@@ -392,7 +410,7 @@ impl UnifiedReActExecutor {
                  立即输出最终分析结论（final_answer），不允许再调用工具。",
                 self.config.max_rounds
             )
-                .to_string(),
+            .to_string(),
         ));
 
         let forced_response = self
@@ -429,10 +447,59 @@ impl UnifiedReActExecutor {
         Ok(final_content)
     }
 
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        available_tools: &HashMap<String, Box<dyn SkillTool>>,
+    ) -> Result<String, String> {
+        if let Some(tool) = available_tools.get(tool_name) {
+            let params = serde_json::Value::Object(arguments.clone());
+            match tool.execute(&params).await {
+                Ok(result) => return Ok(result),
+                Err(e)
+                    if matches!(tool_name, "skill_call" | "parallel_delegate")
+                        && self.tool_dispatcher.is_some() =>
+                {
+                    warn!(
+                        "Descriptor {} returned '{}'; falling back to external dispatcher",
+                        tool_name, e
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        } else if !matches!(tool_name, "skill_call" | "parallel_delegate") {
+            let available: Vec<_> = available_tools.keys().cloned().collect();
+            return Err(format!(
+                "Tool '{}' not found. Available tools: {:?}",
+                tool_name, available
+            ));
+        }
+
+        if matches!(tool_name, "skill_call" | "parallel_delegate") {
+            if let Some(dispatcher) = &self.tool_dispatcher {
+                return dispatcher.dispatch(tool_name, arguments).await;
+            }
+        }
+
+        let available: Vec<_> = available_tools.keys().cloned().collect();
+        Err(format!(
+            "Tool '{}' not found. Available tools: {:?}",
+            tool_name, available
+        ))
+    }
+
     /// Build the prompt for a specific round, including history
-    fn build_round_prompt(&self, rounds: &[ReActRound], _user_request: &str) -> String {
+    fn build_round_prompt(&self, rounds: &[ReActRound], user_request: &str) -> String {
         if rounds.is_empty() {
-            return "请输出你的思考过程和下一步行动（call_tool 或 final_answer）。".to_string();
+            return format!(
+                "用户请求：{}\n\n请只输出严格 JSON。\n- 如果需要外部信息或执行操作，输出 \
+                 action=call_tool，并选择一个真实可用的 tool_name。\n- \
+                 如果不需要工具即可回答，输出 action=final_answer。\n- final_answer.content \
+                 只能包含发给用户的最终答复，不要包含思考过程、当前状态分析、工具命令、JSON \
+                 字段说明或内部执行步骤。",
+                user_request
+            );
         }
 
         let mut history = String::new();
@@ -476,13 +543,17 @@ impl UnifiedReActExecutor {
         history.push_str("- 如果还需要更多数据：调用一个工具（call_tool）\n");
         history.push_str("- 如果数据已足够：输出最终分析（final_answer）\n");
         history.push_str("- 如果已达最大轮数限制：必须输出 final_answer\n\n");
-        history.push_str("请输出 JSON 格式。");
+        history.push_str(
+            "请输出 JSON 格式。final_answer.content 只能包含给用户看的最终答复，不要泄漏 \
+             thought、工具命令或内部分析。",
+        );
 
         history
     }
 
     /// Build an answer when the loop is interrupted by user cancellation.
-    /// Summarizes the tools called and their observations into a natural-language reply.
+    /// Summarizes the tools called and their observations into a
+    /// natural-language reply.
     fn build_interrupted_answer(&self, rounds: &[ReActRound], _user_request: &str) -> String {
         if rounds.is_empty() {
             return "⏹️ 任务已中断，尚未开始执行。".to_string();
@@ -536,7 +607,8 @@ impl UnifiedReActExecutor {
         }
 
         lines.push("---".to_string());
-        lines.push("由于任务被中断，以上信息可能不完整。如需继续，请重新发送您的请求。".to_string());
+        lines
+            .push("由于任务被中断，以上信息可能不完整。如需继续，请重新发送您的请求。".to_string());
 
         lines.join("\n")
     }
@@ -603,7 +675,7 @@ pub fn parse_react_response(response: &str) -> Result<ParsedReActResponse, Strin
         }
         "final_answer" => {
             let content = match value.get("content") {
-                Some(v) => v.to_string(),
+                Some(v) => json_value_to_answer_content(v),
                 None => return Err("Missing 'content' field in final_answer".to_string()),
             };
 
@@ -613,6 +685,65 @@ pub fn parse_react_response(response: &str) -> Result<ParsedReActResponse, Strin
             })
         }
         _ => Err(format!("Unknown action: '{}'", action)),
+    }
+}
+
+fn json_value_to_answer_content(value: &serde_json::Value) -> String {
+    if let Some(s) = value.as_str() {
+        return s.to_string();
+    }
+
+    for key in ["answer", "summary", "result", "message", "content"] {
+        if let Some(s) = value.get(key).and_then(|v| v.as_str()) {
+            return s.to_string();
+        }
+    }
+
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn sanitize_final_answer(content: &str) -> String {
+    let trimmed = content.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return json_value_to_answer_content(&value).trim().to_string();
+    }
+    trimmed.to_string()
+}
+
+fn looks_like_internal_output(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let lower = trimmed.to_lowercase();
+    let internal_markers = [
+        "\"action\"",
+        "\"thought\"",
+        "action:",
+        "thought:",
+        "tool_name",
+        "arguments",
+        "当前状态分析",
+        "思考过程",
+        "系统提示要求",
+        "尚未收到具体的执行任务",
+        "agent-browser ",
+        "```json",
+    ];
+
+    internal_markers.iter().any(|marker| lower.contains(marker))
+}
+
+fn truncate_observation(result: String) -> String {
+    if result.len() > 4000 {
+        format!(
+            "{}...[truncated {} chars]",
+            &result[..4000],
+            result.len() - 4000
+        )
+    } else {
+        result
     }
 }
 
@@ -720,7 +851,7 @@ More text"#;
         let parsed = parse_react_response(text).unwrap();
         match parsed.action {
             ReActAction::FinalAnswer { content } => {
-                assert_eq!(content, "\"result\"");
+                assert_eq!(content, "result");
             }
             _ => panic!("Expected FinalAnswer"),
         }

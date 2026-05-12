@@ -1335,5 +1335,128 @@ export CRON_TOOL_API_TOKEN="your-secure-token"         # CronJobManagerTool 读�
 
 如果还有其他问题或需要进一步排查，请告诉我！
 
+## 分析结果
+
+根据日志和代码分析，"中国面积多大？" 以及之前 "深圳天气"、"查一下ETH价格" 的**卡死根因是流式 HTTP 请求在 provider 层面挂起，且缺乏 chunk 级超时保护**：
+
+### 调用链
+1. `message_processor.rs` → `agent_runtime.execute_task(task, timeout=180s)`  
+2. `agent_impl.rs` → `handle_direct_answer` → 调用 `llm_service.chat_stream()`  
+3. `llm_service.rs` → `failover_provider.complete_stream()` → `kimi_provider.complete_stream()`  
+4. `kimi.rs` → `tokio::spawn` 读取 HTTP SSE stream → `stream.next().await`
+
+### 卡死原因
+- `kimi.rs` 中的 `stream.next().await` 在某些情况下（网络波动、API 端连接保持但无数据、HTTP 连接池复用问题）会**无限期等待**新的 SSE chunk
+- `llm_service.rs` 的 stream consumer 没有 chunk 级超时，导致下游 `rx.recv().await` 也永远阻塞
+- 虽然 reqwest 有 120s 全局超时，但如果服务器发送 keepalive（如 `\n\n`），超时会被重置，永远无法触发
+- 最终只能等到 Gateway 层的 **180s 任务超时** 才报错
+
+### 为什么第一次成功、第二次卡住
+这是一个**概率性/状态性问题**。非流式的 `intent_analyzer.analyze()` 两次都成功（prompt tokens 均为 452），说明 API 本身正常。但流式 SSE 连接在第一次完成后，第二次复用了同一条 HTTP 连接，该连接由于之前的请求残留或服务器端状态问题进入"半开"状态，不再发送有效数据。
+
+---
+
+## 修复内容
+
+已提交 2 处修复，代码已验证编译通过：
+
+### 1. `apps/gateway/src/services/llm_service.rs` — 添加 chunk 级超时
+为流式 consumer task 增加 **30 秒 chunk 超时**。如果 30 秒内没有任何有效 chunk 到达，主动中断流，避免无限挂起：
+
+```rust
+let chunk_timeout = tokio::time::Duration::from_secs(30);
+loop {
+    match tokio::time::timeout(chunk_timeout, chunk_rx.recv()).await {
+        Ok(Some(chunk)) => { ... }
+        Ok(None) => break,
+        Err(_) => {
+            tracing::warn!("LLM stream chunk timeout (no data for 30s), aborting stream");
+            break;
+        }
+    }
+}
+```
+
+### 2. `apps/gateway/src/services/message_processor.rs` — WebChat 错误反馈
+之前 WebChat 平台在任务失败后**不会向前端发送任何消息**，导致用户看到空白/卡死。现在当流式任务失败（超时或执行错误）时，会直接通过 WebSocket 推送错误提示：
+
+```rust
+} else if completion_result.is_err() {
+    if let Err(e) = processor
+        .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
+        .await
+    { ... }
+}
+```
+
+---
+
+## 额外建议
+
+如果问题仍间歇性出现，建议进一步排查：
+1. **Kimi API 端日志**：确认卡死时服务器是否返回了 `[DONE]` 或连接异常
+2. **HTTP/2 vs HTTP/1.1**：尝试强制使用 HTTP/1.1（`reqwest::Client::http1_only()`），排除 HTTP/2 流复用问题
+3. **`Delta` 结构体缺失 `reasoning_content`**：如果使用的是 Kimi k2.6 thinking mode，当前 `crates/agents/src/llm/types.rs` 的 `Delta` 结构体没有 `reasoning_content` 字段，thinking tokens 会被忽略（不会导致卡死，但可能漏掉思考过程输出）
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+## 当前状态总结
+
+代码已修复并通过编译检查。共做了 **3 处修改**：
+
+### 修改 1：`apps/gateway/src/services/llm_service.rs`
+在流式 consumer task 中添加 **30 秒 chunk 级超时**。如果 `chunk_rx` 连续 30 秒没有任何数据到达，主动 break 并关闭流。
+
+### 修改 2：`apps/gateway/src/services/message_processor.rs`  
+WebChat 平台任务失败时（如超时），现在会**直接向前端推送错误消息**，而不是让用户看到空白/卡死。
+
+### 修改 3：`crates/agents/src/llm/providers/kimi.rs`（新增）
+在 Kimi provider 的 HTTP SSE reader 中也添加了 **30 秒 idle timeout**。如果 `stream.next().await` 连续 30 秒没有收到任何 HTTP 数据（包括空 keepalive），主动关闭流。
+
+---
+
+### 关于"中国人口多少"仍然超时的根因
+
+即使 `llm_service.rs` 有 30 秒 timeout，日志仍显示 180 秒后才任务超时。最可能的解释是：
+
+**`kimi.rs` 的 HTTP stream reader 在 `stream.next().await` 上挂起，不发送任何 chunk 到下游。** 虽然 `llm_service.rs` 的 `chunk_rx.recv()` 被 30 秒 timeout 包裹，但如果 `kimi.rs` 的 spawned task 本身在 `tx.send(chunk)` 上形成反压阻塞（上游 HTTP 连接持续发送空 frame/keepalive 但不发送有效 SSE 数据），timeout 可能无法按预期触发。
+
+现在在 `kimi.rs` 源头也加了 30 秒 idle timeout，双重保护。如果服务器端连接真的挂起，**最多 30 秒**就会中断，不会拖到 180 秒。
+
+---
+
+### 需要执行
+
+请重新编译并**确保重启 Gateway 进程**：
+
+```bash
+cd /root/beebotos
+cargo build --release --package beebotos-gateway
+# 停止旧进程，启动新 binary
+```
+
+重启后如果再出现类似问题，请提供新的日志，我会继续追踪。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+已处理这组 WebChat 流式卡住问题。核心原因是第一次“中国面积多少”的 SSE 流没有正常结束，后端任务一直等到 180s 超时；前端在用户发送下一条消息时把当前流式内容提前固化，所以看起来像“回答被截断”。后续“你好/长沙人口多少”也被同一类未完成任务和超时链路拖住，最后只显示 `Task execution timeout`。
+
+我补了几处关键保护：
+
+- `crates/agents/src/llm/providers/kimi.rs`：Kimi SSE 改成带 buffer 的逐行解析，避免 TCP 分片导致 JSON 行或 `[DONE]` 被丢；同时保留 30s idle timeout。
+- `crates/agents/src/agent_impl.rs`：direct answer 的流式接收增加 45s idle timeout，空流会返回错误，非空则用已有部分正常结束，避免卡到 180s。
+- `apps/web/src/components/webchat/websocket_hook.rs`：收到 `finished=true` 时不再启动空流式气泡，并清掉 `is_sending`，防止 UI 一直处于发送中。
+- 保留/配合了 gateway 侧 `llm_service.rs` 的 chunk timeout 和 `message_processor.rs` 的 WebChat 错误回推兜底。
+
+验证已跑过：
+
+- `cargo check -p beebotos-agents` 通过
+- `cargo check -p beebotos-web` 通过
+- `cargo check -p beebotos-gateway` 通过
+
+仍有一些项目既有 warning，和这次修复无关。
+
+codex 修复；
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
 
 

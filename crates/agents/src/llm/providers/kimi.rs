@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::llm::http_client::{LLMHttpClient, OpenAIRequestBuilder, ProviderConfig};
 use crate::llm::traits::*;
@@ -387,35 +387,67 @@ impl LLMProvider for KimiProvider {
         let mut stream = response.bytes_stream();
 
         tokio::spawn(async move {
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(bytes) => {
-                        let text = String::from_utf8_lossy(&bytes);
+            let idle_timeout = std::time::Duration::from_secs(30);
+            let mut buffer = String::new();
+            loop {
+                match tokio::time::timeout(idle_timeout, stream.next()).await {
+                    Ok(Some(chunk_result)) => match chunk_result {
+                        Ok(bytes) => {
+                            let text = String::from_utf8_lossy(&bytes);
+                            let mut sent_any = false;
+                            buffer.push_str(&text);
 
-                        for line in text.lines() {
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
+                            while let Some(newline) = buffer.find('\n') {
+                                let line: String = buffer.drain(..=newline).collect();
+                                let line = line.trim_end_matches(['\r', '\n']);
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    let data = data.trim();
 
-                                if data == "[DONE]" {
-                                    return;
-                                }
-
-                                match serde_json::from_str::<StreamChunk>(data) {
-                                    Ok(chunk) => {
-                                        if tx.send(chunk).await.is_err() {
-                                            return;
-                                        }
+                                    if data == "[DONE]" {
+                                        return;
                                     }
-                                    Err(e) => {
-                                        trace!("Failed to parse chunk: {}", e);
+
+                                    match serde_json::from_str::<StreamChunk>(data) {
+                                        Ok(chunk) => {
+                                            sent_any = true;
+                                            if tx.send(chunk).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            trace!("Failed to parse chunk: {}", e);
+                                        }
                                     }
                                 }
                             }
+                            if !sent_any && bytes.is_empty() {
+                                trace!("Kimi stream received empty bytes chunk");
+                            }
                         }
-                    }
-                    Err(e) => {
-                        error!("Stream error: {}", e);
+                        Err(e) => {
+                            error!("Stream error: {}", e);
+                            break;
+                        }
+                    },
+                    Ok(None) => break,
+                    Err(_) => {
+                        warn!("Kimi stream idle timeout (no data for 30s), closing stream");
                         break;
+                    }
+                }
+            }
+
+            let remaining = buffer.trim();
+            if let Some(data) = remaining.strip_prefix("data: ") {
+                let data = data.trim();
+                if data != "[DONE]" {
+                    match serde_json::from_str::<StreamChunk>(data) {
+                        Ok(chunk) => {
+                            let _ = tx.send(chunk).await;
+                        }
+                        Err(e) => {
+                            trace!("Failed to parse trailing stream chunk: {}", e);
+                        }
                     }
                 }
             }

@@ -502,6 +502,100 @@ impl SkillTool for SkillCallTool {
     }
 }
 
+/// Descriptor-only skill_call tool for executors that handle skill dispatch
+/// through an external callback.
+pub struct SkillCallDescriptorTool;
+
+#[async_trait::async_trait]
+impl SkillTool for SkillCallDescriptorTool {
+    fn name(&self) -> &str {
+        "skill_call"
+    }
+
+    fn description(&self) -> &str {
+        "Call a registered BeeBotOS skill or MCP skill by ID. Use this for app/domain abilities \
+         such as weather, crypto/stock market data, account/position queries, and order placement. \
+         Common skill_id examples: mcp:alpaca/get_crypto_latest_quote, \
+         mcp:alpaca/get_crypto_snapshot, mcp:alpaca/place_crypto_order. Parameters: skill_id \
+         (string), input (string, optional), params (object, optional)."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "skill_id": { "type": "string", "description": "Registered skill ID, e.g. mcp:alpaca/get_crypto_latest_quote" },
+                "input": { "type": "string", "description": "Natural-language or JSON input for the skill" },
+                "params": { "type": "object", "description": "Optional structured parameters for the skill" }
+            },
+            "required": ["skill_id"]
+        })
+    }
+
+    async fn execute(&self, _params: &Value) -> Result<String, String> {
+        Err("skill_call requires an external skill dispatcher".to_string())
+    }
+}
+
+/// Descriptor-only parallel_delegate tool for executors that dispatch branch
+/// work through Agent-level services.
+pub struct ParallelDelegateDescriptorTool;
+
+#[async_trait::async_trait]
+impl SkillTool for ParallelDelegateDescriptorTool {
+    fn name(&self) -> &str {
+        "parallel_delegate"
+    }
+
+    fn description(&self) -> &str {
+        "Run independent subtasks in parallel and merge their results. Use this when a task has \
+         separate branches such as market data, account/position checks, web research, or risk \
+         checks that can be executed concurrently. Each branch may either call a specific skill \
+         with skill_id/input/params or run as a natural-language subtask. Parameters: branches \
+         (array of {id, task, skill_id?, input?, params?}), merge_strategy \
+         (concat|json_merge|summarize, optional), max_concurrency (integer, optional)."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "branches": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "Stable branch identifier, e.g. market, risk, news" },
+                            "task": { "type": "string", "description": "Natural-language subtask for this branch" },
+                            "skill_id": { "type": "string", "description": "Optional registered skill or MCP skill ID for this branch" },
+                            "input": { "type": "string", "description": "Optional skill input; defaults to task" },
+                            "params": { "type": "object", "description": "Optional structured skill parameters" }
+                        },
+                        "required": ["id", "task"]
+                    },
+                    "minItems": 1
+                },
+                "merge_strategy": {
+                    "type": "string",
+                    "enum": ["concat", "json_merge", "summarize"],
+                    "description": "How to merge branch results"
+                },
+                "max_concurrency": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5,
+                    "description": "Maximum branches to run concurrently"
+                }
+            },
+            "required": ["branches"]
+        })
+    }
+
+    async fn execute(&self, _params: &Value) -> Result<String, String> {
+        Err("parallel_delegate requires an external tool dispatcher".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

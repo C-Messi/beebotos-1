@@ -191,15 +191,18 @@ pub fn use_websocket_chat() -> ReadSignal<WsConnectionStatus> {
                             }
                         }
                         Some("chat_stream") => {
-                            // 🆕 FIX: Start streaming on first chunk if not already started
-                            if chat_state_msg.is_streaming.get() == false {
-                                chat_state_msg.start_streaming();
-                            }
-                            if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
-                                chat_state_msg.append_streaming_content(content);
-                            }
                             if json.get("finished").and_then(|v| v.as_bool()) == Some(true) {
                                 chat_state_msg.finish_streaming();
+                                chat_state_msg.is_sending.set(false);
+                                return;
+                            }
+                            if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
+                                if !content.is_empty() {
+                                    if chat_state_msg.is_streaming.get() == false {
+                                        chat_state_msg.start_streaming();
+                                    }
+                                    chat_state_msg.append_streaming_content(content);
+                                }
                             }
                         }
                         _ => {}

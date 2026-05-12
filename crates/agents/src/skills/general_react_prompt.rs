@@ -61,6 +61,10 @@ pub fn build_general_react_prompt(available_tools: &HashMap<String, Box<dyn Skil
 5. 数据新鲜度：关注工具返回的时间戳，stale 数据（>5分钟）在报告中标注。
 6. 最多 30 轮：你可以在 1-30 轮之间的任意时刻终止，由你判断何时足够。
 7. 禁止过度思考：不要进行没有必要的额外工具调用。如果用户问题简单，1-2 轮即可结束。
+8. 需要实时数据或外部执行时必须调用工具，不要用 final_answer 伪造已经搜索、查询、下单或查看持仓。
+9. 遇到天气、行情、账户、持仓、下单、定时任务、系统能力等 BeeBotOS/业务能力时，优先调用 `skill_call`，用 `skill_id` 指定注册技能或 MCP 技能。
+10. 如果任务包含多个相互独立的分支（例如同时查询行情、检查账户/持仓、搜索新闻、评估风险），优先调用 `parallel_delegate`，把每个分支写成 branches 中的一项，拿到合并结果后再输出最终答复。
+11. final_answer.content 只能写给用户看的最终答复。禁止包含 thought、action、tool_name、arguments、工具命令、当前状态分析或内部执行过程。
 "#,
         tools_desc = tools_desc
     )

@@ -702,14 +702,26 @@ impl LlmService {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<String>(100);
         tokio::spawn(async move {
-            while let Some(chunk) = chunk_rx.recv().await {
-                if let Some(content) = chunk.content() {
-                    if !content.is_empty() && tx.send(content.to_string()).await.is_err() {
+            let chunk_timeout = tokio::time::Duration::from_secs(30);
+            loop {
+                match tokio::time::timeout(chunk_timeout, chunk_rx.recv()).await {
+                    Ok(Some(chunk)) => {
+                        if let Some(content) = chunk.content() {
+                            if !content.is_empty() && tx.send(content.to_string()).await.is_err() {
+                                break;
+                            }
+                        }
+                        if chunk.finish_reason().is_some() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            "LLM stream chunk timeout (no data for 30s), aborting stream"
+                        );
                         break;
                     }
-                }
-                if chunk.finish_reason().is_some() {
-                    break;
                 }
             }
         });

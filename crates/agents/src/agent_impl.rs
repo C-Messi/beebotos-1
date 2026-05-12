@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
-use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 use crate::device::{AppLifecycle, Device, DeviceAutomation};
@@ -97,6 +96,385 @@ pub struct Agent {
     pub(crate) llm_client: Option<Arc<crate::llm::LLMClient>>,
 }
 
+struct AgentSkillDispatcher {
+    skill_registry: Option<Arc<skills::SkillRegistry>>,
+    mcp_manager: Option<Arc<mcp::MCPManager>>,
+    llm_interface: Option<Arc<dyn communication::LLMCallInterface>>,
+    approval_gate: Option<crate::security::ApprovalGate>,
+    pending_approvals: Arc<RwLock<HashMap<String, crate::security::ApprovalRequest>>>,
+    pending_parameter_forms: Arc<RwLock<HashMap<String, crate::skills::PendingParameterForm>>>,
+    skip_approval: bool,
+    llm_response_cache: Arc<RwLock<HashMap<String, (String, Instant)>>>,
+    current_plan_goal: Arc<RwLock<Option<String>>>,
+    skill_catalog: Option<String>,
+    tool_work_dir: std::path::PathBuf,
+    llm_client: Option<Arc<crate::llm::LLMClient>>,
+}
+
+#[async_trait::async_trait]
+impl crate::skills::ToolDispatcher for AgentSkillDispatcher {
+    async fn dispatch(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, String> {
+        match tool_name {
+            "skill_call" => {
+                let agent = self.as_agent();
+                agent.execute_skill_call_from_react(arguments).await
+            }
+            "parallel_delegate" => self.execute_parallel_delegate(arguments).await,
+            other => Err(format!("ToolDispatcher cannot handle '{}'", other)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParallelDelegateBranch {
+    id: String,
+    task: String,
+    skill_id: Option<String>,
+    input: Option<String>,
+    params: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone)]
+struct ParallelDelegateBranchResult {
+    id: String,
+    task: String,
+    result: Result<String, String>,
+}
+
+impl AgentSkillDispatcher {
+    fn from_agent(agent: &Agent) -> Self {
+        Self {
+            skill_registry: agent.skill_registry.clone(),
+            mcp_manager: agent.mcp_manager.clone(),
+            llm_interface: agent.llm_interface.clone(),
+            approval_gate: agent.approval_gate.clone(),
+            pending_approvals: agent.pending_approvals.clone(),
+            pending_parameter_forms: agent.pending_parameter_forms.clone(),
+            skip_approval: agent
+                .skip_approval
+                .load(std::sync::atomic::Ordering::SeqCst),
+            llm_response_cache: agent.llm_response_cache.clone(),
+            current_plan_goal: agent.current_plan_goal.clone(),
+            skill_catalog: agent.skill_catalog.clone(),
+            tool_work_dir: agent.tool_work_dir.clone(),
+            llm_client: agent.llm_client.clone(),
+        }
+    }
+
+    fn as_agent(&self) -> Agent {
+        Agent {
+            config: AgentConfig::default(),
+            a2a_client: None,
+            mcp_manager: self.mcp_manager.clone(),
+            outbound_router: None,
+            message_rx: None,
+            queue_manager: None,
+            skill_registry: self.skill_registry.clone(),
+            llm_interface: self.llm_interface.clone(),
+            state: state_manager::AgentState::Registered,
+            wallet: None,
+            event_bus: None,
+            kernel: None,
+            planning_engine: None,
+            plan_executor: None,
+            replanner: None,
+            active_plans: Arc::new(RwLock::new(HashMap::new())),
+            device: None,
+            memory_system: None,
+            llm_response_cache: self.llm_response_cache.clone(),
+            current_plan_goal: self.current_plan_goal.clone(),
+            skill_catalog: self.skill_catalog.clone(),
+            workflow_registry: None,
+            intent_engine: None,
+            llm_intent_analyzer: None,
+            skill_selector: None,
+            trace_store: None,
+            approval_gate: self.approval_gate.clone(),
+            pending_approvals: self.pending_approvals.clone(),
+            pending_parameter_forms: self.pending_parameter_forms.clone(),
+            skip_approval: std::sync::atomic::AtomicBool::new(self.skip_approval),
+            prompt_cache: None,
+            max_rounds: 10,
+            skill_feedback_collector: None,
+            evolution_scheduler: None,
+            system_info_provider: None,
+            tool_work_dir: self.tool_work_dir.clone(),
+            llm_client: self.llm_client.clone(),
+        }
+    }
+
+    async fn execute_parallel_delegate(
+        &self,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, String> {
+        let branches = self.parse_parallel_delegate_branches(&arguments)?;
+        let merge_strategy = arguments
+            .get("merge_strategy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("summarize")
+            .to_ascii_lowercase();
+        let max_concurrency = arguments
+            .get("max_concurrency")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3)
+            .clamp(1, 5) as usize;
+
+        info!(
+            "parallel_delegate: executing {} branches with max_concurrency={} merge_strategy={}",
+            branches.len(),
+            max_concurrency,
+            merge_strategy
+        );
+
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrency));
+        let mut handles = Vec::with_capacity(branches.len());
+        for branch in branches {
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|e| format!("parallel_delegate semaphore closed: {}", e))?;
+            let dispatcher = self.clone_for_parallel_branch();
+            handles.push(tokio::spawn(async move {
+                let _permit = permit;
+                dispatcher.execute_parallel_delegate_branch(branch).await
+            }));
+        }
+
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.await {
+                Ok(result) => results.push(result),
+                Err(e) => results.push(ParallelDelegateBranchResult {
+                    id: "unknown".to_string(),
+                    task: "branch task panicked".to_string(),
+                    result: Err(format!("branch join error: {}", e)),
+                }),
+            }
+        }
+
+        self.merge_parallel_delegate_results(&merge_strategy, &results)
+            .await
+    }
+
+    fn parse_parallel_delegate_branches(
+        &self,
+        arguments: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Vec<ParallelDelegateBranch>, String> {
+        let values = arguments
+            .get("branches")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                "parallel_delegate missing required array parameter 'branches'".to_string()
+            })?;
+
+        if values.is_empty() {
+            return Err("parallel_delegate requires at least one branch".to_string());
+        }
+        if values.len() > 8 {
+            return Err("parallel_delegate supports at most 8 branches per call".to_string());
+        }
+
+        values
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                let obj = value
+                    .as_object()
+                    .ok_or_else(|| format!("branch {} must be an object", idx))?;
+                let id = obj
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("branch_{}", idx + 1));
+                let task = obj
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("branch '{}' missing required 'task'", id))?;
+
+                Ok(ParallelDelegateBranch {
+                    id,
+                    task,
+                    skill_id: obj
+                        .get("skill_id")
+                        .or_else(|| obj.get("skill"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    input: obj
+                        .get("input")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    params: obj.get("params").and_then(|v| v.as_object()).cloned(),
+                })
+            })
+            .collect()
+    }
+
+    fn clone_for_parallel_branch(&self) -> Self {
+        Self {
+            skill_registry: self.skill_registry.clone(),
+            mcp_manager: self.mcp_manager.clone(),
+            llm_interface: self.llm_interface.clone(),
+            approval_gate: self.approval_gate.clone(),
+            pending_approvals: self.pending_approvals.clone(),
+            pending_parameter_forms: self.pending_parameter_forms.clone(),
+            skip_approval: self.skip_approval,
+            llm_response_cache: self.llm_response_cache.clone(),
+            current_plan_goal: self.current_plan_goal.clone(),
+            skill_catalog: self.skill_catalog.clone(),
+            tool_work_dir: self.tool_work_dir.clone(),
+            llm_client: self.llm_client.clone(),
+        }
+    }
+
+    async fn execute_parallel_delegate_branch(
+        self,
+        branch: ParallelDelegateBranch,
+    ) -> ParallelDelegateBranchResult {
+        let mut config = AgentConfig::default();
+        config.name = format!("parallel-delegate-{}", branch.id);
+        config.description = format!("Parallel delegate branch for task: {}", branch.task);
+        config.capabilities = vec!["parallel_delegate_branch".to_string()];
+
+        let parent = self.as_agent();
+        let branch_agent = match parent.spawn_sub_agent(config) {
+            Ok(agent) => agent,
+            Err(e) => {
+                warn!(
+                    "parallel_delegate: failed to spawn branch agent '{}': {}; using shared agent \
+                     handle",
+                    branch.id, e
+                );
+                parent
+            }
+        };
+
+        let result = if let Some(skill_id) = &branch.skill_id {
+            let mut skill_args = serde_json::Map::new();
+            skill_args.insert(
+                "skill_id".to_string(),
+                serde_json::Value::String(skill_id.clone()),
+            );
+            skill_args.insert(
+                "input".to_string(),
+                serde_json::Value::String(
+                    branch.input.clone().unwrap_or_else(|| branch.task.clone()),
+                ),
+            );
+            if let Some(params) = branch.params.clone() {
+                skill_args.insert("params".to_string(), serde_json::Value::Object(params));
+            }
+            branch_agent.execute_skill_call_from_react(skill_args).await
+        } else {
+            call_parallel_delegate_llm_branch(&branch_agent, &branch.task).await
+        };
+
+        ParallelDelegateBranchResult {
+            id: branch.id,
+            task: branch.task,
+            result,
+        }
+    }
+
+    async fn merge_parallel_delegate_results(
+        &self,
+        merge_strategy: &str,
+        results: &[ParallelDelegateBranchResult],
+    ) -> Result<String, String> {
+        match merge_strategy {
+            "json_merge" => {
+                let merged = serde_json::Value::Object(
+                    results
+                        .iter()
+                        .map(|branch| {
+                            let value = match &branch.result {
+                                Ok(result) => serde_json::json!({
+                                    "task": branch.task,
+                                    "success": true,
+                                    "result": result,
+                                }),
+                                Err(error) => serde_json::json!({
+                                    "task": branch.task,
+                                    "success": false,
+                                    "error": error,
+                                }),
+                            };
+                            (branch.id.clone(), value)
+                        })
+                        .collect(),
+                );
+                Ok(merged.to_string())
+            }
+            "concat" => Ok(format_parallel_delegate_sections(results)),
+            "summarize" | "" => {
+                let sections = format_parallel_delegate_sections(results);
+                if self.llm_interface.is_none() {
+                    return Ok(sections);
+                }
+                let prompt = format!(
+                    "请把以下并行分支执行结果合并成一个简洁、面向用户的观察摘要。保留关键数字、\
+                     错误和需要后续处理的事项，不要编造未返回的数据。\n\n{}",
+                    sections
+                );
+                self.as_agent()
+                    .call_llm_prompt(
+                        prompt,
+                        Some("你负责合并并行任务结果，只输出摘要，不要输出内部过程。".to_string()),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                    .map(|s| s.trim().to_string())
+            }
+            other => Err(format!(
+                "Unsupported merge_strategy '{}'. Use concat, json_merge, or summarize.",
+                other
+            )),
+        }
+    }
+}
+
+fn format_parallel_delegate_sections(results: &[ParallelDelegateBranchResult]) -> String {
+    let mut lines = vec!["parallel_delegate results:".to_string()];
+    for branch in results {
+        lines.push(format!("\n## {}", branch.id));
+        lines.push(format!("task: {}", branch.task));
+        match &branch.result {
+            Ok(result) => {
+                lines.push("status: success".to_string());
+                lines.push(result.clone());
+            }
+            Err(error) => {
+                lines.push("status: error".to_string());
+                lines.push(error.clone());
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+async fn call_parallel_delegate_llm_branch(agent: &Agent, task: &str) -> Result<String, String> {
+    let system = "你是 BeeBotOS 通用 ReAct 的一个并行分支执行器。只完成当前分支任务，输出可用于主 \
+                  ReAct 合并的简洁结果；不要输出 thought/action/JSON 协议。";
+    agent
+        .call_llm_prompt(task.to_string(), Some(system.to_string()))
+        .await
+        .map_err(|e| e.to_string())
+        .map(|s| s.trim().to_string())
+}
+
 impl Agent {
     pub fn new(config: AgentConfig) -> Self {
         Self {
@@ -147,6 +525,57 @@ impl Agent {
             tool_work_dir: std::path::PathBuf::from("/data/workspace"),
             llm_client: None,
         }
+    }
+
+    async fn execute_skill_call_from_react(
+        &self,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, String> {
+        let skill_id = arguments
+            .get("skill_id")
+            .or_else(|| arguments.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "skill_call missing required parameter 'skill_id'".to_string())?;
+
+        let input = arguments
+            .get("input")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let mut fallback = arguments.clone();
+                fallback.remove("skill_id");
+                fallback.remove("id");
+                fallback.remove("params");
+                if fallback.is_empty() {
+                    String::new()
+                } else {
+                    serde_json::Value::Object(fallback).to_string()
+                }
+            });
+
+        let params = arguments
+            .get("params")
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| {
+                        if let Some(s) = v.as_str() {
+                            Some((k.clone(), s.to_string()))
+                        } else if v.is_null() {
+                            None
+                        } else {
+                            Some((k.clone(), v.to_string()))
+                        }
+                    })
+                    .collect::<HashMap<_, _>>()
+            });
+
+        let result = self
+            .execute_skill_by_id(skill_id, &input, params)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(self.synthesize_skill_output(&input, &result.output, skill_id))
     }
 
     /// Set the evolution scheduler
@@ -1682,14 +2111,17 @@ impl Agent {
 
             // Step 5: Route based on planning need
             // 🆕 ROUTING V3:
-            // - needs_planning=true  → General ReAct (multi-step, up to 30 rounds, cancellable)
-            // - needs_planning=false → Direct skill execution (single call, no LLM re-selection)
+            // - needs_planning=true  → General ReAct (multi-step, up to 30 rounds,
+            //   cancellable)
+            // - needs_planning=false → Direct skill execution (single call, no LLM
+            //   re-selection)
             // - no skill selected    → Direct answer fallback
             if selection.needs_planning || intent_v2.needs_planning {
                 self.execute_with_react(&task, &message_text, &intent_v2, &selection)
                     .await
             } else if let Some(ref skill_id) = selection.selected_skill {
-                self.execute_single_skill(&task, skill_id, &message_text).await
+                self.execute_single_skill(&task, skill_id, &message_text)
+                    .await
             } else {
                 self.handle_direct_answer(&task).await
             }
@@ -1717,7 +2149,9 @@ impl Agent {
         skill_id: &str,
         message_text: &str,
     ) -> Result<(String, Vec<Artifact>), AgentError> {
-        let result = self.execute_skill_by_id(skill_id, message_text, None).await?;
+        let result = self
+            .execute_skill_by_id(skill_id, message_text, None)
+            .await?;
         let output = self.synthesize_skill_output(message_text, &result.output, skill_id);
 
         // 🆕 STREAMING: If stream_tx is set, stream the formatted output in chunks
@@ -1741,7 +2175,8 @@ impl Agent {
     // =====================================================================
 
     /// Execute a task using the general-purpose ReAct executor.
-    /// Works for any multi-step task, not limited to crypto/investment analysis.
+    /// Works for any multi-step task, not limited to crypto/investment
+    /// analysis.
     async fn execute_with_react(
         &self,
         task: &Task,
@@ -1750,10 +2185,7 @@ impl Agent {
         _selection: &crate::skill_matching::SkillSelection,
     ) -> Result<(String, Vec<Artifact>), AgentError> {
         let task_id = task.id.clone();
-        info!(
-            "General ReAct: executing task {} (multi-step)",
-            task_id
-        );
+        info!("General ReAct: executing task {} (multi-step)", task_id);
 
         let llm = self
             .llm_interface
@@ -1761,22 +2193,28 @@ impl Agent {
             .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
 
         // 1. Load all available tools (not limited to crypto analysis tools)
-        let tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
+        let mut tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
+        tools.insert(
+            "skill_call".to_string(),
+            Box::new(crate::skills::SkillCallDescriptorTool),
+        );
+        tools.insert(
+            "parallel_delegate".to_string(),
+            Box::new(crate::skills::ParallelDelegateDescriptorTool),
+        );
 
         if tools.is_empty() {
-            warn!(
-                "General ReAct: no tools available, falling back to direct answer"
-            );
+            warn!("General ReAct: no tools available, falling back to direct answer");
             return Box::pin(self.handle_direct_answer(task)).await;
         }
 
         // 2. Build general ReAct system prompt
-        let system_prompt =
-            crate::skills::general_react_prompt::build_general_react_prompt(&tools);
+        let system_prompt = crate::skills::general_react_prompt::build_general_react_prompt(&tools);
 
         // 3. Get cancellation receiver from session registry
         // 🆕 FIX: Use db_session_id (injected by Gateway) as the cancel key to match
-        // the key used in session_cancellation::register. Fallback to session_id or task_id.
+        // the key used in session_cancellation::register. Fallback to session_id or
+        // task_id.
         let cancel_key = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
             json.get("db_session_id")
                 .and_then(|v| v.as_str())
@@ -1789,16 +2227,17 @@ impl Agent {
         let cancel_rx = crate::session_cancellation::get_receiver(&cancel_key).await;
 
         // 4. Execute ReAct loop
-        let executor = crate::skills::UnifiedReActExecutor::new(llm).with_config(
-            crate::skills::UnifiedReActConfig {
+        let skill_dispatcher = std::sync::Arc::new(AgentSkillDispatcher::from_agent(self));
+        let executor = crate::skills::UnifiedReActExecutor::new(llm)
+            .with_config(crate::skills::UnifiedReActConfig {
                 max_rounds: 30,
                 round_timeout_sec: 30,
                 enable_reflection: true,
                 require_structured_output: false,
                 cancel_rx,
                 stream_tx: task.stream_tx.clone(),
-            },
-        );
+            })
+            .with_tool_dispatcher(skill_dispatcher);
 
         let react_result = executor.execute(&system_prompt, message_text, &tools).await;
 
@@ -2480,9 +2919,31 @@ impl Agent {
                 .await
                 .map_err(|e| AgentError::Execution(format!("LLM stream failed: {}", e)))?;
             let mut full_response = String::new();
-            while let Some(chunk) = rx.recv().await {
-                full_response.push_str(&chunk);
-                let _ = stream_tx.send(chunk).await;
+            let idle_timeout = std::time::Duration::from_secs(45);
+            loop {
+                match tokio::time::timeout(idle_timeout, rx.recv()).await {
+                    Ok(Some(chunk)) => {
+                        full_response.push_str(&chunk);
+                        if stream_tx.send(chunk).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        warn!(
+                            "Direct answer stream idle timeout for task {}; finishing partial \
+                             response ({} chars)",
+                            task.id,
+                            full_response.chars().count()
+                        );
+                        break;
+                    }
+                }
+            }
+            if full_response.trim().is_empty() {
+                return Err(AgentError::Execution(
+                    "LLM stream ended without content".to_string(),
+                ));
             }
             return Ok((full_response, vec![]));
         }
@@ -4418,23 +4879,25 @@ impl Agent {
         raw_output: &str,
         skill_id: &str,
     ) -> String {
-        let trimmed = raw_output.trim();
+        let normalized = strip_successful_command_wrapper(raw_output)
+            .unwrap_or_else(|| raw_output.trim().to_string());
+        let trimmed = normalized.trim();
         let is_structured = trimmed.starts_with('{') || trimmed.starts_with('[');
 
         if !is_structured {
-            return raw_output.to_string();
+            return normalized;
         }
 
         // 🆕 FIX: Format known MCP skills with dedicated templates for zero-latency
         // output
-        if let Some(formatted) = format_known_skill_output(skill_id, raw_output) {
+        if let Some(formatted) = format_known_skill_output(skill_id, trimmed) {
             return formatted;
         }
 
         // Generic JSON fallback: flatten to readable key-value list
-        match format_generic_json(raw_output) {
+        match format_generic_json(trimmed) {
             Some(text) => text,
-            None => raw_output.to_string(),
+            None => normalized,
         }
     }
 
@@ -5818,8 +6281,8 @@ impl Agent {
             task.parameters.contains_key("multi_step") ||          // Explicit multi-step flag
             task.parameters.contains_key("dependencies") ||        // Has dependencies
             task.parameters.contains_key("plan") ||                // Explicit planning request
-            matches!(task.task_type, 
-                TaskType::PlanCreation | 
+            matches!(task.task_type,
+                TaskType::PlanCreation |
                 TaskType::PlanExecution |
                 TaskType::PlanAdaptation
             );
@@ -7545,6 +8008,7 @@ pub enum TaskComplexity {
 fn format_known_skill_output(skill_id: &str, raw_output: &str) -> Option<String> {
     match skill_id {
         "mcp:alpaca/get_crypto_latest_trade" => format_crypto_latest_trade(raw_output),
+        "mcp:alpaca/get_crypto_latest_quote" => format_crypto_latest_quote(raw_output),
         "mcp:alpaca/get_crypto_snapshot"
         | "mcp:alpaca/get_crypto_quote"
         | "mcp:alpaca/get_crypto_bars" => format_crypto_snapshot(raw_output),
@@ -7552,6 +8016,34 @@ fn format_known_skill_output(skill_id: &str, raw_output: &str) -> Option<String>
         | "mcp:alpaca/get_stock_quote"
         | "mcp:alpaca/get_stock_bars" => format_crypto_snapshot(raw_output),
         _ => None,
+    }
+}
+
+fn strip_successful_command_wrapper(raw_output: &str) -> Option<String> {
+    let trimmed = raw_output.trim();
+    let body = trimmed
+        .strip_prefix("Command executed successfully.")
+        .map(str::trim)
+        .unwrap_or(trimmed);
+
+    if !body.starts_with("✅ Exit code: 0") {
+        return None;
+    }
+
+    let stdout_marker = "STDOUT:";
+    let stdout_start = body.find(stdout_marker)? + stdout_marker.len();
+    let after_stdout = body[stdout_start..].trim_start_matches(['\r', '\n']);
+    let stdout = if let Some(stderr_pos) = after_stdout.find("\nSTDERR:") {
+        &after_stdout[..stderr_pos]
+    } else {
+        after_stdout
+    };
+
+    let stdout = stdout.trim();
+    if stdout.is_empty() {
+        None
+    } else {
+        Some(stdout.to_string())
     }
 }
 
@@ -7590,6 +8082,63 @@ fn format_crypto_latest_trade(raw_output: &str) -> Option<String> {
         return None;
     }
     Some(lines.join("\n"))
+}
+
+fn format_crypto_latest_quote(raw_output: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw_output).ok()?;
+    let quotes = v
+        .get("quotes")
+        .and_then(|q| q.as_object())
+        .or_else(|| v.as_object())?;
+
+    let mut lines = vec!["📈 最新加密货币报价".to_string()];
+    let mut any_data = false;
+
+    for (symbol, data) in quotes {
+        if symbol == "quotes" || !data.is_object() {
+            continue;
+        }
+
+        let bid = data.get("bp").and_then(|v| v.as_f64());
+        let ask = data.get("ap").and_then(|v| v.as_f64());
+        let bid_size = data.get("bs").and_then(|v| v.as_f64());
+        let ask_size = data.get("as").and_then(|v| v.as_f64());
+        let timestamp = data
+            .get("t")
+            .and_then(|v| v.as_str())
+            .or_else(|| data.get("timestamp").and_then(|v| v.as_str()));
+
+        if bid.is_none() && ask.is_none() {
+            continue;
+        }
+
+        lines.push(format!("\n【{}】", symbol));
+        if let Some(bid) = bid {
+            lines.push(format!("  买一价: {:.2} USD", bid));
+        }
+        if let Some(ask) = ask {
+            lines.push(format!("  卖一价: {:.2} USD", ask));
+        }
+        if let (Some(bid), Some(ask)) = (bid, ask) {
+            lines.push(format!("  买卖价差: {:.2} USD", ask - bid));
+        }
+        if let Some(size) = bid_size {
+            lines.push(format!("  买一量: {:.6}", size));
+        }
+        if let Some(size) = ask_size {
+            lines.push(format!("  卖一量: {:.6}", size));
+        }
+        if let Some(t) = timestamp {
+            lines.push(format!("  报价时间: {}", t));
+        }
+        any_data = true;
+    }
+
+    if any_data {
+        Some(lines.join("\n"))
+    } else {
+        None
+    }
 }
 
 fn format_crypto_snapshot(raw_output: &str) -> Option<String> {

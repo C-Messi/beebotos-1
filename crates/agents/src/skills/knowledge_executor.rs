@@ -3,10 +3,10 @@
 //! Executes "knowledge-driven" skills (pure SKILL.md) by loading the
 //! markdown document and sending it to the LLM as a system prompt.
 //! 🆕 FIX: Most knowledge skills use a single LLM call. However, if the
-//! SKILL.md references tools (web_fetch, bash_shell, etc.), a lightweight
-//! ReAct loop (max 3 steps) is used so the tools are actually executed.
+//! SKILL.md references tools (web_fetch, bash_shell, etc.), the unified
+//! ReAct loop is used so the tools are actually executed.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::communication::{LLMCallInterface, Message as CommMessage, PlatformType};
@@ -25,7 +25,7 @@ impl KnowledgeSkillExecutor {
     /// Execute a knowledge skill.
     /// 🆕 FIX: Pure knowledge skills use a single LLM call.
     /// If the SKILL.md references tools (web_fetch, bash_shell, etc.),
-    /// a lightweight ReAct loop (max 3 steps) is used instead.
+    /// the unified ReAct loop is used instead.
     pub async fn execute(&self, skill_path: &Path, user_input: &str) -> Result<String, AgentError> {
         let (skill_md, skill_name) = if skill_path.is_dir() {
             let md = skill_path.join("SKILL.md");
@@ -59,7 +59,7 @@ impl KnowledgeSkillExecutor {
 
         if needs_tools {
             tracing::info!(
-                "Knowledge skill '{}' references tools, using lightweight ReAct (max 3 steps)",
+                "Knowledge skill '{}' references tools, using unified ReAct",
                 skill_name
             );
             return self
@@ -109,8 +109,8 @@ impl KnowledgeSkillExecutor {
         tool_names.iter().any(|t| lower.contains(t))
     }
 
-    /// Execute a knowledge skill that references tools using a lightweight
-    /// ReAct loop.
+    /// Execute a knowledge skill that references tools using the unified ReAct
+    /// loop.
     async fn execute_with_react(
         &self,
         skill_path: &Path,
@@ -125,23 +125,28 @@ impl KnowledgeSkillExecutor {
         };
 
         let skill_instructions = crate::skills::code_executor::extract_skill_usage(skill_md);
+        let tools = crate::skills::tool_set::default_tool_set(&skill_dir);
+        let tools_prompt = crate::skills::general_react_prompt::build_general_react_prompt(&tools);
         let system_prompt = format!(
-            "You are the '{}' skill executor. Your ONLY job is to help the user by using the \
-             available tools according to the instructions below.\n\nSkill \
-             instructions:\n{}\n\nIMPORTANT: Execute the necessary tool immediately. Do NOT \
-             introduce yourself or describe your capabilities.",
+            "{tools_prompt}\n\n## Knowledge Skill Context\n\nYou are the '{}' skill executor. \
+             Your ONLY job is to help the user by using the available tools according to the \
+             instructions below.\n\nSkill instructions:\n{}\n\nIMPORTANT: Execute the necessary \
+             tool immediately. Do NOT introduce yourself or describe your capabilities. If a tool \
+             is needed, output action=call_tool in the unified ReAct JSON format.",
             skill_name, skill_instructions
         );
 
-        let tools = crate::skills::tool_set::default_tool_set(&skill_dir);
-        let config = crate::skills::react_executor::ReActConfig {
-            max_steps: 3,
-            stop_phrases: vec!["FINAL ANSWER:".to_string(), "Task completed".to_string()],
-            max_history_chars: 8000,
-        };
-        let executor = crate::skills::react_executor::ReActExecutor::new(self.llm.clone(), tools)
-            .with_config(config);
+        let executor = crate::skills::UnifiedReActExecutor::new(self.llm.clone()).with_config(
+            crate::skills::UnifiedReActConfig {
+                max_rounds: 6,
+                round_timeout_sec: 30,
+                enable_reflection: false,
+                require_structured_output: false,
+                cancel_rx: None,
+                stream_tx: None,
+            },
+        );
 
-        executor.execute(&system_prompt, user_input).await
+        executor.execute(&system_prompt, user_input, &tools).await
     }
 }

@@ -3765,5 +3765,315 @@ export INTERNAL_SERVICE_TOKEN="你生成的随机字符串"
 如果两边都配了 `INTERNAL_SERVICE_TOKEN`，Gateway 和 Tool 就配对成功了。
 
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+明白，那就不把 BTC 交易绕回专用 investment path。我们保持“通用 ReAct”作为主通道来修：让通用 ReAct 能正确调用已有技能/MCP，而不是只拿到文件、shell、web 这些基础工具；同时继续保留我刚才做的“不要把思考/命令泄漏成最终回复”的保护。
+
+
+已探索 2 次搜索
+收到，我不会再改路由去专用 investment path。现在修通用 ReAct 的关键是：它必须能调用注册技能/MCP 技能，尤其 mcp:alpaca/get_crypto_latest_quote、mcp:alpaca/place_crypto_order 这类，而不是只会输出“我应该调用工具”的过程文字。
+
+
+已探索 2 个文件
+对，方向调整后我会把“通用 ReAct”补齐，而不是绕开。眼下看到的核心缺口是通用 ReAct 的工具箱没有 skill_call，所以它无法调用 MCP/注册技能；下一步我会给通用 ReAct 加一个受控的技能调用工具，让它仍然走 execute_skill_by_id 的参数提取和审批逻辑。
+
+
+已探索 2 个文件
+我会在通用 ReAct 里加一个“虚拟工具” skill_call：模型仍然走通用 ReAct 决策，但当它需要行情/下单/持仓这类能力时，可以通过 skill_call 调用注册技能或 MCP 技能。这样参数提取、风险审批、MCP 调用都复用现有 execute_skill_by_id，不会开另一条业务通道。
+
+
+我会在通用 ReAct 里加一个“虚拟工具” skill_call：模型仍然走通用 ReAct 决策，但当它需要行情/下单/持仓这类能力时，可以通过 skill_call 调用注册技能或 MCP 技能。这样参数提取、风险审批、MCP 调用都复用现有 execute_skill_by_id，不会开另一条业务通道。
+
+已探索 1 次搜索
+现在的实现里 UnifiedReActExecutor 只能执行 HashMap<String, Box<dyn SkillTool>> 里的工具。为了不绕开通用 ReAct，我会给它加一个可选的外部工具执行器：通用 ReAct 仍负责规划/选择动作，但当动作是 skill_call 时回调到 Agent 的 execute_skill_by_id。这比复制一套 MCP/审批逻辑稳得多。
+
+
+已探索 1 个文件,1 次搜索
+我会做成两层：1）给通用 ReAct 的 prompt 增加 skill_call 这个工具说明和技能目录上下文；2）UnifiedReActExecutor 真遇到 skill_call 时，回调 Agent 的 execute_skill_by_id，并把返回结果先格式化成用户可读的 observation。这样第四个请求能在通用 ReAct 里完成“查行情 -> 下单/审批 -> 查持仓”这类链路。
+
+框架的可选回调已经加进 UnifiedReActExecutor 了。现在我把 Agent 这边接上：给通用 ReAct 的工具列表加入 skill_call 描述工具，并实现回调把 skill_id/input/params 转给 execute_skill_by_id，输出再经过同一套格式化。
+
+已编辑 1 个文件
+这里我碰到一个 Rust 结构问题：execute_skill_by_id 挂在 Agent 上，而通用 ReAct executor 现在是独立结构，不能直接长期借用 &self。我会用一个“轻量克隆 Agent 句柄”的方式，只复制 Arc/配置/状态引用，不复制消息接收器，让 skill_call 回调能复用原来的技能执行代码。
+
+
+已探索 4 个文件,1 次搜索
+实现上不需要真的 clone 整个运行时，只要造一个“技能执行句柄”：共享 registry、MCP、LLM、pending approval/form 这些 Arc 状态，消息接收器/A2A/device 这类通用 ReAct 的 skill_call 用不到的字段置空。这样不会换通道，只是给通用 ReAct 接上已有技能执行能力。
+
+
+已编辑 1 个文件,已探索 4 个文件,1 次搜索
+为了避免 clone 不支持的字段，我会只保留 execute_skill_by_id 真正需要的共享组件。skill_feedback_collector 这类非关键增强在这个句柄里置空，避免为了通用 ReAct 的工具调用牵扯更多状态。
+
+
+正在编辑 1 个文件,已探索 1 个文件
+正在编辑 1 个文件,已探索 1 个文件
+通用 ReAct 的 skill_call 回调已经接上了。现在我会再加强 prompt：明确“实时行情、天气、搜索、交易、持仓都优先用工具/skill_call，不要用 final_answer 伪装执行”，这能减少它第一轮就输出分析过程的概率。
+
+补丁的主结构已经完成。现在需要编译一遍，尤其是新增的 ExternalToolExecutor 类型和 Agent 轻量句柄，Rust 会帮我们抓生命周期/Clone 的细节。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+已按你的要求保留“通用 ReAct 通道”，没有把 BTC 交易请求绕回专用 investment path。
+
+这次修复的核心：
+
+- 通用 ReAct 现在有 `skill_call` 工具入口，可以在通用规划里调用注册 skill / MCP skill，继续复用现有 `execute_skill_by_id`、参数提取、审批链。
+- `final_answer` 会被清洗和校验，包含 `thought/action/tool_name/agent-browser open/当前状态分析` 这类内部过程时不会直接发给 WebChat，会要求模型重试。
+- 天气 code skill 的 `Command executed successfully / Exit code / STDOUT` 包装会被剥掉，只显示真实结果。
+- `mcp:alpaca/get_crypto_latest_quote` 增加了专用格式化，不再展示 `quotes > ETH/USD > ap/as...` 这种原始字段。
+- 轻量 ReAct 也加了保护，避免把 `agent-browser open ...` 这种命令文本误判为最终回答。
+
+主要改动在：
+
+- [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs)
+- [unified_react_executor.rs](/root/beebotos/crates/agents/src/skills/unified_react_executor.rs)
+- [general_react_prompt.rs](/root/beebotos/crates/agents/src/skills/general_react_prompt.rs)
+- [tool_set.rs](/root/beebotos/crates/agents/src/skills/tool_set.rs)
+- [react_executor.rs](/root/beebotos/crates/agents/src/skills/react_executor.rs)
+
+验证：
+
+`cargo check -p beebotos-agents` 通过。仍有仓库原有 unused/dead_code warnings，没有新增编译错误。
+
+建议重启 gateway 后重点回归这几句：`深圳天气`、`查询一下ETH行情`、`在互联网上搜索一下，中国人口多少？`、`根据当前行情...BTC...持仓情况`。第四个现在仍走通用 ReAct，但它应该通过 `skill_call` 去触发 MCP/审批，而不是吐内部分析。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+轻量 ReAct 也加了保护，避免把 agent-browser open ... 这种命令文本误判为最终回答。检查一下代码，这个轻量 ReAct  与通用ReAct 是并行的2个ReAct 吗？
+
+是的，目前代码里确实有两套 ReAct，名字容易混：
+
+
+轻量 ReAct
+
+文件：react_executor.rs
+
+用途：执行单个 code/knowledge skill 内部的工具步骤。
+
+入口主要是：
+
+
+CodeSkillExecutor (line 116)
+
+KnowledgeSkillExecutor (line 142)
+
+
+例如 agent-browser 这种 knowledge skill，如果 SKILL.md 里提到 process_exec/bash_shell/web_fetch 等工具，会进入轻量 ReAct，最多 3 步。它不是 WebChat 顶层规划器，而是“某个 skill 被选中以后，skill 自己怎么执行”的小循环。
+
+
+
+通用 ReAct / Unified ReAct
+
+文件：unified_react_executor.rs
+
+用途：顶层多步任务规划与执行。
+
+入口主要是：
+
+
+通用通道：agent_impl.rs (line 1842) 的 execute_with_react
+
+旧的投资分析通道：agent_impl.rs (line 2020) 的 execute_with_react_planning
+
+
+
+
+所以它们不是“并行同时跑”的两个 ReAct，而是分层/不同入口：
+
+
+WebChat 顶层如果 needs_planning=true，走 通用 ReAct。
+
+通用 ReAct 里如果通过 skill_call 调用了某个 code/knowledge skill，这个 skill 内部可能再走 轻量 ReAct。
+
+如果只是直接选中了一个 code/knowledge skill，不走顶层通用 ReAct，也可能直接进入轻量 ReAct。
+
+
+你选中的那句“避免把 agent-browser open ... 误判为最终回答”，修的是轻量 ReAct，主要防 knowledge/code skill 内部把命令文本泄漏给用户。通用 ReAct 这边对应的保护在 unified_react_executor.rs 里，是 final_answer 清洗和内部输出重试。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+彻底取消轻量 ReAct，全部走通用ReAct, 修复一下.
+
+我会保留 code skill 的 single-shot 快速路径，因为它不是 ReAct；只把原来 fallback/工具型 knowledge skill 里的 ReActExecutor 全部换成 UnifiedReActExecutor。同时从 skills/mod.rs 里移除轻量 ReAct 模块导出，让它不再参与编译入口。
+
+轻量 ReAct 文件已经删除。接下来我会跑 cargo check -p beebotos-agents，这一步会验证没有遗留模块引用，也能抓出通用 ReAct 替换后的类型问题。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+已按你的要求处理：**轻量 ReAct 已从 skills 执行链彻底取消**，现在 code/knowledge skill 的工具执行 fallback 都统一走 `UnifiedReActExecutor`。
+
+具体改动：
+
+- [code_executor.rs](/root/beebotos/crates/agents/src/skills/code_executor.rs)：原 `ReActExecutor` fallback 改成 `UnifiedReActExecutor`。
+- [knowledge_executor.rs](/root/beebotos/crates/agents/src/skills/knowledge_executor.rs)：带工具的 knowledge skill 不再走轻量 ReAct，改走 `UnifiedReActExecutor`。
+- [mod.rs](/root/beebotos/crates/agents/src/skills/mod.rs)：移除 `react_executor` 模块声明和导出。
+- 删除 [react_executor.rs](/root/beebotos/crates/agents/src/skills/react_executor.rs)。
+
+保留了 code skill 的 single-shot command 快速路径，因为它不是 ReAct，只是一次性生成命令并执行；失败后现在进入通用 ReAct。
+
+验证结果：
+
+`cargo check -p beebotos-agents` 通过。仍有仓库原有 unused/dead_code warnings。
+
+最终搜索确认：`crates/agents/src/skills` 和 `agent_impl.rs` 里已经没有 `ReActExecutor` / `react_executor` 引用，只剩 `UnifiedReActExecutor`。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+这里我碰到一个 Rust 结构问题：execute_skill_by_id 挂在 Agent 上，而通用 ReAct executor 现在是独立结构，不能直接长期借用 &self。我会用一个“轻量克隆 Agent 句柄”的方式，只复制 Arc/配置/状态引用，不复制消息接收器，让 skill_call 回调能复用原来的技能执行代码。
+    上面修复过程出现的说明文字，“execute_skill_by_id 挂在 Agent 上，而通用 ReAct executor 现在是独立结构”，这段话是什么意思？是否通用 ReAct executor 也挂上Agent比较好？
+
+所以结论是：
+
+当前轻量 clone 方案是一个可工作的补丁；
+长期更优雅的修复是：不要把完整 Agent 挂进通用 ReAct，而是抽一个 SkillDispatcher/ToolDispatcher trait，让通用 ReAct 通过接口调用 Agent 的能力。
+
+实施修改。
+
+现在结构已经是 trait + dispatcher 适配器。接下来跑搜索和编译，确认没有旧闭包和旧字段残留。
+搜索结果干净了：旧的 ExternalToolExecutor 和 clone 函数都没了。
+
+已实施：`UnifiedReActExecutor` 现在不再拿闭包型 `ExternalToolExecutor`，改为依赖一个正式的 trait：
+
+```rust
+pub trait ToolDispatcher: Send + Sync {
+    async fn dispatch(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, String>;
+}
+```
+
+Agent 侧新增了 `AgentSkillDispatcher` 适配器，实现 `ToolDispatcher`，只暴露 `skill_call` 所需能力。通用 ReAct 现在通过：
+
+```rust
+.with_tool_dispatcher(...)
+```
+
+调用 Agent 侧能力，而不是持有完整 Agent，也不是闭包回调。
+
+同时保留前面已经完成的两件事：
+
+- 轻量 ReAct 已删除，code/knowledge skill fallback 都走 `UnifiedReActExecutor`。
+- `skill_call` 仍复用 `execute_skill_by_id`，所以参数提取、MCP 调用、审批链都还在原路径里。
+
+验证：
+
+`cargo check -p beebotos-agents` 通过。仍有仓库已有 warnings，没有新增编译错误。
+
+主要相关文件：
+
+- [unified_react_executor.rs](/root/beebotos/crates/agents/src/skills/unified_react_executor.rs)
+- [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs)
+- [mod.rs](/root/beebotos/crates/agents/src/skills/mod.rs)
+
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+在通用ReAct里面的Planning 有无根据任务需要创建并行子agent执行并行任务的功能和能力？
+
+没有。**当前通用 ReAct 里面没有“根据任务自动创建并行子 agent 执行并行任务”的能力。**
+
+准确说现在是这样：
+
+通用 ReAct 路径在 [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:1888) 里创建工具集：
+
+- `default_tool_set`
+- `skill_call`
+
+也就是它能调用文件、shell、web、cron、注册 skill/MCP skill，但**没有 `spawn_subagent` / `parallel_delegate` / `create_agents` 这类工具**。
+
+而 [UnifiedReActExecutor](/root/beebotos/crates/agents/src/skills/unified_react_executor.rs:99) 的动作模型也只有：
+
+- `call_tool`
+- `final_answer`
+
+每轮只能调用一个工具，没有“一轮创建多个分支并并发等待合并”的原生动作。
+
+但代码库里确实有相关基础设施，只是没接进通用 ReAct：
+
+- [planning/executor.rs](/root/beebotos/crates/agents/src/planning/executor.rs:455) 有 `Action::ParallelDelegate`
+- [planning/executor.rs](/root/beebotos/crates/agents/src/planning/executor.rs:181) 有 `AgentDelegateResolver`，会调用 `Agent::spawn_sub_agent`
+- [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:6463) 附近有 plan step 并行执行逻辑
+- `queue/subagent` 也有并发 subagent 队列能力
+
+所以结论是：
+
+**有底层能力，但通用 ReAct 当前没有暴露和使用这套能力。**
+
+如果要补完整，建议加一个通用 ReAct 工具，比如：
+
+- `parallel_skill_call`
+- `spawn_subagents`
+- `parallel_delegate`
+
+让 `UnifiedReActExecutor` 可以输出：
+
+```json
+{
+  "action": "call_tool",
+  "tool_name": "parallel_delegate",
+  "arguments": {
+    "branches": [
+      {"id": "market", "task": "查询 BTC 行情"},
+      {"id": "risk", "task": "检查账户和持仓"},
+      {"id": "news", "task": "搜索相关新闻"}
+    ],
+    "merge_strategy": "summarize"
+  }
+}
+```
+
+然后由 `ToolDispatcher` 接到 Agent 的 subagent / planning executor 能力。当前还没这层 wiring。
+
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+  按这个结论优化代码 
+我会把这个能力接进通用 ReAct：先加一个 parallel_delegate 工具描述，让 LLM 能选择它；再在 ToolDispatcher 里实现并发分支执行和结果合并。先读一下现有 ParallelDelegate/sub-agent 结构，尽量复用已有类型而不是另起炉灶。
+
+我先接着现有改动把这条线接完整：先看当前 ToolDispatcher 和工具描述的实际形状，再加 parallel_delegate，最后跑 cargo check。重点会放在“通用 ReAct 能主动发起并行分支并把结果合并回来”，不去复活轻量 ReAct。
+
+本机这个会话的 sandbox 缺 bwrap，普通读命令也会被拦住。我会按现有已批准的 git -C/cargo 之外，对必要的只读/编辑检查命令申请一次外部执行权限，继续推进。
+
+已经看到现在的结构：UnifiedReActExecutor 通过 ToolDispatcher 只会派发 skill_call，所以我要补的是一个同级的 parallel_delegate 描述工具和 dispatcher 分支。实现上会先用共享 Agent 能力并发跑分支，再把结果作为一次 observation 回给通用 ReAct 合成最终回答。
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+接下来我会改四处：工具描述、导出、通用 ReAct 的 dispatcher 兜底、Agent 侧 parallel_delegate 执行器。parallel_delegate 的每个 branch 可以指定 skill_id 走真实技能，也可以只给 task 走一个隔离的 LLM 子任务；最后按 concat/json_merge/summarize 合并。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+已按这个结论把通用 ReAct 补完整了：
+
+在 [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs) 里给 `ToolDispatcher` 增加了 `parallel_delegate` 分支。它会解析：
+
+```json
+{
+  "branches": [
+    {"id": "market", "task": "查询 BTC 行情", "skill_id": "..."},
+    {"id": "risk", "task": "检查账户和持仓"}
+  ],
+  "merge_strategy": "summarize",
+  "max_concurrency": 3
+}
+```
+
+每个 branch 会并发执行，并先通过 `spawn_sub_agent` 创建子 Agent 句柄；有 `skill_id` 的分支走现有 `execute_skill_call_from_react`，没有 `skill_id` 的分支走隔离 LLM 子任务。结果支持 `concat`、`json_merge`、`summarize` 合并。
+
+同时改了：
+
+- [tool_set.rs](/root/beebotos/crates/agents/src/skills/tool_set.rs)：新增 `ParallelDelegateDescriptorTool`
+- [mod.rs](/root/beebotos/crates/agents/src/skills/mod.rs)：导出新工具
+- [unified_react_executor.rs](/root/beebotos/crates/agents/src/skills/unified_react_executor.rs)：让 descriptor-only 工具通过 `ToolDispatcher` 派发
+- [general_react_prompt.rs](/root/beebotos/crates/agents/src/skills/general_react_prompt.rs)：提示模型遇到独立分支任务优先调用 `parallel_delegate`
+
+验证完成：
+
+```bash
+cargo fmt -p beebotos-agents
+cargo check -p beebotos-agents
+```
+
+`cargo check` 通过，只剩仓库里已有的 warning。
+
+
 
 

@@ -22,7 +22,6 @@ pub mod loader;
 pub mod mcp_parameter_extractor;
 pub mod process_sandbox;
 pub mod rating;
-pub mod react_executor;
 pub mod registry;
 pub mod security;
 pub mod tool_set;
@@ -32,6 +31,7 @@ pub use code_executor::CodeSkillExecutor;
 pub use command_handler::{
     CommandContext, CommandHandler, CommandResult, RuntimeInfo, RuntimeStatus,
 };
+pub use cron_job_tool::CronJobManagerTool;
 pub use discovery::{SkillDiscovery, SkillKind, SkillMetadata};
 pub use dynamic::{DynamicSkill, DynamicSkillLoader};
 pub use executor::{
@@ -50,12 +50,12 @@ pub use mcp_parameter_extractor::{
     ExtractedParams, FieldSchema, McpParameterExtractor, PendingParameterForm,
 };
 pub use rating::{RatingSummary, SkillRating, SkillRatingStore};
-pub use react_executor::ReActExecutor;
 pub use registry::{RegisteredSkill, SkillDefinition, SkillRegistry, Version, VersionError};
 pub use security::{SandboxMode, SkillSecurityPolicy, SkillSecurityValidator, ValidationError};
-pub use cron_job_tool::CronJobManagerTool;
 pub use tool_set::{
-    default_tool_set, BashShellTool, FileListTool, FileReadTool, FileWriteTool, ProcessExecTool,
-    SkillTool,
+    default_tool_set, BashShellTool, FileListTool, FileReadTool, FileWriteTool,
+    ParallelDelegateDescriptorTool, ProcessExecTool, SkillCallDescriptorTool, SkillTool,
 };
-pub use unified_react_executor::{parse_react_response, UnifiedReActConfig, UnifiedReActExecutor};
+pub use unified_react_executor::{
+    parse_react_response, ToolDispatcher, UnifiedReActConfig, UnifiedReActExecutor,
+};
