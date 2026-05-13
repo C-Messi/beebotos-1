@@ -2058,8 +2058,30 @@ impl Agent {
                             // MCP parameter extractor can re-extract params from natural language.
                             self.skip_approval
                                 .store(true, std::sync::atomic::Ordering::SeqCst);
+                            let confirmed_params = request.params.as_object().map(|obj| {
+                                obj.iter()
+                                    .filter_map(|(k, v)| {
+                                        if let Some(s) = v.as_str() {
+                                            Some((k.clone(), s.to_string()))
+                                        } else if v.is_null() {
+                                            None
+                                        } else {
+                                            Some((k.clone(), v.to_string()))
+                                        }
+                                    })
+                                    .collect::<HashMap<_, _>>()
+                            });
+                            let confirmed_input = if request.original_input.trim().is_empty() {
+                                request.params.to_string()
+                            } else {
+                                request.original_input.clone()
+                            };
                             let skill_result = self
-                                .execute_registered_skill(&skill, &request.original_input, None)
+                                .execute_registered_skill(
+                                    &skill,
+                                    &confirmed_input,
+                                    confirmed_params,
+                                )
                                 .await;
                             self.skip_approval
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2067,11 +2089,29 @@ impl Agent {
                             match skill_result {
                                 Ok(result) => {
                                     let _ = registry.record_usage(&request.skill_id).await;
-                                    let output = self.synthesize_skill_output(
+                                    let mut output = self.synthesize_skill_output(
                                         &message_text,
                                         &result.output,
                                         &request.skill_id,
                                     );
+                                    if request.skill_id == "mcp:alpaca/place_crypto_order" {
+                                        if let Ok(positions) = self
+                                            .execute_skill_by_id(
+                                                "mcp:alpaca/get_all_positions",
+                                                "",
+                                                None,
+                                            )
+                                            .await
+                                        {
+                                            let formatted_positions = self.synthesize_skill_output(
+                                                "",
+                                                &positions.output,
+                                                "mcp:alpaca/get_all_positions",
+                                            );
+                                            output.push_str("\n\n");
+                                            output.push_str(&formatted_positions);
+                                        }
+                                    }
                                     return Ok((output, vec![]));
                                 }
                                 Err(e) => {
@@ -8146,11 +8186,135 @@ fn format_known_skill_output(skill_id: &str, raw_output: &str) -> Option<String>
         "mcp:alpaca/get_crypto_snapshot"
         | "mcp:alpaca/get_crypto_quote"
         | "mcp:alpaca/get_crypto_bars" => format_crypto_snapshot(raw_output),
+        "mcp:alpaca/place_crypto_order" => format_alpaca_order(raw_output),
+        "mcp:alpaca/get_all_positions" => format_alpaca_positions(raw_output),
+        "mcp:alpaca/get_open_position" => format_alpaca_positions(raw_output),
         "mcp:alpaca/get_stock_snapshot"
         | "mcp:alpaca/get_stock_quote"
         | "mcp:alpaca/get_stock_bars" => format_crypto_snapshot(raw_output),
         _ => None,
     }
+}
+
+fn as_str_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(|v| v.as_str())
+}
+
+fn as_f64_field(value: &serde_json::Value, key: &str) -> Option<f64> {
+    value.get(key).and_then(|v| {
+        v.as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+    })
+}
+
+fn format_money(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("${:.2}", v))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_number(value: Option<f64>, decimals: usize) -> String {
+    value
+        .map(|v| format!("{:.*}", decimals, v))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_percent(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{:+.2}%", v * 100.0))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_alpaca_order(raw_output: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw_output).ok()?;
+    let order = if let Some(arr) = v.as_array() {
+        arr.first()?
+    } else {
+        &v
+    };
+
+    let symbol = as_str_field(order, "symbol").unwrap_or("-");
+    let side = match as_str_field(order, "side").unwrap_or("-") {
+        "buy" => "买入",
+        "sell" => "卖出",
+        other => other,
+    };
+    let order_type = as_str_field(order, "type")
+        .or_else(|| as_str_field(order, "order_type"))
+        .unwrap_or("-");
+    let status = as_str_field(order, "status").unwrap_or("-");
+    let notional = as_f64_field(order, "notional");
+    let filled_qty = as_f64_field(order, "filled_qty");
+    let filled_avg_price = as_f64_field(order, "filled_avg_price");
+    let submitted_at = as_str_field(order, "submitted_at").unwrap_or("-");
+    let filled_at = as_str_field(order, "filled_at").unwrap_or("-");
+    let id = as_str_field(order, "id").unwrap_or("-");
+
+    Some(format!(
+        "✅ 订单已提交{}\n• 订单ID：{}\n• 交易对：{}\n• 方向：{}\n• 类型：{}\n• 状态：{}\n• \
+         下单金额：{}\n• 成交数量：{} BTC\n• 成交均价：{}\n• 提交时间：{}\n• 成交时间：{}",
+        if status == "filled" { "并成交" } else { "" },
+        id,
+        symbol,
+        side,
+        order_type,
+        status,
+        format_money(notional),
+        format_number(filled_qty, 9),
+        format_money(filled_avg_price),
+        submitted_at,
+        filled_at
+    ))
+}
+
+fn format_alpaca_positions(raw_output: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw_output).ok()?;
+    let positions: Vec<&serde_json::Value> = if let Some(arr) = v.as_array() {
+        arr.iter().collect()
+    } else if v.is_object() {
+        vec![&v]
+    } else {
+        return None;
+    };
+
+    if positions.is_empty() {
+        return Some("📌 当前无持仓。".to_string());
+    }
+
+    let mut blocks = Vec::new();
+    for pos in positions {
+        let symbol = as_str_field(pos, "symbol").unwrap_or("-");
+        let side = match as_str_field(pos, "side").unwrap_or("-") {
+            "long" => "多头",
+            "short" => "空头",
+            other => other,
+        };
+        let qty = as_f64_field(pos, "qty");
+        let available = as_f64_field(pos, "qty_available");
+        let avg_entry = as_f64_field(pos, "avg_entry_price");
+        let current = as_f64_field(pos, "current_price");
+        let market_value = as_f64_field(pos, "market_value");
+        let cost_basis = as_f64_field(pos, "cost_basis");
+        let pl = as_f64_field(pos, "unrealized_pl");
+        let plpc = as_f64_field(pos, "unrealized_plpc");
+
+        blocks.push(format!(
+            "📌 当前持仓：{}\n• 方向：{}\n• 数量：{}\n• 可用数量：{}\n• 持仓市值：{}\n• \
+             成本：{}\n• 均价：{}\n• 当前价：{}\n• 未实现盈亏：{} ({})",
+            symbol,
+            side,
+            format_number(qty, 9),
+            format_number(available, 9),
+            format_money(market_value),
+            format_money(cost_basis),
+            format_money(avg_entry),
+            format_money(current),
+            format_money(pl),
+            format_percent(plpc)
+        ));
+    }
+
+    Some(blocks.join("\n\n"))
 }
 
 fn strip_successful_command_wrapper(raw_output: &str) -> Option<String> {
@@ -8282,7 +8446,7 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
         .get("snapshots")
         .and_then(|s| s.as_object())
         .or_else(|| v.as_object())?;
-    let mut lines = vec!["📈 市场行情快照".to_string()];
+    let mut all_blocks = Vec::new();
     let mut any_data = false;
 
     for (symbol, data) in snapshots {
@@ -8291,7 +8455,7 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
         if symbol == "snapshots" {
             continue;
         }
-        lines.push(format!("\n【{}】", symbol));
+        let mut lines = vec![format!("📈 {} 最新行情", symbol)];
         let mut symbol_has_data = false;
 
         // Helper: try multiple common price field names
@@ -8306,7 +8470,7 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
 
         if let Some(lt) = data.get("latestTrade") {
             if let Some(p) = get_price(lt, &["p", "price", "P"]) {
-                lines.push(format!("  最新成交价: {:.2} USD", p));
+                lines.push(format!("• 最新成交价: ${:.2}", p));
                 symbol_has_data = true;
             }
             if let Some(s) = lt
@@ -8314,7 +8478,7 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
                 .and_then(|s| s.as_f64())
                 .or_else(|| lt.get("size").and_then(|s| s.as_f64()))
             {
-                lines.push(format!("  最新成交量: {:.6}", s));
+                lines.push(format!("• 最新成交量: {:.6}", s));
                 symbol_has_data = true;
             }
         }
@@ -8325,64 +8489,68 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
             let ask = get_price(q, &["ap", "askPrice", "ask"])
                 .or_else(|| q.get("a").and_then(|p| p.as_f64()));
             if let (Some(bid), Some(ask)) = (bid, ask) {
-                lines.push(format!("  买一 / 卖一: {:.2} / {:.2} USD", bid, ask));
+                lines.push(format!("• 买一 / 卖一: ${:.2} / ${:.2}", bid, ask));
                 symbol_has_data = true;
             }
         }
 
+        let mut day_change: Option<f64> = None;
         if let Some(db) = data.get("dailyBar") {
             let o = get_price(db, &["o", "open"]);
             let h = get_price(db, &["h", "high"]);
             let l = get_price(db, &["l", "low"]);
-            let c = get_price(db, &["c", "close"]);
+            let curr_c = get_price(db, &["c", "close"]);
             let vol = db
                 .get("v")
                 .and_then(|p| p.as_f64())
                 .or_else(|| db.get("volume").and_then(|p| p.as_f64()));
-            if o.is_some() && h.is_some() && l.is_some() && c.is_some() {
-                lines.push(format!(
-                    "  日K线: 开 {:.2} / 高 {:.2} / 低 {:.2} / 收 {:.2}",
-                    o.unwrap(),
-                    h.unwrap(),
-                    l.unwrap(),
-                    c.unwrap()
-                ));
+            if let Some(o) = o {
+                lines.push(format!("• 今日开盘: ${:.2}", o));
+                symbol_has_data = true;
+            }
+            if let Some(h) = h {
+                lines.push(format!("• 今日最高: ${:.2}", h));
+                symbol_has_data = true;
+            }
+            if let Some(l) = l {
+                lines.push(format!("• 今日最低: ${:.2}", l));
                 symbol_has_data = true;
             }
             if let Some(vol) = vol {
-                lines.push(format!("  日成交量: {:.4}", vol));
+                lines.push(format!("• 日成交量: {:.4}", vol));
                 symbol_has_data = true;
+            }
+            if let Some(pb) = data.get("prevDailyBar") {
+                let prev_c = get_price(pb, &["c", "close"]);
+                if let (Some(prev_c), Some(curr_c)) = (prev_c, curr_c) {
+                    day_change = Some(((curr_c - prev_c) / prev_c) * 100.0);
+                }
             }
         }
 
-        if let Some(pb) = data.get("prevDailyBar") {
-            let prev_c = get_price(pb, &["c", "close"]);
-            let curr_c = data
-                .get("dailyBar")
-                .and_then(|db| get_price(db, &["c", "close"]));
-            if let (Some(prev_c), Some(curr_c)) = (prev_c, curr_c) {
-                let change = ((curr_c - prev_c) / prev_c) * 100.0;
-                lines.push(format!("  较昨日收盘: {:+.2}%", change));
-                symbol_has_data = true;
-            }
+        if let Some(change) = day_change {
+            let marker = if change < 0.0 { " 📉" } else { " 📈" };
+            lines.push(format!("• 日涨跌幅: {:+.2}%{}", change, marker));
+            symbol_has_data = true;
         }
 
         if let Some(mb) = data.get("minuteBar") {
             if let Some(c) = get_price(mb, &["c", "close"]) {
-                lines.push(format!("  最新分钟线收盘价: {:.2} USD", c));
+                lines.push(format!("• 最新分钟线收盘价: ${:.2}", c));
                 symbol_has_data = true;
             }
         }
 
         if symbol_has_data {
             any_data = true;
+            all_blocks.push(lines.join("\n"));
         }
     }
 
     if !any_data {
         return None;
     }
-    Some(lines.join("\n"))
+    Some(all_blocks.join("\n\n"))
 }
 
 fn format_generic_json(raw_output: &str) -> Option<String> {

@@ -155,6 +155,7 @@ impl SkillSelector {
         let (ranked, llm_needs_planning) = self
             .rank_candidates(query, query_summary, &candidates)
             .await?;
+        let ranked = self.apply_domain_score_adjustments(query, query_summary, ranked);
 
         // Step 3: Selection
         let selection_start = Instant::now();
@@ -290,8 +291,8 @@ impl SkillSelector {
             ]);
         } else if has_crypto && has_market_data {
             ids.extend([
-                "mcp:alpaca/get_crypto_latest_quote",
                 "mcp:alpaca/get_crypto_snapshot",
+                "mcp:alpaca/get_crypto_latest_quote",
                 "mcp:alpaca/get_crypto_latest_trade",
             ]);
         }
@@ -311,6 +312,51 @@ impl SkillSelector {
             }
         }
         out
+    }
+
+    fn apply_domain_score_adjustments(
+        &self,
+        query: &str,
+        query_summary: &str,
+        mut scores: Vec<SkillScore>,
+    ) -> Vec<SkillScore> {
+        let lower = format!("{} {}", query_summary, query).to_lowercase();
+        let wants_crypto_market = (lower.contains("btc")
+            || lower.contains("bitcoin")
+            || lower.contains("比特币")
+            || lower.contains("eth")
+            || lower.contains("ethereum")
+            || lower.contains("以太坊")
+            || lower.contains("crypto")
+            || lower.contains("加密"))
+            && (lower.contains("行情")
+                || lower.contains("走势")
+                || lower.contains("今日")
+                || lower.contains("market data")
+                || lower.contains("snapshot"));
+
+        if wants_crypto_market {
+            for score in &mut scores {
+                if score.skill_id == "mcp:alpaca/get_crypto_snapshot" {
+                    score.overall_score = score.overall_score.max(9.5);
+                    score.relevance = score.relevance.max(9.5);
+                    score.specificity = score.specificity.max(9.5);
+                    score.capability_match = score.capability_match.max(9.5);
+                    score.reason = format!(
+                        "{}; domain adjustment: snapshot is preferred for full market行情",
+                        score.reason
+                    );
+                } else if score.skill_id == "mcp:alpaca/get_crypto_latest_quote" {
+                    score.overall_score = score.overall_score.min(8.0);
+                    score.reason = format!(
+                        "{}; domain adjustment: latest_quote is bid/ask only",
+                        score.reason
+                    );
+                }
+            }
+        }
+
+        scores
     }
 
     /// Step 2: LLM Ranking — let LLM score each candidate on multiple
