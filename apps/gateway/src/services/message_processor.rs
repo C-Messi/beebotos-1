@@ -357,7 +357,10 @@ impl MessageProcessor {
         }
 
         // 8. 发送回复
-        if let Err(e) = self.send_reply(platform, channel_id, &message, &llm_response).await {
+        if let Err(e) = self
+            .send_reply(platform, channel_id, &message, &llm_response)
+            .await
+        {
             warn!(
                 "Failed to send reply via WebSocket (will be available for polling): {}",
                 e
@@ -518,7 +521,8 @@ impl MessageProcessor {
         // 3. 处理多模态内容（下载图片等）
         let (content, images) = self.process_multimodal(&message).await?;
 
-        // 🆕 FIX: Stop-command detection — cancel any running ReAct loop for this session
+        // 🆕 FIX: Stop-command detection — cancel any running ReAct loop for this
+        // session
         let stop_keywords = ["停止", "终止", "停下来", "结束", "stop", "cancel", "abort"];
         let is_stop = stop_keywords
             .iter()
@@ -799,10 +803,12 @@ impl MessageProcessor {
             workflow_registry: self.workflow_registry.as_ref().map(Arc::clone),
             clawhub_client: self.clawhub_client.clone(),
         });
-        // 🆕 FIX: Register cancellation token for this session before spawning background task.
-        // The returned generation token prevents a slow old task from deleting a new task's sender.
+        // 🆕 FIX: Register cancellation token for this session before spawning
+        // background task. The returned generation token prevents a slow old
+        // task from deleting a new task's sender.
         let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
-        let cancel_gen = beebotos_agents::session_cancellation::register(&db_session_id, cancel_tx).await;
+        let cancel_gen =
+            beebotos_agents::session_cancellation::register(&db_session_id, cancel_tx).await;
 
         let session_id = session.id.clone();
         let db_session_id_bg = db_session_id.clone();
@@ -865,7 +871,8 @@ impl MessageProcessor {
                     }
                     None => {
                         warn!(
-                            "Failed to send finished=true for session {}: WebChat channel not available",
+                            "Failed to send finished=true for session {}: WebChat channel not \
+                             available",
                             channel_id_stream
                         );
                     }
@@ -1021,7 +1028,8 @@ impl MessageProcessor {
 
             // 🆕 FIX: Unregister cancellation token when background task completes.
             // Only remove if the generation matches, preventing race with newer tasks.
-            beebotos_agents::session_cancellation::unregister(&db_session_id_bg, cancel_gen_bg).await;
+            beebotos_agents::session_cancellation::unregister(&db_session_id_bg, cancel_gen_bg)
+                .await;
 
             // 🆕 CRON FIX: Notify synchronous waiter if completion channel was provided
             if let Some(tx) = completion_tx {

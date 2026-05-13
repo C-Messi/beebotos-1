@@ -199,7 +199,8 @@ pub async fn auth_middleware(
                 .unwrap_or_else(|| "unknown".to_string());
 
             // 🛡️ Optional: restrict internal service token to loopback only
-            let is_loopback = client_ip == "127.0.0.1" || client_ip == "::1" || client_ip == "unknown";
+            let is_loopback =
+                client_ip == "127.0.0.1" || client_ip == "::1" || client_ip == "unknown";
             if !is_loopback {
                 warn!(
                     request_id = %request_id,

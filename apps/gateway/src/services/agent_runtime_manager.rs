@@ -146,10 +146,7 @@ impl beebotos_agents::communication::LLMCallInterface for GatewayLLMInterface {
             .chat_stream(final_messages, max_tokens_override, model_override)
             .await
             .map_err(|e| {
-                beebotos_agents::error::AgentError::Execution(format!(
-                    "LLM stream failed: {}",
-                    e
-                ))
+                beebotos_agents::error::AgentError::Execution(format!("LLM stream failed: {}", e))
             })
     }
 }

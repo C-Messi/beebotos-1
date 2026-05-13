@@ -11,10 +11,8 @@ use crate::webchat::ChatMessage;
 #[component]
 pub fn MessageList(
     messages: Signal<Vec<ChatMessage>>,
-    #[prop(default = Signal::derive(|| String::new()))]
-    streaming_content: Signal<String>,
-    #[prop(default = Signal::derive(|| false))]
-    is_streaming: Signal<bool>,
+    #[prop(default = Signal::derive(|| String::new()))] streaming_content: Signal<String>,
+    #[prop(default = Signal::derive(|| false))] is_streaming: Signal<bool>,
 ) -> impl IntoView {
     view! {
         <div class="message-list">

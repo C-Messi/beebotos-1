@@ -2290,7 +2290,7 @@ impl Agent {
         task: &Task,
         message_text: &str,
         _intent: &crate::skill_matching::IntentAnalysisV2,
-        _selection: &crate::skill_matching::SkillSelection,
+        selection: &crate::skill_matching::SkillSelection,
     ) -> Result<(String, Vec<Artifact>), AgentError> {
         let task_id = task.id.clone();
         info!("General ReAct: executing task {} (multi-step)", task_id);
@@ -2319,6 +2319,14 @@ impl Agent {
         // 2. Build general ReAct system prompt
         let mut system_prompt =
             crate::skills::general_react_prompt::build_general_react_prompt(&tools);
+        if let Some(skill_id) = &selection.selected_skill {
+            system_prompt.push_str(&format!(
+                "\n\n## 本次技能选择提示\n\nSkillSelector 已为当前请求选中 \
+                 `{}`（confidence={:.2}）。如果该技能能完成用户目标，优先通过 `skill_call` \
+                 调用它；只有在它缺少必要能力或参数时，才改用其他工具。\n",
+                skill_id, selection.confidence
+            ));
+        }
         if let Some(catalog) = &self.skill_catalog {
             system_prompt.push_str(
                 "\n\n## 注册技能目录\n\n以下技能可以通过 `skill_call` 调用。调用时必须使用真实 \
@@ -2328,7 +2336,12 @@ impl Agent {
             system_prompt.push_str(
                 "\n\n提示：显式要求互联网搜索/浏览网页时，优先调用 `skill_call`，skill_id 可使用 \
                  `agent_browser` 或 `agent-browser-clawdbot`（以目录中实际存在的 ID \
-                 为准）；如果只是抓取已知 URL，可用 `web_fetch`。",
+                 为准）；如果只是抓取已知 URL，可用 `web_fetch`。\n\n交易提示：BTC/ETH \
+                 等加密货币下单、行情、账户或持仓必须优先调用 Alpaca MCP skill。下单用 \
+                 `mcp:alpaca/place_crypto_order`，BTC/USD 报价用 \
+                 `mcp:alpaca/get_crypto_latest_quote` 或 `mcp:alpaca/get_crypto_snapshot`，持仓用 \
+                 `mcp:alpaca/get_all_positions`。不要用网页搜索或 CoinGecko 替代 可用的 Alpaca \
+                 MCP 交易/账户能力。",
             );
         }
 

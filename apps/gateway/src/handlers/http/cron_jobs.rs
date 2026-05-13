@@ -439,7 +439,7 @@ async fn execute_cron_job_inner(
     state: &Arc<AppState>,
     job: &crate::services::cron_job_service::CronJob,
 ) -> Result<String, GatewayError> {
-    use beebotos_agents::communication::{PlatformType, MessageType, Message};
+    use beebotos_agents::communication::{Message, MessageType, PlatformType};
 
     // 🆕 FIX: Cron jobs now go through the unified message entry point
     // (MessageProcessor::handle_message_via_agent) instead of directly calling
@@ -455,7 +455,7 @@ async fn execute_cron_job_inner(
         (Some(p), Some(r)) => (p.clone(), r.clone()),
         _ => {
             return Err(GatewayError::internal(
-                "MessageProcessor or AgentResolver not available for cron job execution"
+                "MessageProcessor or AgentResolver not available for cron job execution",
             ));
         }
     };
@@ -472,7 +472,10 @@ async fn execute_cron_job_inner(
             m.insert("sender_id".to_string(), user_id.to_string());
             m.insert("cron_job_id".to_string(), job.id.clone());
             m.insert("cron_job_name".to_string(), job.name.clone());
-            m.insert("message_id".to_string(), format!("cron:{}:{}", job.id, chrono::Utc::now().timestamp()));
+            m.insert(
+                "message_id".to_string(),
+                format!("cron:{}:{}", job.id, chrono::Utc::now().timestamp()),
+            );
             m.insert("session_id".to_string(), format!("cron:{}", job.id));
             m
         },
@@ -483,23 +486,22 @@ async fn execute_cron_job_inner(
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
 
     // Submit the message through the unified entry point
-    processor.handle_message_via_agent(
-        platform,
-        &channel_id,
-        message,
-        resolver,
-        state.agent_runtime.clone(),
-        Some(completion_tx),
-    ).await?;
+    processor
+        .handle_message_via_agent(
+            platform,
+            &channel_id,
+            message,
+            resolver,
+            state.agent_runtime.clone(),
+            Some(completion_tx),
+        )
+        .await?;
 
     // Wait for the background task to complete (with a generous timeout)
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        completion_rx,
-    )
-    .await
-    .map_err(|_| GatewayError::internal("Cron job execution timed out"))?
-    .map_err(|_| GatewayError::internal("Cron job completion channel closed"))?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), completion_rx)
+        .await
+        .map_err(|_| GatewayError::internal("Cron job execution timed out"))?
+        .map_err(|_| GatewayError::internal("Cron job completion channel closed"))?;
 
     result
 }

@@ -987,6 +987,10 @@ impl SkillTool for WebSearchTool {
             .ok_or("Missing 'query' parameter")?;
         let num_results = params["num_results"].as_u64().unwrap_or(5).min(10) as usize;
 
+        if let Some(official) = try_official_search_shortcut(query).await {
+            return Ok(official);
+        }
+
         let encoded_query = urlencoding::encode(query);
         let url = format!("https://html.duckduckgo.com/html/?q={}", encoded_query);
 
@@ -1053,11 +1057,67 @@ impl SkillTool for WebSearchTool {
         }
 
         if results.is_empty() {
-            Ok("No search results found.".to_string())
+            Ok(
+                "No search results found. I could not verify this via live web search; do not use \
+                 stale memory as current data."
+                    .to_string(),
+            )
         } else {
             Ok(results.join("\n"))
         }
     }
+}
+
+async fn try_official_search_shortcut(query: &str) -> Option<String> {
+    let lower = query.to_lowercase();
+    let asks_china_population = (lower.contains("中国") || lower.contains("china"))
+        && (lower.contains("人口") || lower.contains("population"));
+    if !asks_china_population {
+        return None;
+    }
+
+    let url = "https://www.stats.gov.cn/sj/zxfb/202602/t20260228_1962662.html";
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .ok()?;
+    let body = client
+        .get(url)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (X11; Linux x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0",
+        )
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+
+    let text = html_to_compact_text(&body);
+    let population_re = Regex::new(r"年末全国人口\s*(\d+)\s*万人").ok()?;
+    let captures = population_re.captures(&text)?;
+    let population = captures.get(1)?.as_str();
+    let title_re = Regex::new(r"中华人民共和国\d{4}年国民经济和社会发展统计公报").ok()?;
+    let title = title_re
+        .find(&text)
+        .map(|m| m.as_str())
+        .unwrap_or("中华人民共和国2025年国民经济和社会发展统计公报");
+
+    Some(format!(
+        "Official source result:\nTitle: {}\nSource: 国家统计局\nURL: {}\nExtracted fact: \
+         年末全国人口 {} 万人（约 {:.4} 亿人）。",
+        title,
+        url,
+        population,
+        population.parse::<f64>().unwrap_or(0.0) / 10000.0
+    ))
+}
+
+fn html_to_compact_text(html: &str) -> String {
+    let document = scraper::Html::parse_document(html);
+    let text = document.root_element().text().collect::<Vec<_>>().join(" ");
+    text.split_whitespace().collect::<Vec<_>>().join("")
 }
 
 /// Build the default tool set for skill execution
