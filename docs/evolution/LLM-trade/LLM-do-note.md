@@ -4668,3 +4668,26 @@ let tool = FileReadTool::new(project_root());
 
 &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
 
+所有测试编译错误已修复，`cargo check --tests` 通过（exit code 0）。
+
+**修复内容：**
+
+1. **`tests/planning_integration_tests.rs`** — 后台 agent 已修复 7 个 `Task { ... }` 初始化，补上了 `stream_tx: None` 字段。
+
+2. **`src/evolution/benchmark.rs`** — 补上了 `TrailStatus` 的导入：
+   ```rust
+   pub use crate::planning::{ToolTrail, TrailStatus};
+   ```
+   （`ToolTrail` 导入已由后台 agent 完成，我补充了缺失的 `TrailStatus`。）
+
+**验证结果：**
+```
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 24s
+```
+仅剩一些 `dead_code` warning（未使用的函数），无编译错误。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+
+
+

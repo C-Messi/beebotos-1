@@ -2005,8 +2005,14 @@ async fn try_connect_database(config: &AppConfig) -> anyhow::Result<SqlitePool> 
     }
 
     // SQLx 默认 create_if_missing=false，对于文件型 SQLite 需要显式启用创建
-    let connect_options =
+    let mut connect_options =
         sqlx::sqlite::SqliteConnectOptions::from_str(db_url)?.create_if_missing(true);
+
+    // 修复 SQLite database locked 问题：启用 WAL 模式 + 设置 busy_timeout
+    connect_options = connect_options
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(10));
 
     let pool = SqlitePoolOptions::new()
         .max_connections(config.database.max_connections)
