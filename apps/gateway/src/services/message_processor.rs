@@ -988,11 +988,39 @@ impl MessageProcessor {
                     );
                 }
             } else if completion_result.is_err() || stream_chunk_count == 0 {
-                if let Err(e) = processor
-                    .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
+                let mut sent_as_stream = false;
+                if let Some(channel) = processor
+                    .channel_registry
+                    .get_channel_by_platform(PlatformType::WebChat)
                     .await
                 {
-                    warn!("[BG] Failed to send fallback reply to WebChat: {}", e);
+                    let guard = channel.read().await;
+                    if let Some(webchat) = guard.as_any().downcast_ref::<
+                        beebotos_agents::communication::channel::WebChatChannel,
+                    >() {
+                        match webchat
+                            .send_stream_chunk(&channel_id_bg, &llm_response, false)
+                            .await
+                        {
+                            Ok(_) => {
+                                let _ = webchat
+                                    .send_stream_chunk(&channel_id_bg, "", true)
+                                    .await;
+                                sent_as_stream = true;
+                            }
+                            Err(e) => {
+                                warn!("[BG] Failed to send WebChat stream fallback: {}", e);
+                            }
+                        }
+                    }
+                }
+                if !sent_as_stream {
+                    if let Err(e) = processor
+                        .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
+                        .await
+                    {
+                        warn!("[BG] Failed to send fallback reply to WebChat: {}", e);
+                    }
                 }
             }
             // Mark as delivered for WebChat

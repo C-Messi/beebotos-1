@@ -802,6 +802,28 @@ impl Agent {
         }
     }
 
+    fn apply_mcp_default_params(
+        skill_id: &str,
+        params: &mut serde_json::Map<String, serde_json::Value>,
+    ) {
+        match skill_id {
+            "mcp:alpaca/place_crypto_order" => {
+                params
+                    .entry("type".to_string())
+                    .or_insert_with(|| serde_json::Value::String("market".to_string()));
+                params
+                    .entry("time_in_force".to_string())
+                    .or_insert_with(|| serde_json::Value::String("gtc".to_string()));
+            }
+            "mcp:alpaca/get_crypto_latest_quote" | "mcp:alpaca/get_crypto_snapshot" => {
+                params
+                    .entry("loc".to_string())
+                    .or_insert_with(|| serde_json::Value::String("us".to_string()));
+            }
+            _ => {}
+        }
+    }
+
     /// Set the evolution scheduler
     pub fn with_evolution_scheduler(
         mut self,
@@ -2174,11 +2196,12 @@ impl Agent {
             }
         }
 
-        let confirmation_words = ["确认", "同意", "yes", "y", "ok", "好", "可以", "执行"];
-        let is_confirmation = message_text.trim().len() <= 20
-            && confirmation_words
-                .iter()
-                .any(|w| message_text.to_lowercase().contains(w));
+        let confirmation_text = message_text.trim();
+        let confirmation_lower = confirmation_text.to_ascii_lowercase();
+        let is_confirmation = matches!(
+            confirmation_text,
+            "确认" | "同意" | "可以" | "执行" | "是" | "好" | "好的" | "确认执行"
+        ) || matches!(confirmation_lower.as_str(), "yes" | "y" | "ok" | "okay" | "confirm");
 
         if is_confirmation {
             let mut approvals = self.pending_approvals.write().await;
@@ -2215,7 +2238,11 @@ impl Agent {
                                     })
                                     .collect::<HashMap<_, _>>()
                             });
-                            let confirmed_input = if request.original_input.trim().is_empty() {
+                            let confirmed_input = if !request.params.is_null()
+                                && request.params.as_object().map_or(false, |obj| !obj.is_empty())
+                            {
+                                request.params.to_string()
+                            } else if request.original_input.trim().is_empty() {
                                 request.params.to_string()
                             } else {
                                 request.original_input.clone()
@@ -3179,9 +3206,11 @@ impl Agent {
 
             // Validate arguments; if incomplete, attempt LLM extraction
             let mut final_params = arguments.clone();
-            let needs_extraction = arguments.is_empty()
+            Self::apply_mcp_default_params(&skill_id, &mut final_params);
+            let needs_extraction = final_params.is_empty()
                 || tool_schema.as_ref().map_or(false, |schema| {
-                    crate::mcp::skill_bridge::validate_tool_arguments(schema, &arguments).is_err()
+                    crate::mcp::skill_bridge::validate_tool_arguments(schema, &final_params)
+                        .is_err()
                 });
 
             if needs_extraction {
@@ -3199,6 +3228,7 @@ impl Agent {
                         Ok(skills::ExtractedParams::Complete(params)) => {
                             info!("MCP parameter extraction succeeded for '{}'", skill_id);
                             final_params = params;
+                            Self::apply_mcp_default_params(&skill_id, &mut final_params);
                         }
                         Ok(skills::ExtractedParams::Partial { partial, missing }) => {
                             info!(

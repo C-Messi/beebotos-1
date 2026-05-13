@@ -4808,3 +4808,21 @@ connect_options = connect_options
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%5
 
+这两个现象连起来看，第二个更危险：你好 被当成了“好/确认”触发了 pending approval，所以订单被提交了。第一个像是 fallback chat_message 没有实时进当前流式占位，但后来历史/下一轮状态刷新把它补出来。我先修确认词误判，再看 WebChat 即时显示路径。
+
+
+
+修了两个关键点：
+
+1. `你好` 不会再触发“确认”
+   之前确认判断用的是 `contains("好")`，所以“你好”命中了 `好`，把 pending approval 当成确认执行了。现在改成严格短语匹配，只接受完整的 `确认`、`同意`、`可以`、`执行`、`好`、`好的`、`yes`、`ok` 等。  
+   位置：[agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:2199)
+
+2. 零 chunk 的 WebChat 回复改走 stream fallback
+   之前后端发送了 `chat_message`，但页面没有即时显示，下一次发消息/刷新历史才出现。现在如果后台路径没有产生任何 stream chunk，会主动发送一条完整 `chat_stream` 内容，再发送 `finished=true`，走前端已经验证可用的流式渲染路径。  
+   位置：[message_processor.rs](/root/beebotos/apps/gateway/src/services/message_processor.rs:987)
+
+已验证：`cargo check -p beebotos-agents -p beebotos-gateway` 通过，仅有既有 warnings。重启 gateway/agent 后生效。
+
+
+
