@@ -121,9 +121,10 @@ impl LLMIntentAnalyzer {
             let cache = self.cache.read().await;
             if let Some((cached, timestamp)) = cache.get(&cache_key) {
                 if timestamp.elapsed() < self.cache_ttl {
+                    let display_key: String = cache_key.chars().take(50).collect();
                     tracing::debug!(
                         "Intent analysis cache hit for: {}",
-                        &cache_key[..cache_key.len().min(50)]
+                        display_key
                     );
                     return Ok(cached.clone());
                 }

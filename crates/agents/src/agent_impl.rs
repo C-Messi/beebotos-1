@@ -110,6 +110,7 @@ struct AgentSkillDispatcher {
     skill_catalog: Option<String>,
     tool_work_dir: std::path::PathBuf,
     llm_client: Option<Arc<crate::llm::LLMClient>>,
+    user_request: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -122,7 +123,12 @@ impl crate::skills::ToolDispatcher for AgentSkillDispatcher {
         match tool_name {
             "skill_call" => {
                 let agent = self.as_agent();
-                agent.execute_skill_call_from_react(arguments).await
+                agent
+                    .execute_skill_call_from_react_with_context(
+                        arguments,
+                        self.user_request.as_deref(),
+                    )
+                    .await
             }
             "parallel_delegate" => self.execute_parallel_delegate(arguments).await,
             other => Err(format!("ToolDispatcher cannot handle '{}'", other)),
@@ -164,7 +170,13 @@ impl AgentSkillDispatcher {
             skill_catalog: agent.skill_catalog.clone(),
             tool_work_dir: agent.tool_work_dir.clone(),
             llm_client: agent.llm_client.clone(),
+            user_request: None,
         }
+    }
+
+    fn with_user_request(mut self, user_request: impl Into<String>) -> Self {
+        self.user_request = Some(user_request.into());
+        self
     }
 
     fn as_agent(&self) -> Agent {
@@ -340,6 +352,7 @@ impl AgentSkillDispatcher {
             skill_catalog: self.skill_catalog.clone(),
             tool_work_dir: self.tool_work_dir.clone(),
             llm_client: self.llm_client.clone(),
+            user_request: self.user_request.clone(),
         }
     }
 
@@ -360,6 +373,18 @@ impl AgentSkillDispatcher {
                     "parallel_delegate refuses to execute high-risk write skills. Query required \
                      data in parallel first, then call the order skill separately so approval and \
                      confirmation stay in the main flow."
+                        .to_string(),
+                ),
+            };
+        }
+        if branch.skill_id.is_none() && looks_like_high_risk_write_task(&branch.task) {
+            return ParallelDelegateBranchResult {
+                id: branch.id,
+                task: branch.task,
+                result: Err(
+                    "parallel_delegate refuses natural-language branches that appear to place, \
+                     cancel, or modify orders. Query-only branches are allowed; execute the \
+                     write action separately in the main flow."
                         .to_string(),
                 ),
             };
@@ -497,6 +522,59 @@ fn is_high_risk_write_skill(skill_id: &str) -> bool {
         || lower.contains("withdraw")
 }
 
+fn looks_like_high_risk_write_task(task: &str) -> bool {
+    let lower = task.to_ascii_lowercase();
+    let text = task.trim();
+    [
+        "下单",
+        "开一单",
+        "买入",
+        "卖出",
+        "做多",
+        "做空",
+        "提交订单",
+        "取消订单",
+        "平仓",
+        "撤单",
+        "place order",
+        "submit order",
+        "buy ",
+        "sell ",
+        "cancel order",
+        "close position",
+    ]
+    .iter()
+        .any(|needle| text.contains(needle) || lower.contains(needle))
+}
+
+fn extract_usd_notional(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let chars: Vec<char> = text.chars().collect();
+    for (idx, ch) in chars.iter().enumerate() {
+        if !ch.is_ascii_digit() {
+            continue;
+        }
+        let mut end = idx;
+        while end < chars.len() && (chars[end].is_ascii_digit() || chars[end] == '.') {
+            end += 1;
+        }
+        let value: String = chars[idx..end].iter().collect();
+        let tail: String = chars[end..chars.len().min(end + 12)].iter().collect();
+        let tail_lower = tail.to_ascii_lowercase();
+        let prefix_start = idx.saturating_sub(2);
+        let prefix: String = chars[prefix_start..idx].iter().collect();
+        if tail_lower.contains("usd")
+            || tail.contains("美元")
+            || tail.contains("美金")
+            || prefix.contains('$')
+            || lower.contains(&format!("${}", value))
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
 #[allow(dead_code)]
 fn should_force_general_react(message_text: &str) -> bool {
     let lower = message_text.to_ascii_lowercase();
@@ -615,6 +693,15 @@ impl Agent {
         &self,
         arguments: serde_json::Map<String, serde_json::Value>,
     ) -> Result<String, String> {
+        self.execute_skill_call_from_react_with_context(arguments, None)
+            .await
+    }
+
+    async fn execute_skill_call_from_react_with_context(
+        &self,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        user_request: Option<&str>,
+    ) -> Result<String, String> {
         let skill_id = arguments
             .get("skill_id")
             .or_else(|| arguments.get("id"))
@@ -631,13 +718,13 @@ impl Agent {
                 fallback.remove("id");
                 fallback.remove("params");
                 if fallback.is_empty() {
-                    String::new()
+                    user_request.unwrap_or_default().to_string()
                 } else {
                     serde_json::Value::Object(fallback).to_string()
                 }
             });
 
-        let params = arguments
+        let mut params = arguments
             .get("params")
             .and_then(|v| v.as_object())
             .map(|obj| {
@@ -654,12 +741,65 @@ impl Agent {
                     .collect::<HashMap<_, _>>()
             });
 
+        self.apply_react_skill_param_defaults(skill_id, &input, user_request, &mut params);
+
         let result = self
             .execute_skill_by_id(skill_id, &input, params)
             .await
             .map_err(|e| e.to_string())?;
 
         Ok(self.synthesize_skill_output(&input, &result.output, skill_id))
+    }
+
+    fn apply_react_skill_param_defaults(
+        &self,
+        skill_id: &str,
+        input: &str,
+        user_request: Option<&str>,
+        params: &mut Option<HashMap<String, String>>,
+    ) {
+        let context = format!("{}\n{}", user_request.unwrap_or_default(), input);
+        let lower = context.to_ascii_lowercase();
+        let mentions_btc = lower.contains("btc") || lower.contains("bitcoin");
+        let mentions_eth = lower.contains("eth") || lower.contains("ethereum");
+        let default_crypto_symbol = if mentions_eth {
+            Some("ETH/USD")
+        } else if mentions_btc || skill_id.contains("crypto") || skill_id.contains("alpaca") {
+            Some("BTC/USD")
+        } else {
+            None
+        };
+
+        if matches!(
+            skill_id,
+            "mcp:alpaca/get_crypto_latest_quote" | "mcp:alpaca/get_crypto_snapshot"
+        ) {
+            if let Some(symbol) = default_crypto_symbol {
+                let params = params.get_or_insert_with(HashMap::new);
+                params.entry("symbols".to_string()).or_insert(symbol.to_string());
+                params.entry("loc".to_string()).or_insert("us".to_string());
+            }
+        }
+
+        if skill_id == "mcp:alpaca/place_crypto_order" {
+            let params = params.get_or_insert_with(HashMap::new);
+            if let Some(symbol) = default_crypto_symbol {
+                params.entry("symbol".to_string()).or_insert(symbol.to_string());
+            }
+            if lower.contains("卖") || lower.contains("sell") || lower.contains("做空") {
+                params.entry("side".to_string()).or_insert("sell".to_string());
+            } else if lower.contains("买") || lower.contains("buy") || lower.contains("做多") {
+                params.entry("side".to_string()).or_insert("buy".to_string());
+            }
+            if lower.contains("市场") || lower.contains("市价") || lower.contains("market") {
+                params.entry("type".to_string()).or_insert("market".to_string());
+            }
+            if !params.contains_key("notional") && !params.contains_key("qty") {
+                if let Some(notional) = extract_usd_notional(&context) {
+                    params.insert("notional".to_string(), notional);
+                }
+            }
+        }
     }
 
     /// Set the evolution scheduler
@@ -2152,10 +2292,11 @@ impl Agent {
     ) -> Result<(String, Vec<Artifact>), AgentError> {
         let task_id = task.id.clone();
         let message_text = Self::extract_user_input(&task);
+        let display_msg: String = message_text.chars().take(80).collect();
         info!(
             "Unified ReAct entry for task {}: {}",
             task_id,
-            &message_text[..message_text.len().min(80)]
+            display_msg
         );
 
         // 1. Build full-context system prompt
@@ -2193,7 +2334,9 @@ impl Agent {
             .clone()
             .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
 
-        let skill_dispatcher = std::sync::Arc::new(AgentSkillDispatcher::from_agent(self));
+        let skill_dispatcher = std::sync::Arc::new(
+            AgentSkillDispatcher::from_agent(self).with_user_request(message_text.clone()),
+        );
         let mut executor = crate::skills::UnifiedReActExecutor::new(llm)
             .with_config(crate::skills::UnifiedReActConfig {
                 max_rounds: self.max_rounds as usize,
@@ -2911,9 +3054,14 @@ impl Agent {
             _ => {}
         }
 
+        let parsed_mcp_skill =
+            crate::mcp::skill_bridge::parse_mcp_skill_id(&registered_skill.skill.id);
+
         // 🆕 OPTIMIZATION PHASE 1: Approval gate for destructive operations
         // 🆕 FIX (Plan C): Store pending approval for multi-step user confirmation
-        if !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst) {
+        if parsed_mcp_skill.is_none()
+            && !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst)
+        {
             if let Some(ref gate) = self.approval_gate {
                 let env = std::collections::HashMap::new(); // Could be enriched with env vars
                 let params_json = parameters
@@ -2987,9 +3135,7 @@ impl Agent {
 
         // ── MCP Skill Bridge: Two-Stage Execution (Parameter Resolution → Confirmation
         // & Execution) ──
-        if let Some((server_name, tool_name)) =
-            crate::mcp::skill_bridge::parse_mcp_skill_id(&registered_skill.skill.id)
-        {
+        if let Some((server_name, tool_name)) = parsed_mcp_skill {
             let mcp = self
                 .mcp_manager
                 .as_ref()
@@ -3185,10 +3331,21 @@ impl Agent {
                             }
                         }
                         crate::security::ApprovalResult::Rejected { reason } => {
+                            let request = gate.build_request(&skill_id, &params_json, input);
+                            let req_id = request.request_id.clone();
+                            {
+                                let mut pending = self.pending_approvals.write().await;
+                                pending.insert(req_id, request);
+                            }
+
                             return Ok(skills::executor::SkillExecutionResult {
                                 task_id: skill_id,
                                 success: false,
-                                output: format!("{}\n\n{}", preview, reason),
+                                output: format!(
+                                    "{}\n\n{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\n\
+                                     请回复「确认」或「同意」来执行此操作。",
+                                    preview, reason
+                                ),
                                 structured_output: None,
                                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                             });
@@ -3976,10 +4133,11 @@ impl Agent {
             .map_err(|e| AgentError::Execution(format!("Failed to read file: {}", e)))?;
 
         let output = if task.input.is_empty() {
+            let display_content: String = content.chars().take(100).collect();
             format!(
                 "File content ({} bytes): {}",
                 content.len(),
-                &content[..content.len().min(100)]
+                display_content
             )
         } else {
             let llm = self

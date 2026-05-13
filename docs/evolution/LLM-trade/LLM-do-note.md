@@ -4688,6 +4688,123 @@ Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 24s
 
 &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
 
+代码已修改。`apps/gateway/src/main.rs` 的 `try_connect_database()` 现在会：
+
+1. **启用 WAL 模式** (`journal_mode = WAL`) — SQLite 的 Write-Ahead Logging 允许多个读取者并发，写入者不会阻塞读取者
+2. **设置同步模式为 NORMAL** — WAL + NORMAL 是推荐的并发组合
+3. **设置 busy_timeout = 10 秒** — 当数据库被锁时，连接会等待最多 10 秒再报错，而不是立即失败
+
+```rust
+connect_options = connect_options
+    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+    .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+    .busy_timeout(Duration::from_secs(10));
+```
+
+**注意**：`cargo check -p beebotos-gateway` 在当前环境编译时间超过 5 分钟无法完成，所以未能编译验证。但 `sqlx::sqlite::SqliteJournalMode::Wal` 和 `SqliteSynchronous::Normal` 是 sqlx 的标准 API，语法应该正确。
+
+如果仍有问题，可能还需要：
+- 检查 `max_connections` 配置是否过高（SQLite 建议不超过 10）
+- 检查是否还有其他地方直接操作 SQLite 文件（如 rusqlite）与 sqlx 冲突
+
+已修复。以下是问题分析和修复总结：
+
+---
+
+## 问题分析
+
+**Panic 位置：** `crates/agents/src/agent_impl.rs:2158`
+
+```rust
+&message_text[..message_text.len().min(80)]
+```
+
+**根因：** 这段代码用**字节索引**截断字符串。用户输入包含中文 `）`（UTF-8 占 3 字节：78..81），当截取位置恰好落在这个字符的中间字节时，Rust 会 panic。
+
+用户输入：`"根据当前行情，帮我开一单BTC市场（单笔金额不要超过100USD），然后告诉我持仓情况"`
+- 字节 78..81 是 `）`
+- 代码尝试切到字节 80 → 落在字符内部 → panic
+
+---
+
+## 修复内容
+
+将 6 处**字节级字符串截断**全部改为**字符级安全截断**：
+
+| 文件 | 行 | 修复前 | 修复后 |
+|:---|:---|:---|:---|
+| `agent_impl.rs` | 2158 | `&msg[..msg.len().min(80)]` | `msg.chars().take(80).collect()` |
+| `agent_impl.rs` | 3983 | `&content[..content.len().min(100)]` | `content.chars().take(100).collect()` |
+| `skill_selector.rs` | 118 | `&cache_key[..cache_key.len().min(50)]` | `cache_key.chars().take(50).collect()` |
+| `intent_analyzer.rs` | 126 | `&cache_key[..cache_key.len().min(50)]` | `cache_key.chars().take(50).collect()` |
+| `unified_react_executor.rs` | 227 | `&resp[..resp.len().min(200)]` | `resp.chars().take(200).collect()` |
+| `link_handler.rs` | 451 | `&content[..content.len().min(3000)]` | `content.chars().take(3000).collect()` |
+
+`cargo check -p beebotos-agents --lib` 验证通过 ✅
 
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+原因有两个，叠在一起了：
+
+1. **确认后的回复没有推到 WebChat**
+   日志里确认任务成功了：
+
+   `Task ... completed successfully`
+   `🤖 [BG] ... 回复: 📋 请补充以下信息...`
+
+   但紧接着：
+
+   `Stream consumer finished ... 0 chunks processed`
+
+   代码里 WebChat 成功响应默认认为已经通过 `chat_stream` 发给前端，所以不会再走完整消息 `send_reply`。而“确认 pending approval”这条快速路径是直接 `return Ok((output, vec![]))`，没有产生任何 stream chunk。结果就是：后端有回复、也可能保存进历史，但前端只收到空的 `finished=true`，页面看起来没有回复。
+
+2. **待确认订单参数在审批阶段丢了**
+   初始下单时，`mcp:alpaca/place_crypto_order` 被 approval gate 拦截：
+
+   `Approval required but not granted`
+
+   但它是在 MCP 参数提取/校验之前被拦的，所以 pending approval 里保存的是空参数 `{}`。用户回复“确认”后，日志显示：
+
+   `McpParameterExtractor: extracting params ... from input: {}`
+   `partial extraction, got ["side", "symbol"], missing: ["qty", "notional"]`
+
+   所以确认后并没有真正提交订单，而是生成了“请补充 qty/notional”的回复。只是这个回复又因为第 1 个问题没有被 WebChat 显示出来。
+
+结论：页面无回复不是前端渲染主因，而是后端 WebChat 发送路径的问题；订单没执行则是 approval 在 MCP 参数准备完成前触发，导致 pending approval 保存了空参数。建议修两处：WebChat 在 `0 chunks processed` 且有成功响应时兜底发送 `chat_message`；MCP 高风险技能不要在通用 approval gate 入口提前拦截，应该等 MCP Stage 1 得到完整 `final_params` 后再创建 pending approval。
+
+
+已修复两个问题：
+
+1. WebChat 无流式 chunk 时会兜底发送完整 `chat_message`
+   修改在 [message_processor.rs](/root/beebotos/apps/gateway/src/services/message_processor.rs:821)。现在后台任务会等待 stream consumer 汇报 chunk 数；如果 WebChat 成功响应但 `chunk_count == 0`，会直接把完整回复推给前端。确认后“请补充信息/执行结果”不会再静默消失。
+
+2. MCP 高风险交易审批改为在参数解析后创建 pending approval
+   修改在 [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:2912)。现在 MCP 技能不会被通用 approval gate 提前用空 `{}` 拦截，而是在 MCP Stage 1 得到完整 `final_params` 后再审批；`place_crypto_order` 的 pending approval 会保存 `symbol/side/notional` 等参数，用户回复“确认”后不会再丢金额。
+
+验证：已跑 `cargo check -p beebotos-gateway -p beebotos-agents`，通过；只剩项目里已有 warnings。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+已继续修复这轮日志暴露的新问题：
+
+1. `skill_call` 空参数问题  
+   ReAct 现在会把原始用户请求传给 `AgentSkillDispatcher`。如果 LLM 只给了 `skill_id`、没给 `input/params`，不会再传空字符串给 MCP 参数提取器，而是用原始请求兜底。  
+   位置：[agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:692)
+
+2. Alpaca BTC 常用参数兜底  
+   对 `get_crypto_latest_quote/get_crypto_snapshot` 自动补 `symbols=BTC/USD, loc=us`；对 `place_crypto_order` 自动从原始请求补 `symbol/side/type/notional`，比如“不要超过100USD”会提取 `notional=100`。  
+   位置：[agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:751)
+
+3. 禁止 `parallel_delegate` 偷跑下单分支  
+   如果并行分支是自然语言但看起来像“下单/买入/卖出/撤单/平仓”，现在会拒绝它在并行里执行，强制回到主流程顺序执行审批。  
+   位置：[agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:377)
+
+验证已通过：
+
+`cargo check -p beebotos-agents -p beebotos-gateway`
+
+只有项目里已有 warnings。需要重启 gateway/agent 进程后这次修复才会对 WebChat 生效。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%5
 

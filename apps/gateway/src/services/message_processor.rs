@@ -821,6 +821,9 @@ impl MessageProcessor {
         let platform_bg = platform;
         let agent_runtime_bg = Arc::clone(&agent_runtime);
 
+        let (stream_count_tx, mut stream_count_rx) =
+            tokio::sync::oneshot::channel::<usize>();
+
         // 🆕 STREAMING: Spawn a task to consume stream chunks and send to WebSocket
         if let Some(stream_rx) = stream_rx {
             let channel_id_stream = channel_id_bg.clone();
@@ -877,7 +880,10 @@ impl MessageProcessor {
                         );
                     }
                 }
+                let _ = stream_count_tx.send(chunk_count);
             });
+        } else {
+            let _ = stream_count_tx.send(0);
         }
 
         tokio::spawn(async move {
@@ -947,10 +953,30 @@ impl MessageProcessor {
                 }
             }
 
+            let stream_chunk_count = if platform_bg == PlatformType::WebChat {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    &mut stream_count_rx,
+                )
+                .await
+                {
+                    Ok(Ok(count)) => count,
+                    Ok(Err(_)) => 0,
+                    Err(_) => {
+                        warn!(
+                            "[BG] Timed out waiting for WebChat stream completion for session {}",
+                            channel_id_bg
+                        );
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+
             // 🆕 STREAMING: For non-WebChat platforms, send the full reply directly.
-            // For WebChat, the stream consumer task already sent chunks + finished=true.
-            // 🆕 FIX: If the task failed for WebChat, send the error message directly so
-            // the user isn't left hanging with an empty stream.
+            // For WebChat, stream chunks are preferred; if no chunks were produced
+            // (for example approval-confirmation fast paths), send the full reply.
             if platform_bg != PlatformType::WebChat {
                 if let Err(e) = processor
                     .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
@@ -961,12 +987,12 @@ impl MessageProcessor {
                         e
                     );
                 }
-            } else if completion_result.is_err() {
+            } else if completion_result.is_err() || stream_chunk_count == 0 {
                 if let Err(e) = processor
                     .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
                     .await
                 {
-                    warn!("[BG] Failed to send error reply to WebChat: {}", e);
+                    warn!("[BG] Failed to send fallback reply to WebChat: {}", e);
                 }
             }
             // Mark as delivered for WebChat

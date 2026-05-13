@@ -220,11 +220,12 @@ impl UnifiedReActExecutor {
             let parsed = match parse_react_response(&llm_response) {
                 Ok(p) => p,
                 Err(e) => {
+                    let display_resp: String = llm_response.chars().take(200).collect();
                     warn!(
                         "Round {}: Failed to parse LLM response: {}. Response: {}",
                         round,
                         e,
-                        &llm_response[..llm_response.len().min(200)]
+                        display_resp
                     );
                     // Guide LLM to retry with correct format
                     messages.push(CommMessage::new(
