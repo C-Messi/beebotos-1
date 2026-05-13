@@ -138,14 +138,14 @@ mutual_tls = false
 # Alpaca Trading API MCP Server
 # Provides 60+ tools for stock trading, market data, and account management.
 # Requires ALPACA_API_KEY and ALPACA_SECRET_KEY from https://alpaca.markets/
-[[mcp.servers]]
-name = "alpaca"
-transport = "stdio"
-command = "uv"
-args = ["run", "--quiet", "python", "-m", "alpaca_mcp_server.cli"]
-working_dir = "/root/alpaca-mcp-server"
+# [[mcp.servers]]
+# name = "alpaca"
+# transport = "stdio"
+# command = "uv"
+# args = ["run", "--quiet", "python", "-m", "alpaca_mcp_server.cli"]
+# working_dir = "/root/alpaca-mcp-server"
 # TODO: Fill in your Alpaca API credentials
-env = { ALPACA_API_KEY = "PKJX2TXVDNC33FEM3TSRKRSP4S", ALPACA_SECRET_KEY = "9AyE34tuoTj1TSbZDpmfHmkrrSf7M16QUQBTEJm6M7mR" }
+# env = { ALPACA_API_KEY = "PKJX2TXVDNC33FEM3TSRKRSP4S", ALPACA_SECRET_KEY = "9AyE34tuoTj1TSbZDpmfHmkrrSf7M16QUQBTEJm6M7mR" }
 
 [mcp]
 auto_init = true
