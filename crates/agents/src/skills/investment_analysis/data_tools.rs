@@ -10,9 +10,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tracing::{debug, error, info};
 
-use crate::error::AgentError;
 use crate::mcp::client::MCPClient;
-use crate::mcp::skill_bridge::parse_mcp_skill_id;
 use crate::skills::tool_set::SkillTool;
 
 /// Build the default set of investment analysis data tools

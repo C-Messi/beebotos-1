@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 
 use crate::communication::{LLMCallInterface, Message as CommMessage, PlatformType};
 use crate::error::AgentError;
+use crate::skills::registry::{SkillDisclosureLevel, SkillRegistry};
 use crate::skills::tool_set::SkillTool;
 
 /// Configuration for the Unified ReAct Executor
@@ -90,6 +91,8 @@ pub struct UnifiedReActExecutor {
     llm: Arc<dyn LLMCallInterface>,
     config: UnifiedReActConfig,
     tool_dispatcher: Option<Arc<dyn ToolDispatcher>>,
+    /// 🆕 Optional skill registry for on-demand L3 document injection
+    skill_registry: Option<Arc<SkillRegistry>>,
 }
 
 /// Optional host-side dispatcher for tools that need Agent-level services
@@ -110,6 +113,7 @@ impl UnifiedReActExecutor {
             llm,
             config: UnifiedReActConfig::default(),
             tool_dispatcher: None,
+            skill_registry: None,
         }
     }
 
@@ -120,6 +124,12 @@ impl UnifiedReActExecutor {
 
     pub fn with_tool_dispatcher(mut self, dispatcher: Arc<dyn ToolDispatcher>) -> Self {
         self.tool_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// 🆕 Attach a skill registry to enable on-demand L3 document injection.
+    pub fn with_skill_registry(mut self, registry: Arc<SkillRegistry>) -> Self {
+        self.skill_registry = Some(registry);
         self
     }
 
@@ -229,6 +239,32 @@ impl UnifiedReActExecutor {
                     continue;
                 }
             };
+
+            // 🆕 L3 on-demand injection: detect if LLM asks for detailed skill docs
+            if let Some(ref registry) = self.skill_registry {
+                if let Some(skill_id) = Self::extract_l3_request(&parsed.thought) {
+                    if let Some(l3_doc) = registry
+                        .get_skill_description(&skill_id, SkillDisclosureLevel::L3)
+                        .await
+                    {
+                        info!(
+                            "Round {}: Injecting L3 doc for skill '{}' ({} chars)",
+                            round,
+                            skill_id,
+                            l3_doc.len()
+                        );
+                        messages.push(CommMessage::new(
+                            uuid::Uuid::new_v4(),
+                            PlatformType::Custom,
+                            format!(
+                                "[System] 以下为 skill `{}` 的完整文档（L3）：\n{}\n\
+                                 请基于以上文档继续完成任务。",
+                                skill_id, l3_doc
+                            ),
+                        ));
+                    }
+                }
+            }
 
             match parsed.action {
                 ReActAction::CallTool {
@@ -611,6 +647,38 @@ impl UnifiedReActExecutor {
             .push("由于任务被中断，以上信息可能不完整。如需继续，请重新发送您的请求。".to_string());
 
         lines.join("\n")
+    }
+
+    /// 🆕 Extract skill_id from LLM thought when it asks for L3 detailed documentation.
+    /// Matches patterns like:
+    /// - "需要 weather_assistant 的详细文档"
+    /// - "need detailed doc for mcp:alpaca/place_crypto_order"
+    /// - "请提供 portfolio_analyzer 的完整文档"
+    pub fn extract_l3_request(thought: &str) -> Option<String> {
+        let patterns = [
+            // Chinese patterns
+            regex::Regex::new(r"需要\s+([\w\-:/]+)\s+的详细文档").ok()?,
+            regex::Regex::new(r"需要\s+([\w\-:/]+)\s+的完整文档").ok()?,
+            regex::Regex::new(r"请提供\s+([\w\-:/]+)\s+的(?:详细|完整)文档").ok()?,
+            regex::Regex::new(r"请给出\s+([\w\-:/]+)\s+的(?:详细|完整)文档").ok()?,
+            regex::Regex::new(r"([\w\-:/]+)\s+的(?:详细|完整)文档").ok()?,
+            // English patterns
+            regex::Regex::new(r"need detailed doc(?:umentation)? for\s+([\w\-:/]+)").ok()?,
+            regex::Regex::new(r"need full doc(?:umentation)? for\s+([\w\-:/]+)").ok()?,
+            regex::Regex::new(r"provide (?:the )?full doc(?:umentation)? (?:of|for)\s+([\w\-:/]+)").ok()?,
+        ];
+
+        for re in &patterns {
+            if let Some(caps) = re.captures(thought) {
+                if let Some(matched) = caps.get(1) {
+                    let skill_id = matched.as_str().trim().to_string();
+                    if !skill_id.is_empty() {
+                        return Some(skill_id);
+                    }
+                }
+            }
+        }
+        None
     }
 }
 

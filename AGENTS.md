@@ -89,6 +89,55 @@ beebotos/
 └── proto/                  # Protocol Buffer 定义
 ```
 
+## Agent 任务处理架构（2026-05-13 更新）
+
+### 统一 ReAct 入口
+
+所有 `LlmChat` 类型任务统一进入 `execute_unified_react()`，不再进行前置 Intent 分类。
+
+```
+User Input
+    ↓
+process_task() ──→ process_task_v2() ──→ execute_unified_react(task)
+                                              ↓
+                                    build_unified_react_prompt()
+                                    - Persona (SOUL.md)
+                                    - Memories (all, no filtering)
+                                    - Skills L1 + L2 (all, hierarchical)
+                                    - Tools (all builtin + skill_call + parallel_delegate)
+                                    - ReAct rules
+                                              ↓
+                                    UnifiedReActExecutor::execute()
+                                    - LLM decides: call_tool or final_answer
+                                    - Max 30 rounds
+                                    - L3 injected on-demand
+```
+
+### Skills 注入层次
+
+- **L1（索引）**：所有 skills 的 id + name + one-liner，始终注入
+- **L2（摘要）**：所有 skills 的 summary，始终注入
+- **L3（完整文档）**：默认不注入；LLM 在 thought 中请求时自动追加
+
+### 关键文件
+
+| 文件 | 职责 |
+|------|------|
+| `crates/agents/src/agent_impl.rs` | 统一 ReAct 入口、Prompt 组装、Skills/Tools 构建 |
+| `crates/agents/src/prompt/builder.rs` | PromptBuilder：`build_unified_react()` |
+| `crates/agents/src/skills/unified_react_executor.rs` | ReAct 执行引擎、L3 动态注入 |
+
+### 已废弃的旧组件
+
+以下组件保留源码但不再参与主路由：
+- `IntentEngine`（启发式意图分类）
+- `LLMIntentAnalyzer V2`（LLM 意图分析）
+- `SkillSelector`（技能选择器）
+
+详细技术方案见：`docs/evolution/LLM-trade/remove-v2-intent-unified-react-v1.md`
+
+---
+
 ## 构建与测试命令
 
 ### 环境要求

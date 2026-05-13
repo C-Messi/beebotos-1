@@ -198,7 +198,7 @@ impl DelegateResolver for AgentDelegateResolver {
             .upgrade()
             .ok_or_else(|| "Parent agent no longer available".to_string())?;
 
-        let mut child = parent
+        let child = parent
             .spawn_sub_agent(branch.agent_config.clone())
             .map_err(|e| format!("Failed to spawn sub-agent: {}", e))?;
 

@@ -2,7 +2,6 @@
 //!
 //! Implements Hermes-style dynamic modular assembly and progressive disclosure.
 
-use crate::intent::UserIntent;
 use crate::memory::MemoryEntry;
 
 /// Skill description at different disclosure levels
@@ -150,8 +149,10 @@ impl PromptBuilder {
         self
     }
 
-    /// Build the final prompt string based on intent and model
-    pub fn build(self, intent: &UserIntent) -> String {
+    /// 🆕 Build the final prompt for unified ReAct mode.
+    /// All skills (L1+L2), all tools, and all memories are injected.
+    /// No intent-based filtering.
+    pub fn build_unified_react(self) -> String {
         let mut parts = Vec::new();
         let c = self.components;
 
@@ -160,52 +161,102 @@ impl PromptBuilder {
             parts.push(instr);
         }
 
-        // 2. Base persona (always loaded, but compressible)
+        // 2. Base persona (always loaded)
         if let Some(soul) = c.soul {
             parts.push(soul);
         }
 
-        // 3. User profile (L2, always loaded)
+        // 3. User profile (L2 memory, always loaded)
         if let Some(profile) = c.user_profile {
             parts.push(format!("[用户偏好]\n{}", profile));
         }
 
-        // 4. Project memory (L1, always loaded)
+        // 4. Project memory (L1 memory, always loaded)
         if let Some(project) = c.project_memory {
             parts.push(format!("[项目约定]\n{}", project));
         }
 
-        // 5. Dynamic memories (L3, filtered by intent relevance)
-        let relevant_memories = Self::filter_memories_by_intent(&c.memories, intent);
-        if !relevant_memories.is_empty() {
-            let memory_text = relevant_memories
+        // 5. Dynamic memories (all, no intent filtering)
+        if !c.memories.is_empty() {
+            let memory_text = c.memories
                 .iter()
+                .take(10)
                 .map(|m| format!("- {}", m.content))
                 .collect::<Vec<_>>()
                 .join("\n");
             parts.push(format!("[相关记忆]\n{}", memory_text));
         }
 
-        // 5. Skills (progressive loading based on intent)
-        let skill_text = Self::build_skills_section(&c.skills, intent);
+        // 6. Skills (L1/L2 hierarchical — all skills)
+        let skill_text = Self::build_hierarchical_skills(&c.skills);
         if !skill_text.is_empty() {
             parts.push(skill_text);
         }
 
-        // 6. Tool usage guide (on-demand)
-        if !matches!(intent, UserIntent::DirectAnswer | UserIntent::MetaQuestion) {
-            if !c.tools.is_empty() {
-                let tools_text = c
-                    .tools
-                    .iter()
-                    .map(|t| format!("- {}: {}", t.name, t.description))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                parts.push(format!("[可用工具]\n{}", tools_text));
-            }
+        // 7. Tools (all, no intent filtering)
+        if !c.tools.is_empty() {
+            let tools_text = c
+                .tools
+                .iter()
+                .map(|t| format!("- {}: {}\n  参数: {}",
+                    t.name, t.description,
+                    serde_json::to_string(&t.parameters).unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            parts.push(format!("[可用工具]\n{}", tools_text));
         }
 
-        // 7. Context files
+        // 8. Context files
+        for file in c.context_files {
+            parts.push(format!("[{}]\n{}", file.name, file.content));
+        }
+
+        // 9. Unified ReAct rules
+        parts.push(build_unified_react_rules().to_string());
+
+        parts.join("\n\n")
+    }
+
+    /// Build the final prompt string based on intent and model (legacy, kept for compatibility)
+    #[deprecated(note = "Use build_unified_react instead")]
+    pub fn build(self, _intent: &crate::intent::UserIntent) -> String {
+        let mut parts = Vec::new();
+        let c = self.components;
+
+        if let Some(instr) = c.model_instructions {
+            parts.push(instr);
+        }
+        if let Some(soul) = c.soul {
+            parts.push(soul);
+        }
+        if let Some(profile) = c.user_profile {
+            parts.push(format!("[用户偏好]\n{}", profile));
+        }
+        if let Some(project) = c.project_memory {
+            parts.push(format!("[项目约定]\n{}", project));
+        }
+        if !c.memories.is_empty() {
+            let memory_text = c.memories
+                .iter()
+                .take(3)
+                .map(|m| format!("- {}", m.content))
+                .collect::<Vec<_>>()
+                .join("\n");
+            parts.push(format!("[相关记忆]\n{}", memory_text));
+        }
+        let skill_text = Self::build_hierarchical_skills(&c.skills);
+        if !skill_text.is_empty() {
+            parts.push(skill_text);
+        }
+        if !c.tools.is_empty() {
+            let tools_text = c
+                .tools
+                .iter()
+                .map(|t| format!("- {}: {}", t.name, t.description))
+                .collect::<Vec<_>>()
+                .join("\n");
+            parts.push(format!("[可用工具]\n{}", tools_text));
+        }
         for file in c.context_files {
             parts.push(format!("[{}]\n{}", file.name, file.content));
         }
@@ -213,81 +264,47 @@ impl PromptBuilder {
         parts.join("\n\n")
     }
 
-    /// Build prompt with reasoning scratchpad for complex tasks
-    pub fn build_with_reasoning(self, intent: &UserIntent) -> String {
-        let mut prompt = self.build(intent);
-        if matches!(intent, UserIntent::MultiStepPlanning) {
-            prompt.push_str(
-                "\n\n[推理指南]\n这是一个复杂任务，请按以下步骤思考并在回复中包含 \
-                 <REASONING_SCRATCHPAD> 标签：\n1. 分析用户目标\n2. 确定需要调用的工具及顺序\n3. \
-                 验证每一步的依赖关系\n输出格式：<REASONING_SCRATCHPAD>你的思考过程</\
-                 REASONING_SCRATCHPAD>\n然后输出实际回答或工具调用。",
-            );
+    /// 🆕 Build hierarchical skills section (L1 index + L2 summaries)
+    /// All skills are included; L3 is injected on-demand during ReAct rounds.
+    fn build_hierarchical_skills(skills: &[SkillLevelDesc]) -> String {
+        let mut l1_items = Vec::new();
+        let mut l2_sections = Vec::new();
+
+        for skill in skills {
+            match skill {
+                SkillLevelDesc::L1 { .. } => l1_items.push(skill.to_prompt_text()),
+                SkillLevelDesc::L2 { .. } => l2_sections.push(skill.to_prompt_text()),
+                SkillLevelDesc::L3 { .. } => {} // L3 not injected by default
+            }
         }
-        prompt
+
+        let mut parts = Vec::new();
+
+        if !l1_items.is_empty() {
+            parts.push(format!(
+                "## 技能目录（L1）\n以下是你可使用的所有技能。如需了解某个技能的详细用法，\
+                 参考下方的 L2 摘要；如需完整文档（L3），可在 thought 中说明「需要 skill_id 的详细文档」，\
+                 系统会在下一轮追加。\n{}",
+                l1_items.join("\n")
+            ));
+        }
+
+        if !l2_sections.is_empty() {
+            parts.push(format!(
+                "## 技能摘要（L2）\n{}",
+                l2_sections.join("\n\n")
+            ));
+        }
+
+        parts.join("\n\n")
     }
 
+    #[allow(dead_code)]
     fn filter_memories_by_intent<'a>(
         memories: &'a [MemoryEntry],
-        _intent: &UserIntent,
+        _intent: &crate::intent::UserIntent,
     ) -> Vec<&'a MemoryEntry> {
-        // 🆕 SKILL MATCHING V2: Removed hardcoded intent keyword filtering.
-        // Memory relevance is now handled by the memory system's own retrieval logic.
-        // This function simply returns the top 3 most recent/relevant memories.
         memories.iter().take(3).collect()
-    }
-
-    fn build_skills_section(skills: &[SkillLevelDesc], intent: &UserIntent) -> String {
-        match intent {
-            UserIntent::DirectAnswer => String::new(),
-            UserIntent::MetaQuestion => {
-                // For meta questions, only show L1 indexes
-                let items: Vec<String> = skills
-                    .iter()
-                    .filter_map(|s| match s {
-                        SkillLevelDesc::L1 { .. } => Some(s.to_prompt_text()),
-                        _ => None,
-                    })
-                    .collect();
-                if items.is_empty() {
-                    String::new()
-                } else {
-                    format!("[技能目录]\n{}", items.join("\n"))
-                }
-            }
-            UserIntent::SingleToolCall => {
-                // For single tool calls, show L1 (name + one-liner)
-                let items: Vec<String> = skills
-                    .iter()
-                    .filter_map(|s| match s {
-                        SkillLevelDesc::L1 { .. } => Some(s.to_prompt_text()),
-                        _ => None,
-                    })
-                    .collect();
-                if items.is_empty() {
-                    String::new()
-                } else {
-                    format!("[可用技能]\n{}", items.join("\n"))
-                }
-            }
-            UserIntent::MultiStepPlanning => {
-                // For complex planning, show L2 (summaries)
-                let items: Vec<String> = skills
-                    .iter()
-                    .filter_map(|s| match s {
-                        SkillLevelDesc::L2 { .. } => Some(s.to_prompt_text()),
-                        SkillLevelDesc::L1 { .. } => Some(s.to_prompt_text()),
-                        _ => None,
-                    })
-                    .collect();
-                if items.is_empty() {
-                    String::new()
-                } else {
-                    format!("[技能详情]\n{}", items.join("\n\n"))
-                }
-            }
-            _ => String::new(),
-        }
     }
 }
 
@@ -318,3 +335,48 @@ pub mod model_presets {
          helpful. Be thorough but avoid over-explaining."
     }
 }
+
+/// 🆕 Unified ReAct system rules appended to every unified-react prompt
+fn build_unified_react_rules() -> &'static str {
+    r#"## ReAct 工作模式
+
+你通过多轮工具调用自主收集信息、执行操作，最终完成用户交给你的任务。
+
+### 每轮输出格式（严格 JSON）
+
+中间轮次（调用工具）：
+```json
+{
+  "thought": "你的思考过程",
+  "action": "call_tool",
+  "tool_name": "工具名",
+  "arguments": {"参数": "值"},
+  "reasoning": "调用该工具的目的"
+}
+```
+
+最终轮次（输出结果）：
+```json
+{
+  "thought": "数据已足够，任务已完成",
+  "action": "final_answer",
+  "content": "最终回复内容"
+}
+```
+
+### 关键规则
+
+1. **自主决策**：不需要调用所有工具。根据任务需要选择性调用。
+2. **避免重复**：不要重复调用相同工具（相同参数）。
+3. **条件分支**：如果某轮结果已足够做出判断，可以提前终止。
+4. **错误处理**：如果工具返回错误，尝试替代方案或跳过，在最终回复中说明。
+5. **最多 30 轮**：你可以在 1-30 轮之间的任意时刻终止。
+6. **禁止过度思考**：简单问题 1-2 轮即可结束。
+7. **需要实时数据时必须调用工具**，不要用 final_answer 伪造已执行的搜索、查询、下单。
+8. **遇到天气、行情、账户、持仓、下单等业务能力时**，优先调用 `skill_call`，用 `skill_id` 指定注册技能或 MCP 技能。
+9. **BTC/ETH 等加密货币交易任务**必须优先使用 Alpaca MCP 技能。
+10. **用户要求搜索/网上查时**必须先调用搜索工具；如果所有工具失败，final_answer 必须明确说明未能完成实时联网验证。
+11. **如需某个 skill 的 L3 完整文档**，可在 thought 中说明「需要 {skill_id} 的详细文档」，系统会在下一轮自动追加。
+12. **final_answer.content 只能写给用户看的最终答复**，禁止包含 thought、action、工具命令或内部执行过程。
+"#}
+

@@ -43,7 +43,7 @@ pub use router::{CommunicationRouter, RouteConfig};
 use serde::{Deserialize, Serialize};
 pub use thread::{Thread, ThreadManager};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, warn};
 pub use user_channel::{
     ChannelBindingStatus, ChannelInstanceId, ChannelInstanceRef, PlatformCredentials,
     UserChannelBinding, UserChannelConfig,
@@ -446,14 +446,14 @@ impl CommunicationManager {
 
     /// Connect all platforms
     pub async fn connect_all(&mut self) -> Vec<Result<()>> {
-        let mut results = Vec::new();
+        let results = Vec::new();
 
         results
     }
 
     /// Disconnect all platforms
     pub async fn disconnect_all(&mut self) -> Vec<Result<()>> {
-        let mut results = Vec::new();
+        let results = Vec::new();
         results
     }
 

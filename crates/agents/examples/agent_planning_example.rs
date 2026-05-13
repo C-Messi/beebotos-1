@@ -75,6 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             params.insert("strategy".to_string(), "hybrid".to_string());
             params
         },
+        stream_tx: None,
     };
 
     // Analyze task complexity
@@ -97,6 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             params.insert("strategy".to_string(), "goal_based".to_string());
             params
         },
+        stream_tx: None,
     };
 
     println!("Created plan task: {:?}", create_plan_task.task_type);
@@ -111,6 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             params.insert("plan_id".to_string(), plan.id.to_string());
             params
         },
+        stream_tx: None,
     };
 
     println!("Execute plan task: {:?}", exec_plan_task.task_type);

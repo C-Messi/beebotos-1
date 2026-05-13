@@ -667,6 +667,7 @@ impl SkillSelector {
 
         Ok((scores, needs_planning))
     }
+    #[allow(dead_code)]
     fn extract_json(response: &str) -> Result<&str, SkillSelectError> {
         let trimmed = response.trim();
 

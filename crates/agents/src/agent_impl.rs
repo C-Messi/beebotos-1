@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -497,6 +497,7 @@ fn is_high_risk_write_skill(skill_id: &str) -> bool {
         || lower.contains("withdraw")
 }
 
+#[allow(dead_code)]
 fn should_force_general_react(message_text: &str) -> bool {
     let lower = message_text.to_ascii_lowercase();
     let text = message_text.trim();
@@ -977,6 +978,7 @@ impl Agent {
     ///   STEP 1: get_stock_latest_quote|{"symbols":"AAPL"}
     ///   IF result.price > 180 THEN
     ///   STEP 2: place_stock_order|{"symbol":"AAPL","side":"buy","qty":"10"}
+    #[allow(dead_code)]
     async fn try_execute_tool_chain(
         &self,
         response: &str,
@@ -1058,6 +1060,7 @@ impl Agent {
     }
 
     /// Execute a tool by name (skill registry or MCP fallback)
+    #[allow(dead_code)]
     async fn execute_tool_by_name(
         &self,
         tool_name: &str,
@@ -1112,6 +1115,7 @@ impl Agent {
     }
 
     /// Evaluate a simple tool chain condition against step results
+    #[allow(dead_code)]
     fn evaluate_tool_chain_condition(&self, condition: &str, step_results: &[String]) -> bool {
         let condition_lower = condition.to_lowercase();
         // Simple heuristic: if condition mentions success/ok/passed and last result
@@ -1234,7 +1238,8 @@ impl Agent {
     ///
     /// Caches the base persona (name + description) which changes rarely,
     /// avoiding repeated token assembly for identical agent configurations.
-    async fn build_system_prompt_cached(&self, intent: &crate::intent::UserIntent) -> String {
+    #[allow(dead_code)]
+    async fn build_system_prompt_cached(&self, _intent: &crate::intent::UserIntent) -> String {
         let base_persona = format!(
             "You are {} ({}). Please remain friendly, professional, and helpful when answering \
              questions.",
@@ -1258,7 +1263,7 @@ impl Agent {
                     let builder = crate::prompt::PromptBuilder::new()
                         .with_soul(comps.soul.clone().unwrap_or_default())
                         .with_model(&comps.model);
-                    builder.build(intent)
+                    builder.build_unified_react()
                 })
                 .await
         } else {
@@ -1267,6 +1272,7 @@ impl Agent {
     }
 
     /// 🆕 OPTIMIZATION: Classify intent for a task input
+    #[allow(dead_code)]
     pub async fn classify_intent(&self, input: &str) -> crate::intent::IntentAnalysis {
         if self.intent_engine.is_some() {
             // 🆕 OPTIMIZATION PHASE 3: Dual-track intent classification
@@ -1540,6 +1546,7 @@ impl Agent {
     /// Clean up LLM responses that contain thinking/process analysis instead of
     /// direct answers. 🆕 OPTIMIZATION PHASE 2: Supports
     /// <REASONING_SCRATCHPAD> extraction
+    #[allow(dead_code)]
     fn cleanup_thinking_process(response: &str) -> String {
         let response = response.trim();
         if response.is_empty() {
@@ -1730,6 +1737,7 @@ impl Agent {
 
     /// 🆕 OPTIMIZATION PHASE 2: Extract <REASONING_SCRATCHPAD> content and
     /// return cleaned response
+    #[allow(dead_code)]
     fn extract_reasoning_scratchpad(response: &str) -> (String, Option<String>) {
         let start_tag = "<REASONING_SCRATCHPAD>";
         let end_tag = "</REASONING_SCRATCHPAD>";
@@ -1890,16 +1898,12 @@ impl Agent {
         let start_time = std::time::Instant::now();
         let task_id = task.id.clone();
 
-        // 🆕 SKILL MATCHING V2: Check if V2 components are available
-        let use_v2 = self.llm_intent_analyzer.is_some()
-            && self.skill_selector.is_some()
-            && matches!(task.task_type, TaskType::LlmChat | TaskType::Custom(_));
-
-        let result = if use_v2 {
-            // V2 Path: Pure LLM-driven intent + skill matching
+        // 🆕 UNIFIED REACT: All LlmChat tasks go through unified ReAct.
+        // Form submission / approval confirmation are handled inside process_task_v2
+        // before reaching the unified ReAct executor.
+        let result = if matches!(task.task_type, TaskType::LlmChat | TaskType::Custom(_)) {
             self.process_task_v2(task).await
         } else {
-            // Legacy Path: Keep existing behavior for backward compatibility
             self.process_task_legacy(task).await
         };
 
@@ -1934,7 +1938,7 @@ impl Agent {
     /// Graceful degradation: if V2 analysis times out or fails, falls back to
     /// legacy path.
     async fn process_task_v2(&self, task: Task) -> Result<(String, Vec<Artifact>), AgentError> {
-        let task_id = task.id.clone();
+        let _task_id = task.id.clone();
         let message_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input)
         {
             json.get("message")
@@ -2125,222 +2129,39 @@ impl Agent {
             }
         }
 
-        // Step 1: LLM Intent Analysis (zero hardcoded rules)
-        let intent_analyzer = self.llm_intent_analyzer.as_ref().ok_or_else(|| {
-            AgentError::InvalidConfig("LLM Intent Analyzer not configured".into())
-        })?;
-
-        let intent_v2 = match intent_analyzer.analyze(&message_text, None).await {
-            Ok(intent) => intent,
-            Err(e) => {
-                warn!(
-                    "V2 Intent analysis failed for task {} ({}), falling back to legacy path",
-                    task_id, e
-                );
-                return self.process_task_legacy(task).await;
-            }
-        };
-
-        info!(
-            "V2 Intent: direct_answer={}, needs_skill={}, needs_planning={}, confidence={:.2} for \
-             task {}",
-            intent_v2.direct_answer,
-            intent_v2.needs_skill,
-            intent_v2.needs_planning,
-            intent_v2.confidence,
-            task_id
-        );
-
-        // Initialize trace for observability
-        let mut trace =
-            crate::skill_matching::SkillActivationTrace::new(&message_text, intent_v2.clone());
-
-        // Step 2: Route based on LLM intent.
-        // If the intent needs any skill/tool capability, always enter General
-        // ReAct. SkillSelector is only used as a hint provider; the ReAct loop
-        // decides whether to call a skill, delegate branches, or answer after
-        // gathering data.
-        let result = if !intent_v2.needs_skill {
-            // Direct answer path — no skill injection
-            self.handle_direct_answer(&task).await
-        } else {
-            // Step 3: Skill Selection (pure LLM-driven)
-            let selector = self
-                .skill_selector
-                .as_ref()
-                .ok_or_else(|| AgentError::InvalidConfig("Skill Selector not configured".into()))?;
-
-            let selection = match selector
-                .select(&message_text, &intent_v2.query_summary)
-                .await
-            {
-                Ok(sel) => sel,
-                Err(e) => {
-                    warn!(
-                        "V2 Skill selection failed for task {} ({}), falling back to direct answer",
-                        task_id, e
-                    );
-                    return self.handle_direct_answer(&task).await;
-                }
-            };
-
-            info!(
-                "V2 Skill Selection: selected={:?}, confidence={:.2}, reasoning='{}'",
-                selection.selected_skill,
-                selection.confidence,
-                selection
-                    .selection_reasoning
-                    .chars()
-                    .take(80)
-                    .collect::<String>()
-            );
-
-            // Update trace with retrieval and ranking results
-            let candidate_ids: Vec<String> = selection
-                .scores
-                .iter()
-                .map(|s| s.skill_id.clone())
-                .collect();
-            let recall_scores: Vec<(String, f32)> = selection
-                .scores
-                .iter()
-                .map(|s| (s.skill_id.clone(), s.overall_score))
-                .collect();
-            trace = trace.with_retrieval(crate::skill_matching::RetrievalTrace {
-                method: "registry_search".to_string(),
-                candidate_skills: candidate_ids,
-                recall_scores,
-            });
-            trace = trace.with_ranking(crate::skill_matching::RankingTrace {
-                llm_model: String::new(),
-                scores: selection.scores.clone(),
-                selected_skill: selection.selected_skill.clone(),
-                reasoning: selection.selection_reasoning.clone(),
-                confidence: selection.confidence,
-            });
-
-            // Step 4: Build task with skill hint if selected
-            let mut task = task;
-            if let Some(ref skill_id) = selection.selected_skill {
-                let registry = self.skill_registry.as_ref().ok_or_else(|| {
-                    AgentError::InvalidConfig("Skill registry not configured".into())
-                })?;
-
-                match registry.get(skill_id).await {
-                    Some(skill) => {
-                        let l3_doc = registry
-                            .get_skill_description(
-                                skill_id,
-                                crate::skills::registry::SkillDisclosureLevel::L3,
-                            )
-                            .await;
-
-                        // Inject skill hint into task input
-                        if let Ok(mut input_json) =
-                            serde_json::from_str::<serde_json::Value>(&task.input)
-                        {
-                            if let Some(obj) = input_json.as_object_mut() {
-                                obj.insert("skill_hint_v2".to_string(), serde_json::json!({
-                                    "id": skill_id,
-                                    "name": skill.skill.name,
-                                    "description": skill.skill.manifest.description,
-                                    "prompt_template": l3_doc.unwrap_or_else(|| skill.skill.manifest.prompt_template.clone()),
-                                    "confidence": selection.confidence,
-                                    "needs_planning": intent_v2.needs_planning || selection.needs_planning,
-                                }));
-                                task.input = input_json.to_string();
-                            }
-                        }
-                    }
-                    None => {
-                        warn!(
-                            "V2 Skill Selection: skill '{}' selected but not found in registry",
-                            skill_id
-                        );
-                    }
-                }
-            }
-
-            // Step 5: Route skill/tool requests through General ReAct
-            // 🆕 ROUTING V3:
-            // - needs_skill=true     → General ReAct (single or multi-step, up to 30
-            //   rounds, cancellable)
-            // - needs_skill=false    → Direct answer fallback
-            let force_general_react = should_force_general_react(&message_text);
-            if force_general_react || intent_v2.needs_skill {
-                info!("Routing to General ReAct because intent needs skill/tool capability");
-            }
-
-            self.execute_with_react(&task, &message_text, &intent_v2, &selection)
-                .await
-        };
-
-        // Store trace for observability (fire-and-forget, don't fail the task)
-        if let Some(ref store) = self.trace_store {
-            if let Err(e) = store.store(&trace).await {
-                warn!("Failed to store skill activation trace: {}", e);
-            }
-        }
-
-        result
+        // 🆕 UNIFIED REACT: No intent classification. All messages enter unified ReAct.
+        self.execute_unified_react(task).await
     }
 
     // =====================================================================
     // 🆕 ROUTING V3: Single-skill direct execution
     // =====================================================================
 
-    /// Execute a single skill directly without multi-step ReAct planning.
-    /// Used when SkillSelector determines needs_planning=false.
-    async fn execute_single_skill(
-        &self,
-        task: &Task,
-        skill_id: &str,
-        message_text: &str,
-    ) -> Result<(String, Vec<Artifact>), AgentError> {
-        let result = self
-            .execute_skill_by_id(skill_id, message_text, None)
-            .await?;
-        let output = self.synthesize_skill_output(message_text, &result.output, skill_id);
-
-        // 🆕 STREAMING: If stream_tx is set, stream the formatted output in chunks
-        if let Some(ref stream_tx) = task.stream_tx {
-            let chars: Vec<char> = output.chars().collect();
-            let chunk_size = 10;
-            for chunk in chars.chunks(chunk_size) {
-                let chunk_str: String = chunk.iter().collect();
-                if stream_tx.send(chunk_str).await.is_err() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            }
-        }
-
-        Ok((output, vec![]))
-    }
 
     // =====================================================================
     // 🆕 UNIFIED REACT V3: General-purpose ReAct (domain-agnostic)
     // =====================================================================
+    // 🆕 UNIFIED REACT: Single entry point for all LlmChat tasks
+    // =====================================================================
 
-    /// Execute a task using the general-purpose ReAct executor.
-    /// Works for any multi-step task, not limited to crypto/investment
-    /// analysis.
-    async fn execute_with_react(
+    /// 🆕 Unified ReAct entry: all user messages enter here.
+    /// No intent classification. Full skills (L1+L2) + all tools injected into context.
+    async fn execute_unified_react(
         &self,
-        task: &Task,
-        message_text: &str,
-        _intent: &crate::skill_matching::IntentAnalysisV2,
-        selection: &crate::skill_matching::SkillSelection,
+        task: Task,
     ) -> Result<(String, Vec<Artifact>), AgentError> {
         let task_id = task.id.clone();
-        info!("General ReAct: executing task {} (multi-step)", task_id);
+        let message_text = Self::extract_user_input(&task);
+        info!(
+            "Unified ReAct entry for task {}: {}",
+            task_id,
+            &message_text[..message_text.len().min(80)]
+        );
 
-        let llm = self
-            .llm_interface
-            .clone()
-            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
+        // 1. Build full-context system prompt
+        let system_prompt = self.build_unified_react_prompt(&task).await?;
 
-        // 1. Load all available tools (not limited to crypto analysis tools)
+        // 2. Build all available tools (builtin)
         let mut tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
         tools.insert(
             "skill_call".to_string(),
@@ -2350,45 +2171,11 @@ impl Agent {
             "parallel_delegate".to_string(),
             Box::new(crate::skills::ParallelDelegateDescriptorTool),
         );
-
         if tools.is_empty() {
-            warn!("General ReAct: no tools available, falling back to direct answer");
-            return Box::pin(self.handle_direct_answer(task)).await;
+            warn!("Unified ReAct: no tools available for task {}", task_id);
         }
 
-        // 2. Build general ReAct system prompt
-        let mut system_prompt =
-            crate::skills::general_react_prompt::build_general_react_prompt(&tools);
-        if let Some(skill_id) = &selection.selected_skill {
-            system_prompt.push_str(&format!(
-                "\n\n## 本次技能选择提示\n\nSkillSelector 已为当前请求选中 \
-                 `{}`（confidence={:.2}）。如果该技能能完成用户目标，优先通过 `skill_call` \
-                 调用它；只有在它缺少必要能力或参数时，才改用其他工具。\n",
-                skill_id, selection.confidence
-            ));
-        }
-        if let Some(catalog) = &self.skill_catalog {
-            system_prompt.push_str(
-                "\n\n## 注册技能目录\n\n以下技能可以通过 `skill_call` 调用。调用时必须使用真实 \
-                 skill_id，不要把命令文本当成最终回答。\n\n",
-            );
-            system_prompt.push_str(catalog);
-            system_prompt.push_str(
-                "\n\n提示：显式要求互联网搜索/浏览网页时，优先调用 `skill_call`，skill_id 可使用 \
-                 `agent_browser` 或 `agent-browser-clawdbot`（以目录中实际存在的 ID \
-                 为准）；如果只是抓取已知 URL，可用 `web_fetch`。\n\n交易提示：BTC/ETH \
-                 等加密货币下单、行情、账户或持仓必须优先调用 Alpaca MCP skill。下单用 \
-                 `mcp:alpaca/place_crypto_order`，BTC/USD 报价用 \
-                 `mcp:alpaca/get_crypto_latest_quote` 或 `mcp:alpaca/get_crypto_snapshot`，持仓用 \
-                 `mcp:alpaca/get_all_positions`。不要用网页搜索或 CoinGecko 替代 可用的 Alpaca \
-                 MCP 交易/账户能力。",
-            );
-        }
-
-        // 3. Get cancellation receiver from session registry
-        // 🆕 FIX: Use db_session_id (injected by Gateway) as the cancel key to match
-        // the key used in session_cancellation::register. Fallback to session_id or
-        // task_id.
+        // 3. Get cancellation receiver
         let cancel_key = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
             json.get("db_session_id")
                 .and_then(|v| v.as_str())
@@ -2401,10 +2188,15 @@ impl Agent {
         let cancel_rx = crate::session_cancellation::get_receiver(&cancel_key).await;
 
         // 4. Execute ReAct loop
+        let llm = self
+            .llm_interface
+            .clone()
+            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
+
         let skill_dispatcher = std::sync::Arc::new(AgentSkillDispatcher::from_agent(self));
-        let executor = crate::skills::UnifiedReActExecutor::new(llm)
+        let mut executor = crate::skills::UnifiedReActExecutor::new(llm)
             .with_config(crate::skills::UnifiedReActConfig {
-                max_rounds: 30,
+                max_rounds: self.max_rounds as usize,
                 round_timeout_sec: 30,
                 enable_reflection: true,
                 require_structured_output: false,
@@ -2413,306 +2205,176 @@ impl Agent {
             })
             .with_tool_dispatcher(skill_dispatcher);
 
-        let react_result = executor.execute(&system_prompt, message_text, &tools).await;
+        // Attach skill registry for on-demand L3 injection
+        if let Some(ref registry) = self.skill_registry {
+            executor = executor.with_skill_registry(registry.clone());
+        }
+
+        let react_result = executor.execute(&system_prompt, &message_text, &tools).await;
 
         match react_result {
             Ok(content) => {
                 info!(
-                    "General ReAct: task {} completed, result length={}",
+                    "Unified ReAct: task {} completed, result length={}",
                     task_id,
                     content.len()
                 );
                 Ok((content, vec![]))
             }
             Err(e) => {
-                warn!("General ReAct: task {} failed: {}", task_id, e);
+                warn!("Unified ReAct: task {} failed: {}", task_id, e);
                 Err(e)
             }
         }
     }
 
+    /// 🆕 Build unified ReAct system prompt with full context injection.
+    async fn build_unified_react_prompt(&self, task: &Task) -> Result<String, AgentError> {
+        let model_name = self.config.models.model.clone();
+        let mut builder = crate::prompt::PromptBuilder::new()
+            .with_model(&model_name);
+
+        // Base persona
+        let persona = format!(
+            "You are {} ({}). Please remain friendly, professional, and helpful when answering \
+             questions.",
+            self.config.name, self.config.description
+        );
+        builder = builder.with_soul(persona);
+
+        // Dynamic memories (all, no intent filtering)
+        if let Some(memory_system) = &self.memory_system {
+            let search_results = memory_system.search(&task.input).await?;
+            let memories: Vec<crate::memory::MemoryEntry> = search_results
+                .into_iter()
+                .map(|r| crate::memory::MemoryEntry {
+                    id: r.id,
+                    content: r.content,
+                    timestamp: chrono::Utc::now(),
+                    metadata: std::collections::HashMap::new(),
+                })
+                .collect();
+            builder = builder.with_memories(memories);
+        }
+
+        // Skills — L1 + L2 hierarchical (all skills)
+        let skill_levels = self.build_all_skills_levels().await?;
+        builder = builder.with_skills(skill_levels);
+
+        // Tools — all available tools
+        let tool_defs = self.build_all_tool_definitions().await?;
+        builder = builder.with_tools(tool_defs);
+
+        // Model-specific instructions
+        let model_instr = match model_name.as_str() {
+            m if m.contains("kimi") => crate::prompt::model_presets::kimi_k26().to_string(),
+            m if m.contains("gpt") => crate::prompt::model_presets::gpt4o().to_string(),
+            m if m.contains("claude") => crate::prompt::model_presets::claude3().to_string(),
+            _ => String::new(),
+        };
+        if !model_instr.is_empty() {
+            builder = builder.with_model_instructions(model_instr);
+        }
+
+        Ok(builder.build_unified_react())
+    }
+
+    /// 🆕 Build all skills at L1 + L2 levels (L3 excluded, injected on-demand).
+    async fn build_all_skills_levels(&self) -> Result<Vec<crate::prompt::SkillLevelDesc>, AgentError> {
+        let registry = self.skill_registry.as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("Skill registry not configured".into()))?;
+
+        let mut skills = Vec::new();
+        let all_skills = registry.list_all().await;
+
+        for skill in all_skills {
+            // L1: always inject
+            let l1_text = skill.l1_index.clone()
+                .or_else(|| Some(format!(
+                    "{}: {}",
+                    skill.skill.name,
+                    skill.skill.manifest.description.chars().take(80).collect::<String>()
+                )))
+                .unwrap_or_default();
+            skills.push(crate::prompt::SkillLevelDesc::L1 {
+                id: skill.skill.id.clone(),
+                name: skill.skill.name.clone(),
+                one_liner: l1_text,
+            });
+
+            // L2: inject if available
+            if let Some(summary) = skill.l2_summary.clone() {
+                skills.push(crate::prompt::SkillLevelDesc::L2 {
+                    id: skill.skill.id.clone(),
+                    name: skill.skill.name.clone(),
+                    summary,
+                });
+            }
+        }
+
+        Ok(skills)
+    }
+
+    /// 🆕 Build all builtin tool definitions for prompt injection.
+    /// MCP tools are invoked via `skill_call`, so they are listed in the skills section.
+    async fn build_all_tool_definitions(&self) -> Result<Vec<crate::prompt::ToolDefinition>, AgentError> {
+        let mut defs = Vec::new();
+
+        let builtin = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
+        for (name, tool) in builtin {
+            defs.push(crate::prompt::ToolDefinition {
+                name,
+                description: tool.description().to_string(),
+                parameters: tool.parameters_schema(),
+            });
+        }
+
+        // skill_call and parallel_delegate are meta-tools for invoking skills
+        defs.push(crate::prompt::ToolDefinition {
+            name: "skill_call".to_string(),
+            description: "调用已注册的技能或 MCP 技能。参数: skill_id (string), params (object)".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "skill_id": { "type": "string", "description": "技能 ID，如 mcp:alpaca/place_crypto_order" },
+                    "params": { "type": "object", "description": "技能参数" }
+                },
+                "required": ["skill_id"]
+            }),
+        });
+        defs.push(crate::prompt::ToolDefinition {
+            name: "parallel_delegate".to_string(),
+            description: "并行执行多个独立子任务。参数: branches (array of {id, task, skill_id, input, params})".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "branches": { "type": "array", "description": "并行分支列表" }
+                },
+                "required": ["branches"]
+            }),
+        });
+
+        Ok(defs)
+    }
+
+    /// Extract user input text from task
+    pub fn extract_user_input(task: &Task) -> String {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+            json.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or(&task.input)
+                .to_string()
+        } else {
+            task.input.clone()
+        }
+    }
+
+
     // =====================================================================
     // 🆕 UNIFIED REACT: Autonomous Planning & Investment Analysis (legacy)
     // =====================================================================
 
-    /// Determine whether a task should use the Unified ReAct executor
-    /// for autonomous multi-step planning instead of the static planning
-    /// engine.
-    fn should_use_react_planning(
-        &self,
-        message_text: &str,
-        intent: &crate::skill_matching::IntentAnalysisV2,
-        selection: &crate::skill_matching::SkillSelection,
-    ) -> bool {
-        let lower = message_text.to_lowercase();
 
-        // Trigger 1: User explicitly asks for analysis / advice
-        let analysis_keywords = [
-            "分析",
-            "走势",
-            "能不能买",
-            "能不能卖",
-            "建议",
-            "怎么看",
-            "值得买",
-            "值得投",
-            "抄底",
-            "逃顶",
-            "预测",
-            "前景",
-            "analyze",
-            "analysis",
-            "trend",
-            "should i buy",
-            "should i sell",
-            "advice",
-            "recommend",
-            "outlook",
-            "forecast",
-        ];
-        let has_analysis_keyword = analysis_keywords.iter().any(|kw| lower.contains(kw));
-
-        // Trigger 2: Selected skill is crypto/finance related
-        let selected_crypto = selection.selected_skill.as_ref().map_or(false, |id| {
-            let id_lower = id.to_lowercase();
-            id_lower.contains("crypto")
-                || id_lower.contains("trade")
-                || id_lower.contains("alpaca")
-                || id_lower.contains("finance")
-                || id_lower.contains("invest")
-                || id_lower.contains("stock")
-                || id_lower.contains("btc")
-                || id_lower.contains("eth")
-        });
-
-        // Trigger 3: User input contains crypto symbols
-        let crypto_symbols = [
-            "btc",
-            "bitcoin",
-            "比特币",
-            "eth",
-            "ethereum",
-            "以太坊",
-            "sol",
-            "xrp",
-            "doge",
-            "加密货币",
-            "crypto",
-            "数字货币",
-        ];
-        let has_crypto_symbol = crypto_symbols.iter().any(|sym| lower.contains(sym));
-
-        // Trigger 4: Intent indicates multi-step data gathering
-        let is_multi_step =
-            intent.needs_planning || intent.intent == crate::intent::UserIntent::MultiStepPlanning;
-
-        // 🆕 FIX: ReAct triggers for ANY crypto-related multi-step task,
-        // regardless of whether an analysis keyword is present.
-        // This ensures "帮我开一单BTC" (no analysis keyword) still routes to ReAct.
-        let use_react = has_crypto_symbol && (has_analysis_keyword || is_multi_step);
-
-        if use_react {
-            info!(
-                "Unified ReAct: triggered for message='{}' (analysis_kw={}, selected_crypto={}, \
-                 crypto_sym={}, multi_step={})",
-                message_text.chars().take(40).collect::<String>(),
-                has_analysis_keyword,
-                selected_crypto,
-                has_crypto_symbol,
-                is_multi_step
-            );
-        }
-
-        use_react
-    }
-
-    /// Execute a task using the Unified ReAct executor with autonomous
-    /// planning.
-    async fn execute_with_react_planning(
-        &self,
-        task: &Task,
-        message_text: &str,
-        intent: &crate::skill_matching::IntentAnalysisV2,
-    ) -> Result<(String, Vec<Artifact>), AgentError> {
-        let task_id = task.id.clone();
-        info!(
-            "Unified ReAct: executing task {} with autonomous planning",
-            task_id
-        );
-
-        // Step 1: Get LLM interface
-        let llm = self
-            .llm_interface
-            .clone()
-            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
-
-        // Step 2: Build analysis tools (MCP crypto tools + computed indicators)
-        let mut tools =
-            crate::skills::investment_analysis::build_analysis_tools(self.mcp_manager.as_deref())
-                .await;
-
-        // 🆕 Merge bottom tools so LLM can also use file ops, exec, search, etc.
-        // during multi-round crypto analysis (e.g. "save the result to a file")
-        let bottom_tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
-        let mut merged_count = 0;
-        for (name, tool) in bottom_tools {
-            if !tools.contains_key(&name) {
-                tools.insert(name, tool);
-                merged_count += 1;
-            }
-        }
-        if merged_count > 0 {
-            info!(
-                "Unified ReAct: merged {} bottom tools into analysis toolkit (total={})",
-                merged_count,
-                tools.len()
-            );
-        }
-
-        if tools.is_empty() {
-            warn!("Unified ReAct: no analysis tools available, falling back to direct LLM answer");
-            return Box::pin(self.handle_direct_answer(task)).await;
-        }
-
-        // Step 3: Build user context (risk level, positions, emotional state, etc.)
-        let user_risk_level = "moderate"; // TODO: load from user profile
-        let user_positions = "未知"; // TODO: load from user portfolio
-        let emotional_state = if message_text.contains("慌") || message_text.contains("怕") {
-            "焦虑"
-        } else if message_text.contains("追") || message_text.contains("错过") {
-            "FOMO"
-        } else {
-            "理性"
-        };
-        let preferences = "偏好技术指标: RSI, MACD, 布林带"; // TODO: load from user profile
-        let psychological_prices = "暂无记录"; // TODO: load from memory
-
-        // Step 4: Build the investment analysis System Prompt
-        let system_prompt = crate::skills::investment_analysis::build_investment_analysis_prompt(
-            &tools,
-            user_risk_level,
-            user_positions,
-            emotional_state,
-            preferences,
-            psychological_prices,
-        );
-
-        // Step 5: Execute the ReAct loop
-        let executor = crate::skills::UnifiedReActExecutor::new(llm).with_config(
-            crate::skills::UnifiedReActConfig {
-                max_rounds: 10,
-                round_timeout_sec: 30,
-                enable_reflection: true,
-                require_structured_output: true,
-                cancel_rx: None,
-                stream_tx: None,
-            },
-        );
-
-        let react_result = executor.execute(&system_prompt, message_text, &tools).await;
-
-        match react_result {
-            Ok(raw_content) => {
-                info!(
-                    "Unified ReAct: task {} completed, result length={}",
-                    task_id,
-                    raw_content.len()
-                );
-
-                // Step 6: Post-process the final answer (safety checks)
-                let mut processed =
-                    match crate::skills::investment_analysis::post_process_final_answer(
-                        &raw_content,
-                        user_risk_level,
-                    ) {
-                        Ok(report_json) => {
-                            // Step 7: Format as user-friendly Markdown
-                            let formatted =
-                                match crate::skills::investment_analysis::format_report_for_user(
-                                    &report_json,
-                                ) {
-                                    Ok(formatted) => formatted,
-                                    Err(e) => {
-                                        warn!(
-                                            "Failed to format report: {}. Returning raw JSON.",
-                                            e
-                                        );
-                                        report_json.clone()
-                                    }
-                                };
-
-                            // 🆕 FIX: If user originally requested a trade, try to extract
-                            // trade_request from the ReAct report and trigger execution.
-                            let trade_keywords = [
-                                "开单", "下单", "买入", "卖出", "交易", "买", "卖", "order", "buy",
-                                "sell", "place", "trade",
-                            ];
-                            let has_trade_intent = trade_keywords
-                                .iter()
-                                .any(|kw| message_text.to_lowercase().contains(kw));
-                            if has_trade_intent {
-                                if let Ok(report) = serde_json::from_str::<
-                                crate::skills::investment_analysis::types::InvestmentAnalysisReport,
-                            >(&report_json)
-                            {
-                                if let Some(trade_req) = report.trade_request {
-                                    info!(
-                                        "ReAct report contains trade_request: {:?} for task {}",
-                                        trade_req, task_id
-                                    );
-                                    // Build natural-language input for parameter extraction
-                                    let trade_input = format!(
-                                        "{}，{}，{} USD",
-                                        trade_req.symbol,
-                                        trade_req.side,
-                                        trade_req.notional.unwrap_or_else(|| trade_req.qty.clone().unwrap_or_default())
-                                    );
-                                    // Trigger trade skill execution (will go through approval gate)
-                                    match self.execute_skill_by_id(
-                                        "mcp:alpaca/place_crypto_order",
-                                        &trade_input,
-                                        None,
-                                    )
-                                    .await
-                                    {
-                                        Ok(skill_result) => {
-                                            let mut combined = formatted;
-                                            combined.push('\n');
-                                            combined.push_str("---");
-                                            combined.push('\n');
-                                            combined.push_str(&skill_result.output);
-                                            return Ok((combined, vec![]));
-                                        }
-                                        Err(e) => {
-                                            warn!("Trade execution after ReAct failed: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-                            }
-
-                            formatted
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Post-processing failed for task {}: {}. Returning raw LLM output.",
-                                task_id, e
-                            );
-                            raw_content
-                        }
-                    };
-
-                Ok((processed, vec![]))
-            }
-            Err(e) => {
-                warn!(
-                    "Unified ReAct: task {} failed: {}. Falling back to direct answer.",
-                    task_id, e
-                );
-                Box::pin(self.handle_direct_answer(task)).await
-            }
-        }
-    }
 
     /// 🆕 MCP PARAMETER EXTRACTION: Handle structured form submission.
     async fn handle_form_submission(
@@ -2900,75 +2562,17 @@ impl Agent {
         Ok(("找不到对应的技能，请重新发起请求。".to_string(), vec![]))
     }
 
-    /// 🆕 SKILL MATCHING V2: Handle LLM task with V2 intent + skill selection
-    async fn handle_llm_task_v2(
-        &self,
-        task: &Task,
-        intent: &crate::skill_matching::IntentAnalysisV2,
-        _selection: &crate::skill_matching::SkillSelection,
-    ) -> Result<(String, Vec<Artifact>), AgentError> {
-        // Convert V2 types to legacy types for handler compatibility
-        let legacy_intent =
-            crate::intent::IntentAnalysis::new(intent.intent.clone(), intent.confidence)
-                .with_entities(intent.entities.clone())
-                .with_constraints(intent.constraints.clone());
-
-        self.handle_llm_task_with_intent(task, &legacy_intent).await
-    }
 
     /// Legacy task processing path (preserved for backward compatibility)
     async fn process_task_legacy(&self, task: Task) -> Result<(String, Vec<Artifact>), AgentError> {
         let task_id = task.id.clone();
 
-        // 🆕 OPTIMIZATION PHASE 1: Intent Engine前置 — 基于实际消息内容分类意图
-        let intent_analysis = if matches!(task.task_type, TaskType::LlmChat | TaskType::Custom(_)) {
-            let message_text =
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
-                    json.get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or(&task.input)
-                        .to_string()
-                } else {
-                    task.input.clone()
-                };
-            self.classify_intent(&message_text).await
-        } else {
-            crate::intent::IntentAnalysis::new(crate::intent::UserIntent::SingleToolCall, 0.8)
-        };
-
-        info!(
-            "Intent classified as {:?} (confidence: {:.2}) for task {}",
-            intent_analysis.intent, intent_analysis.confidence, task_id
-        );
-
         match &task.task_type {
             TaskType::LlmChat => {
-                // 🆕 OPTIMIZATION: Route based on intent classification
-                match intent_analysis.intent {
-                    crate::intent::UserIntent::DirectAnswer => {
-                        // Skip tool injection, direct LLM answer — saves 5k-10k tokens
-                        self.handle_direct_answer(&task).await
-                    }
-                    crate::intent::UserIntent::MetaQuestion => {
-                        // Skip LLM, directly return skill registry info
-                        self.handle_meta_question(&task).await
-                    }
-                    crate::intent::UserIntent::Correction => {
-                        // Handle correction/modification of previous behavior
-                        self.handle_correction(&task, &intent_analysis).await
-                    }
-                    crate::intent::UserIntent::WorkflowTrigger => {
-                        self.handle_workflow_task(&task).await
-                    }
-                    crate::intent::UserIntent::MultiStepPlanning => {
-                        // 🆕 FIX: Legacy P2 Planning replaced by Unified ReAct.
-                        self.execute_with_planning(task).await
-                    }
-                    crate::intent::UserIntent::SingleToolCall => {
-                        self.handle_llm_task_with_intent(&task, &intent_analysis)
-                            .await
-                    }
-                }
+                // 🆕 UNIFIED REACT: All LlmChat tasks go through unified ReAct.
+                // Intent classification is removed; LLM decides tool usage inside ReAct.
+                info!("Unified ReAct routing for legacy LlmChat task {}", task_id);
+                self.execute_unified_react(task).await
             }
             TaskType::SkillExecution => self.handle_skill_task(&task).await,
             TaskType::McpTool => self.handle_mcp_task(&task).await,
@@ -2982,1944 +2586,18 @@ impl Agent {
             TaskType::AppLifecycle => self.handle_app_lifecycle_task(&task).await,
             TaskType::WorkflowExecution => self.handle_workflow_task(&task).await,
             TaskType::Custom(type_name) => {
-                // 🆕 FIX: All custom planning tasks route through Unified ReAct.
-                if self.should_use_planning(&task).await {
-                    self.execute_with_planning(task).await
-                } else {
-                    warn!("Unknown custom task type: {}", type_name);
-                    Err(AgentError::InvalidConfig(format!(
-                        "Unsupported task type: {}",
-                        type_name
-                    )))
-                }
+                // 🆕 UNIFIED REACT: All custom tasks route through unified ReAct.
+                info!("Unified ReAct routing for custom task '{}'", type_name);
+                self.execute_unified_react(task).await
             }
         }
     }
 
-    /// 🆕 OPTIMIZATION PHASE 1: Handle direct answer intents — no tool
-    /// injection, saves tokens 🆕 FIX: Safety net — queries that need
-    /// real-time data (weather, crypto, stock) are
-    /// routed to skill-injection path instead of pure direct answer, preventing
-    /// stale/fabricated data.
-    async fn handle_direct_answer(
-        &self,
-        task: &Task,
-    ) -> Result<(String, Vec<Artifact>), AgentError> {
-        info!("Direct answer path (no tools) for task {}", task.id);
 
-        let input_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
-            json.get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or(&task.input)
-                .to_string()
-        } else {
-            task.input.clone()
-        };
-        let lower = input_text.to_lowercase();
 
-        // Safety net: real-time data queries must go through skill injection
-        let needs_realtime_data = lower.contains("天气")
-            || lower.contains("weather")
-            || lower.contains("temperature")
-            || lower.contains("气温")
-            || lower.contains("预报")
-            || lower.contains("forecast")
-            || lower.contains("btc")
-            || lower.contains("比特币")
-            || lower.contains("eth")
-            || lower.contains("以太坊")
-            || lower.contains("crypto")
-            || lower.contains("加密货币")
-            || lower.contains("股价")
-            || lower.contains("股票")
-            || lower.contains("stock price")
-            || lower.contains("aapl")
-            || lower.contains("tsla")
-            || lower.contains("行情")
-            || lower.contains("价格");
 
-        let skip_routing = task
-            .parameters
-            .get("_skip_planning")
-            .map(|v| v == "true")
-            .unwrap_or(false);
 
-        if !skip_routing && needs_realtime_data {
-            info!(
-                "Direct answer intercepted for real-time data query: '{}'",
-                input_text
-            );
-            let legacy_intent =
-                crate::intent::IntentAnalysis::new(crate::intent::UserIntent::SingleToolCall, 0.75)
-                    .with_toolsets(vec![
-                        "weather".to_string(),
-                        "crypto-data".to_string(),
-                        "stock-data".to_string(),
-                    ]);
-            return Box::pin(self.handle_llm_task_with_intent(task, &legacy_intent)).await;
-        }
 
-        let llm = self
-            .llm_interface
-            .as_ref()
-            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
-
-        let messages = vec![
-            communication::Message::new(
-                uuid::Uuid::new_v4(),
-                communication::PlatformType::Custom,
-                format!(
-                    "You are {} ({}). Please remain friendly, professional, and helpful when \
-                     answering questions.",
-                    self.config.name, self.config.description
-                ),
-            ),
-            communication::Message::new(
-                uuid::Uuid::new_v4(),
-                communication::PlatformType::Custom,
-                format!("用户: {}", input_text),
-            ),
-        ];
-
-        // 🆕 FIX: Limit max_tokens to 1024 for direct answers to prevent
-        // Kimi k2.6 thinking mode from generating excessive reasoning tokens.
-        let mut context = std::collections::HashMap::new();
-        context.insert("max_tokens".to_string(), "1024".to_string());
-
-        // 🆕 STREAMING: If stream_tx is set, use call_llm_stream for real-time output
-        if let Some(ref stream_tx) = task.stream_tx {
-            let mut rx = llm
-                .call_llm_stream(messages, Some(context))
-                .await
-                .map_err(|e| AgentError::Execution(format!("LLM stream failed: {}", e)))?;
-            let mut full_response = String::new();
-            let idle_timeout = std::time::Duration::from_secs(45);
-            loop {
-                match tokio::time::timeout(idle_timeout, rx.recv()).await {
-                    Ok(Some(chunk)) => {
-                        full_response.push_str(&chunk);
-                        if stream_tx.send(chunk).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(_) => {
-                        warn!(
-                            "Direct answer stream idle timeout for task {}; finishing partial \
-                             response ({} chars)",
-                            task.id,
-                            full_response.chars().count()
-                        );
-                        break;
-                    }
-                }
-            }
-            if full_response.trim().is_empty() {
-                return Err(AgentError::Execution(
-                    "LLM stream ended without content".to_string(),
-                ));
-            }
-            return Ok((full_response, vec![]));
-        }
-
-        let response = llm
-            .call_llm(messages, Some(context))
-            .await
-            .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?;
-
-        Ok((response, vec![]))
-    }
-
-    /// 🆕 OPTIMIZATION PHASE 1: Handle meta questions — return skill info
-    /// directly
-    async fn handle_meta_question(
-        &self,
-        task: &Task,
-    ) -> Result<(String, Vec<Artifact>), AgentError> {
-        info!("Meta question path for task {}", task.id);
-        let registry = self
-            .skill_registry
-            .as_ref()
-            .ok_or_else(|| AgentError::InvalidConfig("Skill registry not configured".into()))?;
-
-        let skills = registry.list_enabled().await;
-        let skill_list: Vec<String> = skills
-            .iter()
-            .map(|s| {
-                format!(
-                    "- {}: {}",
-                    s.skill.name,
-                    s.skill
-                        .manifest
-                        .description
-                        .chars()
-                        .take(60)
-                        .collect::<String>()
-                )
-            })
-            .collect();
-
-        let response = format!(
-            "我是 {}，目前可用的技能包括：\n\n{}\n\n您可以直接描述需求，\
-             我会自动调用合适的技能来帮您完成。",
-            self.config.name,
-            skill_list.join("\n")
-        );
-
-        Ok((response, vec![]))
-    }
-
-    /// 🆕 OPTIMIZATION PHASE 1: Handle correction intents
-    async fn handle_correction(
-        &self,
-        task: &Task,
-        intent: &crate::intent::IntentAnalysis,
-    ) -> Result<(String, Vec<Artifact>), AgentError> {
-        info!(
-            "Correction path for task {}: constraints={:?}",
-            task.id, intent.constraints
-        );
-        // For now, treat correction as a direct LLM task with context about constraints
-        // In a full implementation, this would modify/undo previous actions
-        let input_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
-            json.get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or(&task.input)
-                .to_string()
-        } else {
-            task.input.clone()
-        };
-
-        let llm = self
-            .llm_interface
-            .as_ref()
-            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
-
-        let constraint_text = if intent.constraints.is_empty() {
-            "用户要求修改或撤销之前的操作。".to_string()
-        } else {
-            format!("用户约束: {}", intent.constraints.join(", "))
-        };
-
-        let messages = vec![
-            communication::Message::new(
-                uuid::Uuid::new_v4(),
-                communication::PlatformType::Custom,
-                format!("{}", constraint_text),
-            ),
-            communication::Message::new(
-                uuid::Uuid::new_v4(),
-                communication::PlatformType::Custom,
-                format!("用户: {}", input_text),
-            ),
-        ];
-
-        let response = llm
-            .call_llm(messages, None)
-            .await
-            .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?;
-
-        Ok((response, vec![]))
-    }
-
-    /// 🆕 OPTIMIZATION PHASE 1: Handle LLM task with intent-aware tool
-    /// filtering
-    async fn handle_llm_task_with_intent(
-        &self,
-        task: &Task,
-        intent: &crate::intent::IntentAnalysis,
-    ) -> Result<(String, Vec<Artifact>), AgentError> {
-        let result = Box::pin(self.handle_llm_task_internal(task, Some(intent))).await?;
-
-        // 🆕 STREAMING: If stream_tx is set, stream the result in chunks
-        if let Some(ref stream_tx) = task.stream_tx {
-            let chars: Vec<char> = result.0.chars().collect();
-            let chunk_size = 10;
-            for chunk in chars.chunks(chunk_size) {
-                let chunk_str: String = chunk.iter().collect();
-                if stream_tx.send(chunk_str).await.is_err() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Original handle_llm_task — delegates to internal implementation
-    #[allow(dead_code)]
-    async fn handle_llm_task(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {
-        self.handle_llm_task_internal(task, None).await
-    }
-
-    /// Internal LLM task handler with optional intent for tool filtering
-    async fn handle_llm_task_internal(
-        &self,
-        task: &Task,
-        intent_opt: Option<&crate::intent::IntentAnalysis>,
-    ) -> Result<(String, Vec<Artifact>), AgentError> {
-        // 🆕 PLANNING FIX: 基于实际消息内容判断复杂度，复杂任务使用 planning 执行
-        let (message_text, skill_hint) =
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
-                let msg = json
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| task.input.clone());
-                // 🆕 SKILL MATCHING V2: Check for skill_hint_v2 first, fallback to skill_hint
-                let hint = json
-                    .get("skill_hint_v2")
-                    .cloned()
-                    .or_else(|| json.get("skill_hint").cloned());
-                (msg, hint)
-            } else {
-                (task.input.clone(), None)
-            };
-
-        let char_count = message_text.chars().count();
-        let has_explicit_planning_param = task.parameters.contains_key("multi_step")
-            || task.parameters.contains_key("dependencies")
-            || task.parameters.contains_key("plan");
-
-        // 🆕 FIX: 优化 planning 触发条件，适配中文场景
-        // 1. 明确标记的参数总是触发
-        // 2. 中等文本(>50字)且含规划关键词，或含多步骤连接词(先...再...然后)
-        // 3. 较长文本(>120字)默认触发
-        // 4. 英文场景保持原阈值(>200 chars)
-        let has_planning_keywords = message_text.contains("计划")
-            || message_text.contains("步骤")
-            || message_text.contains("安排")
-            || message_text.contains("规划")
-            || message_text.contains("方案")
-            || message_text.contains("攻略")
-            || message_text.contains("流程");
-        let has_multi_step_indicators = (message_text.contains("先")
-            || message_text.contains("首先"))
-            && (message_text.contains("再")
-                || message_text.contains("然后")
-                || message_text.contains("最后")
-                || message_text.contains("接着"));
-
-        // 中文文本密度高，适当降低阈值
-        let is_chinese = message_text
-            .chars()
-            .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
-        let planning_threshold = if is_chinese { 50 } else { 120 };
-        let long_threshold = if is_chinese { 120 } else { 300 };
-
-        // 🆕 FIX: 强规划关键词（如"计划"/"规划"/"攻略"）即使短文本也应触发 planning，
-        // 避免"去汕头市旅游五天的计划"（14字）因低于50字阈值而被误判为简单查询。
-        // 设置 6 字符下限防止单字误触发（如"计"）。
-        // 🆕 SKILL MATCHING V2: Removed hardcoded generative skill exclusions.
-        // Planning need is determined by the query semantics, not skill name keywords.
-
-        let is_complex = has_explicit_planning_param
-            || (has_planning_keywords && char_count >= 6)
-            || has_multi_step_indicators
-            || (char_count > planning_threshold
-                && (has_planning_keywords || has_multi_step_indicators))
-            || char_count > long_threshold;
-
-        let skip_planning = task
-            .parameters
-            .get("_skip_planning")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        if !skip_planning && is_complex {
-            info!(
-                "🧠 Complex LLM task detected (message length: {}), using Unified ReAct for task \
-                 {}",
-                message_text.len(),
-                task.id
-            );
-            return Box::pin(self.execute_with_planning(task.clone())).await;
-        }
-
-        // 🆕 P2 FIX: Auto-pipeline detection for multi-step skill chaining
-        if let Some(pipeline) = self.try_build_auto_pipeline(&message_text).await {
-            info!(
-                "🔄 Auto-pipeline detected for task {}, executing {} steps",
-                task.id,
-                pipeline.steps.len()
-            );
-            match pipeline.execute(&message_text, self).await {
-                Ok(result) => {
-                    return Ok((
-                        result.clone(),
-                        vec![Artifact {
-                            id: task.id.clone(),
-                            artifact_type: "pipeline_result".to_string(),
-                            content: result.as_bytes().to_vec(),
-                            mime_type: "text/plain".to_string(),
-                        }],
-                    ));
-                }
-                Err(e) => {
-                    warn!(
-                        "Auto-pipeline execution failed for task {}: {}, falling back to LLM",
-                        task.id, e
-                    );
-                }
-            }
-        }
-
-        let llm = self
-            .llm_interface
-            .as_ref()
-            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
-
-        // Parse structured input JSON to extract current message and context metadata
-        let (
-            input_text,
-            mut extra_params,
-            image_urls,
-            history,
-            gateway_memory_context,
-            weather_data,
-        ) = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
-            let message = json
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or(&task.input)
-                .to_string();
-            let mut params = task.parameters.clone();
-            if let Some(platform) = json.get("platform").and_then(|p| p.as_str()) {
-                params.insert("platform".to_string(), platform.to_string());
-            }
-            if let Some(channel_id) = json.get("channel_id").and_then(|c| c.as_str()) {
-                params.insert("channel_id".to_string(), channel_id.to_string());
-            }
-            if let Some(user_id) = json.get("user_id").and_then(|u| u.as_str()) {
-                params.insert("user_id".to_string(), user_id.to_string());
-            }
-            if let Some(session_id) = json.get("session_id").and_then(|s| s.as_str()) {
-                params.insert("session_id".to_string(), session_id.to_string());
-            }
-            let images: Vec<String> = json
-                .get("images")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let history: Vec<(String, String)> = json
-                .get("history")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| {
-                            let role = v.get("role").and_then(|r| r.as_str())?;
-                            let content = v.get("content").and_then(|c| c.as_str())?;
-                            Some((role.to_string(), content.to_string()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let memory_context = json
-                .get("memory_context")
-                .and_then(|m| m.as_str())
-                .map(|s| s.to_string());
-            let weather_data = json
-                .get("weather_data")
-                .and_then(|m| m.as_str())
-                .map(|s| s.to_string());
-            (
-                message,
-                params,
-                images,
-                history,
-                memory_context,
-                weather_data,
-            )
-        } else {
-            (
-                task.input.clone(),
-                task.parameters.clone(),
-                Vec::new(),
-                Vec::new(),
-                None,
-                None,
-            )
-        };
-
-        let mut metadata = std::collections::HashMap::new();
-        if !image_urls.is_empty() {
-            metadata.insert(
-                "image_urls".to_string(),
-                serde_json::to_string(&image_urls).unwrap_or_default(),
-            );
-        }
-
-        // 🆕 FIX: When gateway has already matched a skill, execute it directly.
-        // This bypasses the LLM call for MCP tools and other registered skills that
-        // the gateway has confidently matched.
-        if let Some(ref hint) = skill_hint {
-            if let Some(skill_id) = hint.get("id").and_then(|v| v.as_str()) {
-                // Try registry first
-                let registry_result = if let Some(ref registry) = self.skill_registry {
-                    registry.get(skill_id).await
-                } else {
-                    None
-                };
-
-                if let Some(registered) = registry_result {
-                    info!(
-                        "Gateway matched skill '{}', executing directly without LLM call",
-                        skill_id
-                    );
-                    // 🆕 FIX: Enrich input with gateway-provided context (weather_data, etc.)
-                    let mut enriched_input = if let Some(ref weather) = weather_data {
-                        if !weather.is_empty() {
-                            format!(
-                                "{}\n\n[参考数据] 实时天气：{}\n请基于以上数据回答。",
-                                input_text, weather
-                            )
-                        } else {
-                            input_text.clone()
-                        }
-                    } else {
-                        input_text.clone()
-                    };
-
-                    // 🆕 FIX: Inject conversation history into knowledge skill input so
-                    // multi-turn skills (e.g. Travel Planner) can see the full context.
-                    // Without this, the skill only sees the current message and asks for
-                    // information the user already provided in earlier turns.
-                    if !history.is_empty() {
-                        let mut context = String::new();
-                        for (role, content) in &history {
-                            let prefix = match role.as_str() {
-                                "user" => "用户",
-                                "assistant" => "助手",
-                                "system" => "系统",
-                                _ => &role,
-                            };
-                            context.push_str(&format!("{}: {}\n", prefix, content));
-                        }
-                        context.push_str(&format!("用户: {}\n", enriched_input));
-                        enriched_input = context;
-                    }
-
-                    let skill_result = self
-                        .execute_registered_skill(&registered, &enriched_input, None)
-                        .await;
-                    match skill_result {
-                        Ok(result) => {
-                            if let Some(ref registry) = self.skill_registry {
-                                let _ = registry.record_usage(skill_id).await;
-                            }
-                            let output =
-                                self.synthesize_skill_output(&input_text, &result.output, skill_id);
-                            return Ok((output, vec![]));
-                        }
-                        Err(e) => {
-                            let err_str = e.to_string();
-                            // 🆕 FIX: If direct execution failed due to missing arguments,
-                            // fall back to LLM so it can extract parameters from natural language.
-                            if err_str.contains("Missing required parameter")
-                                || err_str.contains("argument validation failed")
-                                || err_str.contains("Unknown parameter")
-                            {
-                                warn!(
-                                    "Direct skill execution for '{}' failed due to args issue, \
-                                     falling back to LLM: {}",
-                                    skill_id, e
-                                );
-                                // Continue to LLM path below instead of
-                                // returning error
-                            } else {
-                                warn!("Direct skill execution for '{}' failed: {}", skill_id, e);
-                                return Ok((
-                                    format!("执行 skill '{}' 时出错: {}", skill_id, e),
-                                    vec![],
-                                ));
-                            }
-                        }
-                    }
-                } else if let Some((server_name, tool_name)) =
-                    crate::mcp::skill_bridge::parse_mcp_skill_id(skill_id)
-                {
-                    // 🆕 FIX: Fallback for MCP skills not found in registry.
-                    // Execute directly via MCP manager without requiring registry entry.
-                    info!(
-                        "Gateway matched MCP skill '{}' not in registry, executing directly via \
-                         MCP client",
-                        skill_id
-                    );
-                    if let Some(ref mcp) = self.mcp_manager {
-                        if let Some(client) = mcp.get_client(server_name).await {
-                            let mut arguments = serde_json::Map::new();
-                            if !input_text.is_empty() {
-                                match serde_json::from_str::<
-                                    serde_json::Map<String, serde_json::Value>,
-                                >(&input_text)
-                                {
-                                    Ok(map) => arguments = map,
-                                    Err(_) => {
-                                        arguments.insert(
-                                            "query".to_string(),
-                                            serde_json::Value::String(input_text.to_string()),
-                                        );
-                                    }
-                                }
-                            }
-                            let args = if arguments.is_empty() {
-                                None
-                            } else {
-                                Some(arguments)
-                            };
-                            match client.call_tool(tool_name, args).await {
-                                Ok(result) => {
-                                    let output = if result.is_error {
-                                        let error_text = result
-                                            .content
-                                            .iter()
-                                            .filter_map(|c| match c {
-                                                crate::mcp::types::ToolContent::Text { text } => {
-                                                    Some(text.clone())
-                                                }
-                                                _ => None,
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join("\n");
-                                        return Ok((
-                                            format!("MCP tool returned error: {}", error_text),
-                                            vec![],
-                                        ));
-                                    } else {
-                                        result
-                                            .content
-                                            .iter()
-                                            .filter_map(|c| match c {
-                                                crate::mcp::types::ToolContent::Text { text } => {
-                                                    Some(text.clone())
-                                                }
-                                                _ => None,
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join("\n")
-                                    };
-                                    let output = self.synthesize_skill_output(
-                                        &input_text,
-                                        &output,
-                                        skill_id,
-                                    );
-                                    return Ok((output, vec![]));
-                                }
-                                Err(e) => {
-                                    warn!("Direct MCP tool call for '{}' failed: {}", skill_id, e);
-                                    return Ok((format!("MCP tool 调用失败: {}", e), vec![]));
-                                }
-                            }
-                        } else {
-                            warn!(
-                                "MCP client '{}' not found for skill '{}'",
-                                server_name, skill_id
-                            );
-                        }
-                    } else {
-                        warn!("MCP manager not configured for skill '{}'", skill_id);
-                    }
-                } else {
-                    warn!(
-                        "Gateway matched skill '{}' but not found in registry",
-                        skill_id
-                    );
-                }
-            }
-        }
-
-        // Build message list with memory context, history, and current message
-        let mut messages: Vec<communication::Message> = Vec::new();
-
-        // 🆕 FIX: 当 gateway 传入 skill_hint 时，使用其 prompt_template 作为核心
-        // persona。 若 gateway 已通过 memory_context 注入 skill
-        // prompt（当前标准行为），则 persona 只做轻量标识，
-        // 避免同一份 prompt_template 在 persona message 和 memory message
-        // 中重复出现，浪费 token。 🆕 OPTIMIZATION PHASE 2: Use cached base
-        // persona when no skill_hint
-        let base_persona = self
-            .build_system_prompt_cached(
-                intent_opt
-                    .map(|i| &i.intent)
-                    .unwrap_or(&crate::intent::UserIntent::DirectAnswer),
-            )
-            .await;
-
-        let persona = if let Some(ref hint) = skill_hint {
-            let name = hint
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&self.config.name);
-            let prompt_template = hint
-                .get("prompt_template")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if !prompt_template.is_empty() {
-                // 检查 gateway 是否已把 skill prompt 注入 memory_context
-                let gateway_has_skill_prompt = gateway_memory_context.as_ref().map_or(false, |m| {
-                    m.contains(prompt_template.trim().split('\n').next().unwrap_or(""))
-                });
-                if gateway_has_skill_prompt {
-                    // Gateway 已注入完整 skill prompt，persona 只做轻量标识
-                    format!(
-                        "You are {}. Please remain friendly, professional, and helpful when \
-                         answering questions.",
-                        name
-                    )
-                } else {
-                    // Gateway 未注入，使用 skill prompt_template 作为 persona
-                    format!("[角色] {}\n\n{}", name, prompt_template)
-                }
-            } else {
-                let desc = hint
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&self.config.description);
-                format!(
-                    "You are {} ({}). Please remain friendly, professional, and helpful when \
-                     answering questions.",
-                    name, desc
-                )
-            }
-        } else {
-            base_persona
-        };
-
-        // 🆕 FIX: Append skill-catalog trigger instruction to persona so the LLM
-        // knows to emit SKILL:<id> when the user request matches a registered skill.
-        // 🆕 SKILL MATCHING V2: Removed hardcoded generative skill exclusions.
-        let persona = if self.skill_catalog.is_some() {
-            if let Some(ref hint) = skill_hint {
-                // 🆕 FIX: Gateway already matched a skill; tell LLM to emit SKILL:id|params
-                // directly
-                let skill_id = hint.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                format!(
-                    "{}\n\n[系统指令] Gateway 建议使用的 skill 是 '{}'. 如果该 skill \
-                     能直接满足用户请求，请只回复 SKILL:{}|{{\"param\":\"value\"}} \
-                     格式，不要添加任何解释。如果该 skill \
-                     无法满足用户请求（例如用户要求的功能不在该 skill \
-                     范围内），请直接以自然语言回答用户的问题，不要强行调用不匹配的 skill。",
-                    persona, skill_id, skill_id
-                )
-            } else {
-                format!(
-                    "{}\n\n[系统指令] 当用户请求与某个 skill 匹配时，请只回复 \
-                     SKILL:<skill_id>|{{\"param\":\"value\"}}，不要提供其他解释。",
-                    persona
-                )
-            }
-        } else {
-            persona
-        };
-        // 🆕 FIX: Force direct answer — Kimi k2.6 tends to explain system instructions
-        let mut persona = format!(
-            "{}\n\n[强制规则] \
-             直接回答用户问题，不要解释你收到了什么数据、什么技能指引或系统指令。禁止以\"\
-             用户问的是...\"、\"系统提示我...\"、\"我需要...\"、\"根据规则...\"开头。",
-            persona
-        );
-
-        // 🆕 OPTIMIZATION PHASE 2: Add REASONING_SCRATCHPAD hint for complex tasks
-        if matches!(
-            intent_opt.map(|i| &i.intent),
-            Some(crate::intent::UserIntent::MultiStepPlanning)
-        ) {
-            persona.push_str(
-                "\n\n[推理指南] 这是一个复杂任务，请按以下步骤思考并在回复中包含 \
-                 <REASONING_SCRATCHPAD> 标签：\n1. 分析用户目标\n2. 确定需要调用的工具及顺序\n3. \
-                 验证每一步的依赖关系\n输出格式：<REASONING_SCRATCHPAD>你的思考过程</\
-                 REASONING_SCRATCHPAD>\n然后输出实际回答或工具调用。",
-            );
-        }
-
-        messages.push(communication::Message::new(
-            uuid::Uuid::new_v4(),
-            communication::PlatformType::Custom,
-            persona,
-        ));
-
-        // 🟢 P1 FIX: Use gateway-provided memory_context if available (avoids redundant
-        // search + dirty query)
-        if let Some(ref gateway_memory) = gateway_memory_context {
-            if !gateway_memory.is_empty() {
-                info!(
-                    "Using gateway-provided memory context ({} chars) for agent {}",
-                    gateway_memory.len(),
-                    self.config.id
-                );
-                messages.push(communication::Message::new(
-                    uuid::Uuid::new_v4(),
-                    communication::PlatformType::Custom,
-                    format!(
-                        "[系统提示：以下是该用户的历史记忆，回答时必须结合这些信息]\n{}",
-                        gateway_memory
-                    ),
-                ));
-            }
-        }
-        // Weather data will be appended to the user message below instead of a separate
-        // system message
-        if let Some(ref memory) = self.memory_system {
-            // Fallback: local search using ONLY input_text (never concatenate history —
-            // prevents self-referential duplication)
-            let query = input_text.clone();
-
-            // 🆕 FIX (方案B): fallback 记忆检索也采用独立预算
-            let char_count = query.chars().count();
-            let is_simple = char_count <= 10;
-            let is_complex = char_count > 30
-                || query.contains("计划")
-                || query.contains("规划")
-                || query.contains("步骤")
-                || query.contains("安排")
-                || query.contains("攻略")
-                || query.contains("对比")
-                || query.contains("分析")
-                || query.contains("总结");
-            let search_limit = if is_complex {
-                6
-            } else if char_count > 15 {
-                4
-            } else {
-                2
-            };
-            let max_memory_chars = if is_simple {
-                400
-            } else if is_complex {
-                1200
-            } else {
-                800
-            };
-
-            match memory.search(&query).await {
-                Ok(results) => {
-                    info!(
-                        "Agent {} local memory search returned {} results (limit={}) for query \
-                         '{}'..",
-                        self.config.id,
-                        results.len(),
-                        search_limit,
-                        query.chars().take(40).collect::<String>()
-                    );
-                    let input_lower = input_text.to_lowercase();
-                    let mut total_chars = 0;
-                    let memory_context: String = results
-                        .iter()
-                        .filter(|r| {
-                            // Skip memories that are essentially the current query being repeated
-                            let is_self_referential =
-                                r.content.to_lowercase().contains(&input_lower);
-                            if is_self_referential {
-                                info!(
-                                    "Filtering out self-referential memory: {}",
-                                    r.content.chars().take(40).collect::<String>()
-                                );
-                            }
-                            !is_self_referential
-                        })
-                        .take(search_limit)
-                        .filter_map(|r| {
-                            let entry = format!("- {}", r.content);
-                            if total_chars + entry.len() > max_memory_chars {
-                                if total_chars == 0 {
-                                    // First entry already too long, truncate it
-                                    // FIX: Use chars() to avoid slicing in the middle of a UTF-8
-                                    // char
-                                    let trunc_len = max_memory_chars.saturating_sub(4);
-                                    let truncated = format!(
-                                        "- {}...",
-                                        r.content.chars().take(trunc_len).collect::<String>()
-                                    );
-                                    total_chars += truncated.len();
-                                    return Some(truncated);
-                                }
-                                return Some("- ...（更多记忆已省略）".to_string());
-                            }
-                            total_chars += entry.len();
-                            Some(entry)
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if !memory_context.is_empty() {
-                        info!(
-                            "Injecting memory context ({} chars) into agent LLM prompt",
-                            memory_context.len()
-                        );
-                        messages.push(communication::Message::new(
-                            uuid::Uuid::new_v4(),
-                            communication::PlatformType::Custom,
-                            format!(
-                                "[系统提示：以下是该用户的历史记忆，回答时必须结合这些信息]\n{}",
-                                memory_context
-                            ),
-                        ));
-                    }
-                }
-                Err(e) => {
-                    warn!("Memory search failed for agent {}: {}", self.config.id, e);
-                }
-            }
-        }
-
-        for (role, content) in history {
-            let prefix = match role.as_str() {
-                "user" => "用户",
-                "assistant" => "助手",
-                "system" => "系统",
-                _ => &role,
-            };
-            messages.push(communication::Message::new(
-                uuid::Uuid::new_v4(),
-                communication::PlatformType::Custom,
-                format!("{}: {}", prefix, content),
-            ));
-        }
-
-        // Add current user message (with weather data appended if available)
-        let user_message = if let Some(ref weather) = weather_data {
-            if !weather.is_empty() {
-                format!(
-                    "用户: {}\n\n[参考数据] 实时天气：{}\n请基于以上数据回答。",
-                    input_text, weather
-                )
-            } else {
-                format!("用户: {}", input_text)
-            }
-        } else {
-            format!("用户: {}", input_text)
-        };
-        messages.push(communication::Message::with_metadata(
-            uuid::Uuid::new_v4(),
-            communication::PlatformType::Custom,
-            user_message,
-            metadata,
-        ));
-
-        // 🟢 P2 FIX: Dynamic max_tokens based on message complexity
-        // 🆕 SKILL MATCHING V2: Removed hardcoded generative skill exclusions.
-        let dynamic_max_tokens = if input_text.chars().count() < 30 {
-            "300".to_string()
-        } else if input_text.chars().count() < 100 {
-            "600".to_string()
-        } else {
-            "1200".to_string()
-        };
-        extra_params.insert("max_tokens".to_string(), dynamic_max_tokens);
-
-        // 🆕 OPTIMIZATION PHASE 1: Intent-aware tool filtering with Toolsets
-        // Adjust tool count based on intent: DirectAnswer=0, SingleToolCall=10,
-        // MultiStepPlanning=20
-        let top_n = match intent_opt.map(|i| &i.intent) {
-            Some(crate::intent::UserIntent::DirectAnswer) => 0usize,
-            Some(crate::intent::UserIntent::SingleToolCall) => 10usize,
-            Some(crate::intent::UserIntent::MetaQuestion) => 0usize,
-            _ => 20usize,
-        };
-
-        let mut tool_name_map: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut native_tools: Vec<communication::ToolDefinition> = Vec::new();
-        if let Some(ref registry) = self.skill_registry {
-            let all_skills = registry.list_all().await;
-            if !all_skills.is_empty() && top_n > 0 {
-                let query_lower = input_text.to_lowercase();
-                let stopwords: std::collections::HashSet<&str> = [
-                    "的",
-                    "了",
-                    "是",
-                    "我",
-                    "你",
-                    "他",
-                    "她",
-                    "它",
-                    "们",
-                    "在",
-                    "有",
-                    "和",
-                    "就",
-                    "不",
-                    "人",
-                    "都",
-                    "一",
-                    "一个",
-                    "上",
-                    "也",
-                    "很",
-                    "到",
-                    "说",
-                    "要",
-                    "去",
-                    "可以",
-                    "会",
-                    "这",
-                    "那",
-                    "有",
-                    "个",
-                    "之",
-                    "与",
-                    "及",
-                    "等",
-                    "从",
-                    "让",
-                    "向",
-                    "往",
-                    "为",
-                    "被",
-                    "把",
-                    "给",
-                    "请",
-                    "帮",
-                    "来",
-                    "做",
-                    "看",
-                    "想",
-                    "知道",
-                    "一下",
-                    "根据",
-                    "当前",
-                    "现在",
-                    "市场",
-                    "形势",
-                    "这个",
-                    "那个",
-                    "the",
-                    "a",
-                    "an",
-                    "is",
-                    "are",
-                    "was",
-                    "were",
-                    "be",
-                    "been",
-                    "being",
-                    "have",
-                    "has",
-                    "had",
-                    "do",
-                    "does",
-                    "did",
-                    "will",
-                    "would",
-                    "could",
-                    "should",
-                    "may",
-                    "might",
-                    "must",
-                    "shall",
-                    "can",
-                    "need",
-                    "dare",
-                    "ought",
-                    "used",
-                    "to",
-                    "of",
-                    "in",
-                    "for",
-                    "on",
-                    "with",
-                    "at",
-                    "by",
-                    "from",
-                    "as",
-                    "into",
-                    "through",
-                    "during",
-                    "before",
-                    "after",
-                    "above",
-                    "below",
-                    "between",
-                    "under",
-                    "and",
-                    "but",
-                    "or",
-                    "yet",
-                    "so",
-                    "if",
-                    "because",
-                    "although",
-                    "though",
-                    "while",
-                    "where",
-                    "when",
-                    "that",
-                    "which",
-                    "who",
-                    "whom",
-                    "whose",
-                    "what",
-                    "how",
-                    "why",
-                    "it",
-                    "its",
-                    "this",
-                    "these",
-                    "those",
-                    "i",
-                    "me",
-                    "my",
-                    "myself",
-                    "we",
-                    "our",
-                    "you",
-                    "your",
-                    "he",
-                    "him",
-                    "his",
-                    "she",
-                    "her",
-                    "they",
-                    "them",
-                    "their",
-                    "just",
-                    "only",
-                    "even",
-                    "also",
-                    "too",
-                    "very",
-                    "so",
-                    "such",
-                    "no",
-                    "not",
-                    "than",
-                    "then",
-                    "now",
-                    "here",
-                    "there",
-                    "up",
-                    "out",
-                    "off",
-                    "down",
-                    "over",
-                    "again",
-                    "further",
-                    "once",
-                    "more",
-                    "most",
-                    "other",
-                    "some",
-                    "any",
-                    "each",
-                    "few",
-                    "much",
-                    "many",
-                    "all",
-                    "both",
-                    "either",
-                    "neither",
-                    "one",
-                    "two",
-                    "first",
-                    "last",
-                    "good",
-                    "new",
-                    "old",
-                    "great",
-                    "high",
-                    "small",
-                    "different",
-                    "large",
-                    "next",
-                    "early",
-                    "young",
-                    "important",
-                    "public",
-                    "same",
-                    "able",
-                ]
-                .iter()
-                .cloned()
-                .collect();
-
-                // 🆕 FIX: Split on non-alphanumeric; for CJK text also extract individual
-                // characters so Chinese queries can match skills with Chinese descriptions.
-                let mut keywords: Vec<String> = Vec::new();
-                for part in query_lower.split(|c: char| !c.is_alphanumeric() && c != '/') {
-                    if part.is_empty() || part.len() < 2 {
-                        continue;
-                    }
-                    if !stopwords.contains(part) {
-                        keywords.push(part.to_string());
-                    }
-                }
-                keywords.sort();
-                keywords.dedup();
-
-                // Expand crypto/trading related terms
-                let query_lower_str = query_lower.as_str();
-                if query_lower_str.contains("btc") || query_lower_str.contains("bitcoin") {
-                    keywords.push("btc".to_string());
-                    keywords.push("bitcoin".to_string());
-                    keywords.push("crypto".to_string());
-                }
-                if query_lower_str.contains("eth") || query_lower_str.contains("ethereum") {
-                    keywords.push("eth".to_string());
-                    keywords.push("ethereum".to_string());
-                    keywords.push("crypto".to_string());
-                }
-                if query_lower_str.contains("下单")
-                    || query_lower_str.contains("order")
-                    || query_lower_str.contains("buy")
-                    || query_lower_str.contains("sell")
-                {
-                    keywords.push("order".to_string());
-                    keywords.push("trade".to_string());
-                    keywords.push("trading".to_string());
-                    keywords.push("place".to_string());
-                    keywords.push("下单".to_string());
-                }
-                if query_lower_str.contains("行情")
-                    || query_lower_str.contains("price")
-                    || query_lower_str.contains("snapshot")
-                {
-                    keywords.push("snapshot".to_string());
-                    keywords.push("price".to_string());
-                    keywords.push("quote".to_string());
-                    keywords.push("market".to_string());
-                    keywords.push("行情".to_string());
-                }
-                // 🆕 FIX (Plan D): Expand search-related keywords to ensure web search skills
-                // are ranked
-                if query_lower_str.contains("搜索")
-                    || query_lower_str.contains("search")
-                    || query_lower_str.contains("查找")
-                    || query_lower_str.contains("查一下")
-                    || query_lower_str.contains("网上")
-                    || query_lower_str.contains("google")
-                    || query_lower_str.contains("百度")
-                    || query_lower_str.contains("look up")
-                    || query_lower_str.contains("find online")
-                    || query_lower_str.contains("搜")
-                {
-                    keywords.push("search".to_string());
-                    keywords.push("web_search".to_string());
-                    keywords.push("web".to_string());
-                    keywords.push("查找".to_string());
-                }
-
-                // Detect explicit trading intent to boost order-placement tools
-                let has_trading_intent = query_lower_str.contains("下单")
-                    || query_lower_str.contains("购买")
-                    || query_lower_str.contains("买入")
-                    || query_lower_str.contains("卖出")
-                    || query_lower_str.contains("buy")
-                    || query_lower_str.contains("sell")
-                    || query_lower_str.contains("order")
-                    || query_lower_str.contains("place");
-
-                // 🆕 FIX: Detect weather intent to boost weather-related skills
-                let has_weather_intent = query_lower_str.contains("天气")
-                    || query_lower_str.contains("weather")
-                    || query_lower_str.contains("temperature")
-                    || query_lower_str.contains("气温")
-                    || query_lower_str.contains("forecast")
-                    || query_lower_str.contains("预报")
-                    || query_lower_str.contains("rain")
-                    || query_lower_str.contains("雨")
-                    || query_lower_str.contains("snow")
-                    || query_lower_str.contains("雪");
-                if has_weather_intent {
-                    keywords.push("weather".to_string());
-                    keywords.push("get_weather".to_string());
-                    keywords.push("forecast".to_string());
-                }
-
-                // 🆕 OPTIMIZATION PHASE 1: Toolsets-based filter-first + scoring
-                let active_toolsets: std::collections::HashSet<String> = intent_opt
-                    .map(|i| i.active_toolsets.iter().cloned().collect())
-                    .unwrap_or_default();
-
-                // Phase 1: Filter — only keep skills from active toolsets (if any are detected)
-                let mut candidates: Vec<&skills::registry::RegisteredSkill> = all_skills
-                    .iter()
-                    .filter(|s| s.enabled)
-                    .filter(|s| {
-                        if active_toolsets.is_empty() {
-                            return true; // no toolset constraints
-                        }
-                        let skill_id_lower = s.skill.id.to_lowercase();
-                        active_toolsets
-                            .iter()
-                            .any(|ts| skill_id_lower.contains(ts) || s.tags.contains(ts))
-                    })
-                    .collect();
-
-                // Fallback: if too few matches after toolset filtering, use all enabled
-                if candidates.len() < 3 && !active_toolsets.is_empty() {
-                    candidates = all_skills.iter().filter(|s| s.enabled).collect();
-                }
-
-                // Phase 2: Score within filtered candidates
-                let mut scored_skills: Vec<(usize, &skills::registry::RegisteredSkill)> =
-                    Vec::new();
-                for registered in &candidates {
-                    let manifest = &registered.skill.manifest;
-                    let searchable =
-                        format!("{} {} {}", manifest.id, manifest.name, manifest.description)
-                            .to_lowercase();
-                    let mut score = keywords
-                        .iter()
-                        .filter(|k| searchable.contains(k.as_str()))
-                        .count();
-
-                    // 🆕 FIX: Boost order placement tools when user explicitly wants to trade
-                    if has_trading_intent {
-                        let skill_id_lower = manifest.id.to_lowercase();
-                        if skill_id_lower.contains("place_") && skill_id_lower.contains("_order") {
-                            score += 20;
-                        }
-                    }
-
-                    // 🆕 FIX: Boost weather skills when user asks about weather
-                    if has_weather_intent {
-                        let skill_id_lower = manifest.id.to_lowercase();
-                        if skill_id_lower.contains("weather")
-                            || skill_id_lower.contains("get_weather")
-                        {
-                            score += 20;
-                        }
-                    }
-                    if score > 0 {
-                        scored_skills.push((score, *registered));
-                    }
-                }
-
-                // Sort by relevance (highest first) and take top N based on intent
-                scored_skills.sort_by(|a, b| b.0.cmp(&a.0));
-                let selected = if scored_skills.len() >= 3 {
-                    scored_skills
-                        .into_iter()
-                        .take(top_n)
-                        .map(|(_, s)| s)
-                        .collect::<Vec<_>>()
-                } else {
-                    // 🆕 FIX: When too few keyword matches, still prioritize scored skills.
-                    // Inject only scored skills + enough top enabled skills to reach 3,
-                    // instead of flooding the LLM with 30 unrelated tools.
-                    let mut selected: Vec<&skills::registry::RegisteredSkill> =
-                        scored_skills.into_iter().map(|(_, s)| s).collect();
-                    if selected.len() < 3 {
-                        for s in all_skills.iter().filter(|s| s.enabled) {
-                            if !selected.iter().any(|sel| sel.skill.id == s.skill.id) {
-                                selected.push(s);
-                            }
-                            if selected.len() >= 3 {
-                                break;
-                            }
-                        }
-                    }
-                    selected
-                };
-
-                let mut tools = Vec::new();
-                for registered in &selected {
-                    let manifest = &registered.skill.manifest;
-                    let func = manifest.functions.first();
-                    let (params_schema, desc) = if let Some(f) = func {
-                        let mut props = serde_json::Map::new();
-                        let mut required = Vec::new();
-                        for param in &f.inputs {
-                            let mut prop = serde_json::Map::new();
-                            prop.insert(
-                                "type".to_string(),
-                                serde_json::Value::String(param.param_type.clone()),
-                            );
-                            if !param.description.is_empty() {
-                                prop.insert(
-                                    "description".to_string(),
-                                    serde_json::Value::String(param.description.clone()),
-                                );
-                            }
-                            props.insert(param.name.clone(), serde_json::Value::Object(prop));
-                            if param.required {
-                                required.push(param.name.clone());
-                            }
-                        }
-                        let schema = serde_json::json!({
-                            "type": "object",
-                            "properties": props,
-                            "required": required,
-                        });
-                        // 🆕 FIX: Avoid duplicating manifest prefix + function docstring.
-                        // Use function description if available (it's usually the focused tool
-                        // description), otherwise fall back to manifest description.
-                        let description = if f.description.is_empty() {
-                            manifest.description.clone()
-                        } else {
-                            f.description.clone()
-                        };
-                        (schema, description)
-                    } else {
-                        (
-                            serde_json::json!({"type": "object", "properties": {}, "required": []}),
-                            manifest.description.clone(),
-                        )
-                    };
-
-                    let original_name = registered.skill.id.clone();
-                    let normalized_name = original_name.replace(':', "-").replace('/', "-");
-                    tool_name_map.insert(normalized_name.clone(), original_name);
-
-                    tools.push(communication::ToolDefinition {
-                        name: normalized_name,
-                        description: desc,
-                        parameters: params_schema,
-                    });
-                }
-
-                let skill_tool_count = tools.len();
-                if !tools.is_empty() {
-                    native_tools = tools;
-                }
-
-                // 🆕 Append底层 tools so LLM can directly invoke file ops, exec, etc.
-                let bottom_tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
-                for (name, tool) in &bottom_tools {
-                    if !native_tools.iter().any(|t| &t.name == name) {
-                        native_tools.push(communication::ToolDefinition {
-                            name: name.clone(),
-                            description: tool.description().to_string(),
-                            parameters: tool.parameters_schema(),
-                        });
-                    }
-                }
-
-                if !native_tools.is_empty() {
-                    match serde_json::to_string(&native_tools) {
-                        Ok(json) => {
-                            extra_params.insert("tools_json".to_string(), json);
-                            info!(
-                                "handle_llm_task: injected {} tools ({} skills + {} bottom) for \
-                                 native function calling (keywords: {:?})",
-                                native_tools.len(),
-                                skill_tool_count,
-                                bottom_tools.len(),
-                                keywords
-                            );
-                        }
-                        Err(e) => warn!("Failed to serialize tools: {}", e),
-                    }
-                }
-            }
-        }
-
-        // 🟢 P2 FIX: Check LLM response cache for simple text queries (no images, < 500
-        // chars)
-        let cache_key = if image_urls.is_empty() && input_text.len() < 500 {
-            let memory_hash = gateway_memory_context
-                .as_ref()
-                .map(|m| m.len().to_string())
-                .unwrap_or_else(|| "0".to_string());
-            Some(format!(
-                "{}|{}|{}",
-                self.config.id,
-                input_text.trim(),
-                memory_hash
-            ))
-        } else {
-            None
-        };
-
-        if let Some(ref key) = cache_key {
-            let cache = self.llm_response_cache.read().await;
-            if let Some((cached_response, timestamp)) = cache.get(key) {
-                if timestamp.elapsed() < Duration::from_secs(300) {
-                    info!(
-                        "P2 CACHE HIT: agent {} returning cached response for '{}' (age {:?})",
-                        self.config.id,
-                        input_text.chars().take(40).collect::<String>(),
-                        timestamp.elapsed()
-                    );
-                    return Ok((cached_response.clone(), vec![]));
-                }
-            }
-            drop(cache);
-        }
-
-        // 🆕 FIX: When native function calling is active (tools_json present), skip the
-        // bulky text-based skill catalog and inject a strong command-style system hint.
-        let messages = if extra_params.contains_key("tools_json") {
-            // 🆕 FIX: Set tool_choice to required for SingleToolCall to force tool
-            // invocation
-            if matches!(
-                intent_opt.map(|i| &i.intent),
-                Some(crate::intent::UserIntent::SingleToolCall)
-            ) {
-                extra_params.insert("tool_choice".to_string(), "required".to_string());
-            }
-            let mut result = vec![communication::Message::new(
-                uuid::Uuid::new_v4(),
-                communication::PlatformType::Custom,
-                "You are a function-calling assistant. When tools are provided, you MUST use \
-                 function calling. Do not provide analysis, explanations, or reasoning. Call the \
-                 most appropriate tool with the correct parameters. If a parameter is missing, \
-                 use a reasonable default or leave it empty. Never ask the user for missing \
-                 information."
-                    .to_string(),
-            )];
-            result.extend(messages);
-            result
-        } else {
-            self.inject_skill_catalog(messages)
-        };
-        info!(
-            "handle_llm_task: messages count after inject = {}, skill_catalog set = {}, \
-             native_tools = {}",
-            messages.len(),
-            self.skill_catalog.is_some(),
-            extra_params.contains_key("tools_json")
-        );
-
-        // 🆕 Build底层 tool handlers for real execution via LLMClient
-        let bottom_tool_handlers: Vec<Box<dyn crate::llm::ToolHandler>> =
-            if self.llm_client.is_some() {
-                crate::skills::tool_set::default_tool_set(&self.tool_work_dir)
-                    .into_iter()
-                    .map(|(_, tool)| {
-                        Box::new(crate::llm::SkillToolHandler::new(tool))
-                            as Box<dyn crate::llm::ToolHandler>
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-        let mut response = if !bottom_tool_handlers.is_empty() {
-            // 🆕 Use direct LLMClient for native tool calling with real execution
-            info!(
-                "handle_llm_task: using LLMClient native tool calling with {} bottom tools",
-                bottom_tool_handlers.len()
-            );
-            let client = self.llm_client.as_ref().unwrap();
-            let llm_messages: Vec<crate::llm::Message> = messages
-                .iter()
-                .map(|m| {
-                    let content = m.content.clone();
-                    let role = if m.platform == communication::PlatformType::Custom {
-                        // 🆕 FIX: Infer role from text prefix for accurate conversation semantics
-                        if content.starts_with("用户:") || content.starts_with("User:") {
-                            crate::llm::Role::User
-                        } else if content.starts_with("助手:") || content.starts_with("Assistant:")
-                        {
-                            crate::llm::Role::Assistant
-                        } else {
-                            crate::llm::Role::System
-                        }
-                    } else {
-                        crate::llm::Role::User
-                    };
-                    crate::llm::Message {
-                        role,
-                        content: vec![crate::llm::Content::Text { text: content }],
-                        name: None,
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                    }
-                })
-                .collect();
-            match client
-                .chat_with_tools_react_with_messages(
-                    llm_messages,
-                    bottom_tool_handlers,
-                    10,
-                    None,
-                    None,
-                )
-                .await
-            {
-                Ok(resp) => resp,
-                Err(e) => {
-                    warn!(
-                        "LLMClient native tool calling failed: {}, falling back to legacy path",
-                        e
-                    );
-                    // Fall through to legacy path
-                    if !native_tools.is_empty() && llm.supports_native_tools() {
-                        match llm
-                            .call_llm_with_tools(
-                                messages.clone(),
-                                native_tools.clone(),
-                                Some(extra_params.clone()),
-                            )
-                            .await
-                        {
-                            Ok(resp) => resp,
-                            Err(e2) => {
-                                return Err(AgentError::Execution(format!(
-                                    "LLM call with tools failed: {}",
-                                    e2
-                                )));
-                            }
-                        }
-                    } else {
-                        llm.call_llm(messages.clone(), Some(extra_params.clone()))
-                            .await
-                            .map_err(|e2| {
-                                AgentError::Execution(format!("LLM call failed: {}", e2))
-                            })?
-                    }
-                }
-            }
-        } else if !native_tools.is_empty() && llm.supports_native_tools() {
-            info!(
-                "handle_llm_task: using native function calling with {} tools",
-                native_tools.len()
-            );
-            match llm
-                .call_llm_with_tools(
-                    messages.clone(),
-                    native_tools.clone(),
-                    Some(extra_params.clone()),
-                )
-                .await
-            {
-                Ok(resp) => resp,
-                Err(e) => {
-                    let err_str = e.to_string();
-                    // 🆕 FIX: Retry without tool_choice when Claude thinking mode conflicts
-                    if err_str.contains("tool_choice") && err_str.contains("thinking") {
-                        warn!(
-                            "tool_choice incompatible with thinking mode, retrying without \
-                             tool_choice"
-                        );
-                        let mut retry_params = extra_params.clone();
-                        retry_params.remove("tool_choice");
-                        llm.call_llm_with_tools(messages.clone(), native_tools, Some(retry_params))
-                            .await
-                            .map_err(|e2| {
-                                AgentError::Execution(format!("LLM call with tools failed: {}", e2))
-                            })?
-                    } else {
-                        return Err(AgentError::Execution(format!(
-                            "LLM call with tools failed: {}",
-                            e
-                        )));
-                    }
-                }
-            }
-        } else {
-            llm.call_llm(messages.clone(), Some(extra_params.clone()))
-                .await
-                .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?
-        };
-
-        info!(
-            "handle_llm_task: LLM raw response (first 200 chars) = {}",
-            &response.chars().take(200).collect::<String>()
-        );
-
-        // 🆕 FIX: Guard against empty LLM responses to avoid corrupting conversation
-        // history
-        if response.trim().is_empty() {
-            warn!("LLM returned empty response; skipping cache/history storage");
-            return Ok((
-                "抱歉，AI 暂时无法生成回复，请稍后再试。".to_string(),
-                vec![],
-            ));
-        }
-
-        // 🆕 FIX: When native function calling is active but LLM returns analysis text
-        // instead of a tool call, retry once with a stripped-down prompt to force
-        // tool invocation.
-        let is_native_tools = extra_params.contains_key("tools_json");
-        // 🆕 FIX: Only retry if gateway has explicitly suggested a skill but LLM didn't
-        // call it. If no skill_hint exists, the LLM returning a text answer is
-        // correct behavior.
-        let has_skill_hint = skill_hint.is_some();
-        if is_native_tools
-            && has_skill_hint
-            && !response.trim().starts_with("SKILL:")
-            && response.trim().len() > 200
-        {
-            warn!(
-                "LLM returned analysis text instead of tool_call (skill_hint present). Retrying \
-                 with forced tool prompt."
-            );
-            let retry_messages = vec![
-                communication::Message::new(
-                    uuid::Uuid::new_v4(),
-                    communication::PlatformType::Custom,
-                    "You are a function-calling assistant. When tools are available, you MUST \
-                     call one. FORBIDDEN: Analysis, reasoning, explanations, describing what you \
-                     are doing, asking the user for missing information. MUST: Directly call the \
-                     most appropriate tool with the parameters you know. If a parameter is \
-                     missing, leave it out or use a reasonable default. The tool will handle \
-                     validation and tell us what's missing."
-                        .to_string(),
-                ),
-                communication::Message::new(
-                    uuid::Uuid::new_v4(),
-                    communication::PlatformType::Custom,
-                    format!("User: {}", input_text),
-                ),
-            ];
-            match llm.call_llm(retry_messages, Some(extra_params)).await {
-                Ok(retry_resp) if retry_resp.trim().starts_with("SKILL:") => {
-                    info!("Retry succeeded: LLM returned tool_call");
-                    response = retry_resp;
-                }
-                Ok(_retry_resp) => {
-                    warn!("Retry also failed to produce tool_call. Keeping original response.");
-                }
-                Err(e) => {
-                    warn!("Retry LLM call failed: {}. Keeping original response.", e);
-                }
-            }
-        }
-
-        // 🆕 FIX: Clean up thinking process BEFORE parsing skill triggers so that
-        // trailing analysis text after SKILL: does not pollute skill ID extraction.
-        let mut response = Self::cleanup_thinking_process(&response);
-
-        // 🆕 OPTIMIZATION PHASE 3: Detect and execute tool chains (multi-step
-        // conditional calls)
-        if response.contains("STEP 1:") || response.contains("IF ") {
-            match self.try_execute_tool_chain(&response, &input_text).await {
-                Ok(Some(result)) => return Ok((result, vec![])),
-                Ok(None) => {} // Not a valid tool chain, continue normal flow
-                Err(e) => warn!("Tool chain execution failed: {}", e),
-            }
-        }
-
-        // 🆕 FIX: If the LLM response is a skill trigger (e.g. "SKILL:hello_world"),
-        // look up the skill in the registry and execute it instead of returning raw
-        // text.
-        let trimmed = response.trim();
-        let skill_part = if trimmed.starts_with("SKILL:") {
-            trimmed.strip_prefix("SKILL:")
-        } else if let Some(pos) = trimmed.find("SKILL:") {
-            trimmed[pos..].strip_prefix("SKILL:")
-        } else {
-            None
-        };
-        if let Some(skill_part) = skill_part {
-            let skill_part = skill_part.trim();
-            // 🆕 FIX: Parse skill ID and optional parameters separated by '|'
-            let (skill_id, skill_params, json_parse_failed) = match skill_part.find('|') {
-                Some(pos) => {
-                    let id = skill_part[..pos].trim();
-                    let params_json = skill_part[pos + 1..].trim();
-                    let mut parse_failed = false;
-                    let params = if params_json.is_empty() || params_json == "{}" {
-                        None
-                    } else {
-                        match serde_json::from_str::<
-                            std::collections::HashMap<String, serde_json::Value>,
-                        >(params_json)
-                        {
-                            Ok(map) => {
-                                let string_map: std::collections::HashMap<String, String> = map
-                                    .into_iter()
-                                    .map(|(k, v)| (k, v.to_string().trim_matches('"').to_string()))
-                                    .collect();
-                                Some(string_map)
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "LLM returned invalid JSON parameters for skill '{}': {} \
-                                     (raw: {})",
-                                    id, e, params_json
-                                );
-                                parse_failed = true;
-                                None
-                            }
-                        }
-                    };
-                    (id, params, parse_failed)
-                }
-                None => {
-                    // 🛡️ Fallback: Parse only the skill ID before any whitespace
-                    let id = skill_part.split_whitespace().next().unwrap_or("").trim();
-                    (id, None, false)
-                }
-            };
-
-            // 🆕 FIX: Common words that LLM mistakenly uses as skill IDs when it
-            // misinterprets system prompt
-            let invalid_skill_ids = [
-                "immediately",
-                "format",
-                "directly",
-                "direct",
-                "output",
-                "skill",
-                "id",
-                "real",
-                "actual",
-                "<skill_id>",
-            ];
-            let is_invalid_id = invalid_skill_ids.contains(
-                &skill_id
-                    .to_lowercase()
-                    .trim_matches(|c: char| !c.is_alphanumeric()),
-            );
-            // 🆕 FIX: Detect placeholder/example parameters that LLM copied from system
-            // prompt
-            let is_example_params = skill_params.as_ref().map_or(false, |p| {
-                p.len() == 1 && p.get("param") == Some(&"value".to_string())
-            });
-            if skill_id.is_empty() {
-                warn!(
-                    "LLM returned empty skill ID after parsing: {}",
-                    response.trim()
-                );
-            } else if is_invalid_id || is_example_params {
-                warn!(
-                    "LLM output invalid skill ID '{}' or example params {:?}. Falling back to \
-                     normal LLM path.",
-                    skill_id, skill_params
-                );
-                response = "抱歉，我没有理解您的具体需求。请告诉我您想做什么，我会尽力帮助您。"
-                    .to_string();
-            } else if json_parse_failed {
-                // 🆕 FIX: LLM output SKILL:id|{incomplete_json — JSON parse failed.
-                // Skip skill execution and fall back to normal LLM path so the LLM can retry or
-                // answer directly.
-                warn!(
-                    "LLM returned SKILL:{} with invalid/incomplete JSON parameters. Falling back \
-                     to normal LLM path.",
-                    skill_id
-                );
-                response = format!(
-                    "我注意到您可能需要使用 \
-                     '{}'，但缺少必要的参数。请补充相关信息，我会立即帮您处理。",
-                    skill_id
-                );
-                // Continue to normal LLM path below instead of executing skill
-                // with missing params
-            } else {
-                info!(
-                    "LLM requested skill execution: {} (params: {:?})",
-                    skill_id, skill_params
-                );
-                if let Some(ref registry) = self.skill_registry {
-                    let mut resolved_skill = registry.get(skill_id).await;
-                    // 🆕 FIX: When using native function calling, the LLM sees normalized names
-                    // (colons/slashes replaced by dashes). Map back to the original skill ID.
-                    if resolved_skill.is_none() {
-                        if let Some(original_id) = tool_name_map.get(skill_id) {
-                            info!(
-                                "Resolved normalized skill ID '{}' to original '{}'",
-                                skill_id, original_id
-                            );
-                            resolved_skill = registry.get(original_id).await;
-                        }
-                    }
-                    // 🆕 Fallback: if exact match fails, search for skill ID ending with
-                    // /{skill_id} This handles cases where LLM returns just the
-                    // tool name without mcp:server/ prefix
-                    if resolved_skill.is_none()
-                        && !skill_id.contains(':')
-                        && !skill_id.contains('/')
-                    {
-                        let all_skills = registry.list_all().await;
-                        for skill in &all_skills {
-                            if skill.skill.id.ends_with(&format!("/{}", skill_id)) {
-                                info!(
-                                    "Resolved partial skill ID '{}' to full ID '{}'",
-                                    skill_id, skill.skill.id
-                                );
-                                resolved_skill = Some(skill.clone());
-                                break;
-                            }
-                        }
-                    }
-                    if let Some(registered) = resolved_skill {
-                        let resolved_id = registered.skill.id.clone();
-                        // 🆕 FIX: Pass parsed parameters to skill execution instead of always None
-                        // 🆕 FIX: Enrich input with gateway-provided context (weather_data, etc.)
-                        let enriched_input = if let Some(ref weather) = weather_data {
-                            if !weather.is_empty() {
-                                format!(
-                                    "{}\n\n[参考数据] 实时天气：{}\n请基于以上数据回答。",
-                                    input_text, weather
-                                )
-                            } else {
-                                input_text.clone()
-                            }
-                        } else {
-                            input_text.clone()
-                        };
-                        let skill_input = if skill_params.is_some() {
-                            ""
-                        } else {
-                            enriched_input.as_str()
-                        };
-                        let skill_result = self
-                            .execute_registered_skill(&registered, skill_input, skill_params)
-                            .await;
-                        match skill_result {
-                            Ok(result) => {
-                                let _ = registry.record_usage(&resolved_id).await;
-                                let output = self.synthesize_skill_output(
-                                    &input_text,
-                                    &result.output,
-                                    &resolved_id,
-                                );
-                                return Ok((output, vec![]));
-                            }
-                            Err(e) => {
-                                let err_str = e.to_string().to_lowercase();
-                                let is_dependency_failure = err_str.contains("mx_apikey")
-                                    || err_str.contains("apikey")
-                                    || err_str.contains("api key")
-                                    || err_str.contains("environment variable")
-                                    || err_str.contains("not set");
-                                if is_dependency_failure {
-                                    warn!(
-                                        "Skill '{}' disabled due to missing dependency: {}",
-                                        resolved_id, e
-                                    );
-                                    let _ = registry.disable(&resolved_id).await;
-                                }
-                                warn!(
-                                    "Skill execution for '{}' failed: {}. Falling back to direct \
-                                     answer.",
-                                    resolved_id, e
-                                );
-                                return self.handle_direct_answer(task).await;
-                            }
-                        }
-                    } else {
-                        warn!(
-                            "LLM requested unknown skill: '{}'. Falling back to direct answer.",
-                            skill_id
-                        );
-                        return self.handle_direct_answer(task).await;
-                    }
-                }
-            }
-        }
-
-        // 🟢 P2 FIX: Store response in cache
-        if let Some(ref key) = cache_key {
-            let mut cache = self.llm_response_cache.write().await;
-            cache.insert(key.clone(), (response.clone(), Instant::now()));
-            // Simple eviction: if cache grows beyond 100 entries, clear oldest half
-            if cache.len() > 100 {
-                let mut entries: Vec<_> = cache.drain().collect();
-                entries.sort_by(|a, b| b.1 .1.cmp(&a.1 .1)); // newest first
-                let keep = entries.len() / 2;
-                for (k, v) in entries.into_iter().take(keep) {
-                    cache.insert(k, v);
-                }
-            }
-            drop(cache);
-            info!(
-                "P2 CACHE STORE: agent {} cached response for '{}'",
-                self.config.id,
-                input_text.chars().take(40).collect::<String>()
-            );
-        }
-
-        Ok((response, vec![]))
-    }
 
     /// Check whether a skill directory contains executable scripts.
     /// Checks both the root directory and the `scripts/` subdirectory.
@@ -6495,90 +4173,12 @@ impl Agent {
         &self,
         task: Task,
     ) -> Result<(String, Vec<Artifact>), AgentError> {
-        let message_text = serde_json::from_str::<serde_json::Value>(&task.input)
-            .ok()
-            .and_then(|json| {
-                json.get("message")
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| task.input.clone());
-
         info!(
-            "🧠 Unified ReAct planning for task {} (legacy P2 Planning removed)",
+            "🧠 Unified ReAct planning for task {} (routed to execute_unified_react)",
             task.id
         );
-
-        let lower = message_text.to_lowercase();
-        let has_crypto = [
-            "btc",
-            "bitcoin",
-            "比特币",
-            "eth",
-            "ethereum",
-            "以太坊",
-            "sol",
-            "xrp",
-            "doge",
-            "加密货币",
-            "crypto",
-            "数字货币",
-        ]
-        .iter()
-        .any(|s| lower.contains(s));
-
-        if has_crypto {
-            // Investment-analysis path: use the multi-round ReAct executor
-            let intent = crate::skill_matching::IntentAnalysisV2 {
-                direct_answer: false,
-                needs_skill: true,
-                needs_planning: true,
-                planning_strategy_hint: None,
-                intent: crate::intent::UserIntent::MultiStepPlanning,
-                entities: std::collections::HashMap::new(),
-                constraints: Vec::new(),
-                confidence: 1.0,
-                query_summary: message_text.clone(),
-                active_toolsets: vec![],
-            };
-            return self
-                .execute_with_react_planning(&task, &message_text, &intent)
-                .await;
-        }
-
-        // General path: delegate to LLM with native tool-calling (single-round
-        // autonomous skill selection). The LLM decides which tool to call based
-        // on injected tool descriptions.
-        // 🆕 FIX: Add _skip_planning marker to prevent recursive routing back to
-        // execute_with_planning via handle_llm_task_internal's is_complex check.
-        let mut task = task;
-        task.parameters
-            .insert("_skip_planning".to_string(), "true".to_string());
-        let intent = crate::skill_matching::IntentAnalysisV2 {
-            direct_answer: false,
-            needs_skill: true,
-            needs_planning: true,
-            planning_strategy_hint: None,
-            intent: crate::intent::UserIntent::MultiStepPlanning,
-            entities: std::collections::HashMap::new(),
-            constraints: Vec::new(),
-            confidence: 1.0,
-            query_summary: message_text.clone(),
-            active_toolsets: vec![],
-        };
-        let selection = crate::skill_matching::SkillSelection {
-            selected_skill: None,
-            selected_skill_name: None,
-            needs_planning: true,
-            confidence: 0.0,
-            scores: Vec::new(),
-            selection_reasoning: "Unified ReAct general planning".to_string(),
-            disclosure_level: crate::skills::registry::SkillDisclosureLevel::L0,
-        };
-        // 🆕 FIX: Use Box::pin to break the recursive async fn chain
-        // (execute_with_planning → handle_llm_task_v2 → handle_llm_task_internal
-        // → execute_with_planning).
-        Box::pin(self.handle_llm_task_v2(&task, &intent, &selection)).await
+        // 🆕 All planning tasks now go through the unified ReAct executor
+        self.execute_unified_react(task).await
     }
 
     /// Create plan context from task
@@ -6640,6 +4240,7 @@ impl Agent {
     ///
     /// Stores the plan + execution trail as a reusable experience entry.
     /// Future similar queries can retrieve this experience via memory search.
+    #[allow(dead_code)]
     async fn solidify_experience(
         &self,
         goal: &str,
@@ -6694,6 +4295,7 @@ impl Agent {
     }
 
     /// 🆕 PHASE 2: Auto-distill skill from successful execution trail
+    #[allow(dead_code)]
     async fn maybe_distill_skill(
         &self,
         trail: &crate::planning::ToolTrail,

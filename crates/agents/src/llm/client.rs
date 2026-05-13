@@ -529,7 +529,7 @@ impl LLMClient {
             .collect();
         let tool_definitions: Vec<Tool> = tool_handlers.iter().map(|h| h.definition()).collect();
 
-        for round in 0..max_rounds {
+        for _round in 0..max_rounds {
             let mut config = self.config.clone();
             if let Some(mt) = max_tokens {
                 config.max_tokens = Some(mt);

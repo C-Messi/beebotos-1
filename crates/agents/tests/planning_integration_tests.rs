@@ -65,6 +65,7 @@ async fn test_e2e_complex_task_auto_planning() {
                 limiting, and audit logs. "
             .repeat(5),
         parameters: HashMap::new(),
+        stream_tx: None,
     };
 
     // Verify complexity detection
@@ -94,6 +95,7 @@ async fn test_e2e_explicit_planning_task() {
             params.insert("strategy".to_string(), "goal_based".to_string());
             params
         },
+        stream_tx: None,
     };
 
     let (output, _) = agent
@@ -129,6 +131,7 @@ async fn test_e2e_plan_execution_task() {
             params.insert("plan_id".to_string(), plan.id.to_string());
             params
         },
+        stream_tx: None,
     };
 
     let (output, _) = agent
@@ -152,6 +155,7 @@ async fn test_e2e_plan_execution_nonexistent() {
             params.insert("plan_id".to_string(), PlanId::new().to_string());
             params
         },
+        stream_tx: None,
     };
 
     let result = agent.handle_plan_execution_task(&exec_task).await;
@@ -228,6 +232,7 @@ async fn test_e2e_complexity_detection_variations() {
         task_type: TaskType::LlmChat,
         input: "Short".to_string(),
         parameters: HashMap::new(),
+        stream_tx: None,
     };
     assert_eq!(
         agent.analyze_task_complexity(&task1).await,
@@ -240,6 +245,7 @@ async fn test_e2e_complexity_detection_variations() {
         task_type: TaskType::LlmChat,
         input: "x".repeat(201),
         parameters: HashMap::new(),
+        stream_tx: None,
     };
     assert_eq!(
         agent.analyze_task_complexity(&task2).await,
@@ -254,6 +260,7 @@ async fn test_e2e_complexity_detection_variations() {
         task_type: TaskType::LlmChat,
         input: "Medium length".to_string(),
         parameters: params,
+        stream_tx: None,
     };
     assert_eq!(
         agent.analyze_task_complexity(&task3).await,

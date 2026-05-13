@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
 
 /// MCP Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]

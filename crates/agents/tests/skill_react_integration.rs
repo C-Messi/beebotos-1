@@ -148,7 +148,7 @@ async fn test_process_exec_tool_blocks_dangerous_command() {
 
 #[tokio::test]
 async fn test_file_read_tool() {
-    let tool = FileReadTool;
+    let tool = FileReadTool::new(project_root());
     let skill_md = project_root().join("skills/daily/hello_world/SKILL.md");
     let params = serde_json::json!({
         "path": skill_md.to_string_lossy().to_string()

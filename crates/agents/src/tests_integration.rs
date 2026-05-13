@@ -440,4 +440,117 @@ mod tests {
         // Just verify we can create the center - using _ to avoid unused warning
         let _center = ConfigCenter::from_env();
     }
+
+    // =====================================================================
+    // 🆕 UNIFIED REACT ARCHITECTURE TESTS
+    // =====================================================================
+
+    /// Test PromptBuilder::build_unified_react injects all components
+    #[test]
+    fn test_unified_react_prompt_building() {
+        use crate::prompt::{PromptBuilder, SkillLevelDesc, ToolDefinition};
+
+        let skills = vec![
+            SkillLevelDesc::L1 {
+                id: "weather".to_string(),
+                name: "Weather Assistant".to_string(),
+                one_liner: "查询全球天气".to_string(),
+            },
+            SkillLevelDesc::L2 {
+                id: "weather".to_string(),
+                name: "Weather Assistant".to_string(),
+                summary: "支持城市名查询，返回温度湿度风速".to_string(),
+            },
+        ];
+
+        let tools = vec![
+            ToolDefinition {
+                name: "web_search".to_string(),
+                description: "搜索网页".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+
+        let prompt = PromptBuilder::new()
+            .with_soul("You are a helpful assistant.")
+            .with_skills(skills)
+            .with_tools(tools)
+            .build_unified_react();
+
+        // Should contain all injected components
+        assert!(prompt.contains("You are a helpful assistant."));
+        assert!(prompt.contains("技能目录（L1）"));
+        assert!(prompt.contains("Weather Assistant"));
+        assert!(prompt.contains("查询全球天气"));
+        assert!(prompt.contains("技能摘要（L2）"));
+        assert!(prompt.contains("支持城市名查询"));
+        assert!(prompt.contains("web_search"));
+        assert!(prompt.contains("ReAct 工作模式"));
+        assert!(prompt.contains("call_tool"));
+        assert!(prompt.contains("final_answer"));
+
+        // L3 should NOT be injected by default
+        assert!(!prompt.contains("L3"));
+    }
+
+    /// Test L3 on-demand request extraction
+    #[test]
+    fn test_extract_l3_request_patterns() {
+        use crate::skills::unified_react_executor::UnifiedReActExecutor;
+
+        // Chinese patterns
+        assert_eq!(
+            UnifiedReActExecutor::extract_l3_request("我需要 weather_assistant 的详细文档"),
+            Some("weather_assistant".to_string())
+        );
+        assert_eq!(
+            UnifiedReActExecutor::extract_l3_request("请提供 mcp:alpaca/place_crypto_order 的完整文档"),
+            Some("mcp:alpaca/place_crypto_order".to_string())
+        );
+
+        // English patterns
+        assert_eq!(
+            UnifiedReActExecutor::extract_l3_request("I need detailed doc for portfolio_analyzer"),
+            Some("portfolio_analyzer".to_string())
+        );
+        assert_eq!(
+            UnifiedReActExecutor::extract_l3_request("need full documentation for crypto_trader"),
+            Some("crypto_trader".to_string())
+        );
+
+        // No match
+        assert_eq!(
+            UnifiedReActExecutor::extract_l3_request("I will call the tool directly"),
+            None
+        );
+    }
+
+    /// Test extract_user_input helper
+    #[test]
+    fn test_extract_user_input() {
+        use crate::task::{Task, TaskType};
+
+        // Plain text input
+        let task = Task {
+            id: "t1".to_string(),
+            task_type: TaskType::LlmChat,
+            input: "Hello world".to_string(),
+            parameters: std::collections::HashMap::new(),
+            stream_tx: None,
+        };
+        assert_eq!(crate::agent_impl::Agent::extract_user_input(&task), "Hello world");
+
+        // JSON input with message field
+        let task = Task {
+            id: "t2".to_string(),
+            task_type: TaskType::LlmChat,
+            input: r#"{"message": "What's the weather?", "session_id": "123"}"#.to_string(),
+            parameters: std::collections::HashMap::new(),
+            stream_tx: None,
+        };
+        assert_eq!(
+            crate::agent_impl::Agent::extract_user_input(&task),
+            "What's the weather?"
+        );
+    }
 }

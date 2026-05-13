@@ -10,23 +10,21 @@
 //! - Sandbox scan latency
 //! - End-to-end scheduler overhead
 
-use std::time::{Duration, Instant};
-
-use crate::evolution::capo::{CapoConfig, CapoEngine};
-use crate::evolution::sandbox::{EvolutionProposal, EvolutionSandbox, EvolutionTarget};
-use crate::evolution::scheduler::{EvolutionSchedule, EvolutionScheduler};
-use crate::evolution::skill_distiller::{DistillerConfig, SkillDistiller};
-use crate::evolution::skill_lineage::SkillLifecycleManager;
-use crate::planning::ToolTrail;
-
-/// Target: evolution overhead must be < 5% of assumed task latency
-const TASK_LATENCY_BUDGET_MS: u64 = 2000;
-const OVERHEAD_BUDGET_RATIO: f32 = 0.05;
-const OVERHEAD_BUDGET_MS: u64 = (TASK_LATENCY_BUDGET_MS as f32 * OVERHEAD_BUDGET_RATIO) as u64;
+pub use std::time::{Duration, Instant};
+pub use super::{
+    CapoConfig, CapoEngine, DistillerConfig, EvolutionProposal, EvolutionSandbox,
+    EvolutionSchedule, EvolutionScheduler, EvolutionTarget, SkillDistiller, SkillLifecycleManager,
+};
+pub use crate::planning::ToolTrail;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Target: evolution overhead must be < 5% of assumed task latency
+    const TASK_LATENCY_BUDGET_MS: u64 = 2000;
+    const OVERHEAD_BUDGET_RATIO: f32 = 0.05;
+    const OVERHEAD_BUDGET_MS: u64 = (TASK_LATENCY_BUDGET_MS as f32 * OVERHEAD_BUDGET_RATIO) as u64;
 
     /// Benchmark: Skill distillation from a 10-step trail
     #[test]
