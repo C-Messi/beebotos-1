@@ -178,7 +178,8 @@ impl PromptBuilder {
 
         // 5. Dynamic memories (all, no intent filtering)
         if !c.memories.is_empty() {
-            let memory_text = c.memories
+            let memory_text = c
+                .memories
                 .iter()
                 .take(10)
                 .map(|m| format!("- {}", m.content))
@@ -198,9 +199,14 @@ impl PromptBuilder {
             let tools_text = c
                 .tools
                 .iter()
-                .map(|t| format!("- {}: {}\n  参数: {}",
-                    t.name, t.description,
-                    serde_json::to_string(&t.parameters).unwrap_or_default()))
+                .map(|t| {
+                    format!(
+                        "- {}: {}\n  参数: {}",
+                        t.name,
+                        t.description,
+                        serde_json::to_string(&t.parameters).unwrap_or_default()
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             parts.push(format!("[可用工具]\n{}", tools_text));
@@ -217,7 +223,8 @@ impl PromptBuilder {
         parts.join("\n\n")
     }
 
-    /// Build the final prompt string based on intent and model (legacy, kept for compatibility)
+    /// Build the final prompt string based on intent and model (legacy, kept
+    /// for compatibility)
     #[deprecated(note = "Use build_unified_react instead")]
     pub fn build(self, _intent: &crate::intent::UserIntent) -> String {
         let mut parts = Vec::new();
@@ -236,7 +243,8 @@ impl PromptBuilder {
             parts.push(format!("[项目约定]\n{}", project));
         }
         if !c.memories.is_empty() {
-            let memory_text = c.memories
+            let memory_text = c
+                .memories
                 .iter()
                 .take(3)
                 .map(|m| format!("- {}", m.content))
@@ -283,17 +291,14 @@ impl PromptBuilder {
         if !l1_items.is_empty() {
             parts.push(format!(
                 "## 技能目录（L1）\n以下是你可使用的所有技能。如需了解某个技能的详细用法，\
-                 参考下方的 L2 摘要；如需完整文档（L3），可在 thought 中说明「需要 skill_id 的详细文档」，\
-                 系统会在下一轮追加。\n{}",
+                 参考下方的 L2 摘要；如需完整文档（L3），可在 thought 中说明「需要 skill_id \
+                 的详细文档」，系统会在下一轮追加。\n{}",
                 l1_items.join("\n")
             ));
         }
 
         if !l2_sections.is_empty() {
-            parts.push(format!(
-                "## 技能摘要（L2）\n{}",
-                l2_sections.join("\n\n")
-            ));
+            parts.push(format!("## 技能摘要（L2）\n{}", l2_sections.join("\n\n")));
         }
 
         parts.join("\n\n")
@@ -338,45 +343,43 @@ pub mod model_presets {
 
 /// 🆕 Unified ReAct system rules appended to every unified-react prompt
 fn build_unified_react_rules() -> &'static str {
-    r#"## ReAct 工作模式
+    r#"## ReAct Mode
 
-你通过多轮工具调用自主收集信息、执行操作，最终完成用户交给你的任务。
+Use tools to gather information or act, then answer the user.
 
-### 每轮输出格式（严格 JSON）
+### Output JSON
 
-中间轮次（调用工具）：
+Tool step:
 ```json
 {
-  "thought": "你的思考过程",
+  "thought": "brief reason",
   "action": "call_tool",
-  "tool_name": "工具名",
-  "arguments": {"参数": "值"},
-  "reasoning": "调用该工具的目的"
+  "tool_name": "tool_name",
+  "arguments": {"key": "value"},
+  "reasoning": "why this tool is useful"
 }
 ```
 
-最终轮次（输出结果）：
+Final step:
 ```json
 {
-  "thought": "数据已足够，任务已完成",
+  "thought": "enough information",
   "action": "final_answer",
-  "content": "最终回复内容"
+  "content": "user-facing answer only"
 }
 ```
 
-### 关键规则
+### Rules
 
-1. **自主决策**：不需要调用所有工具。根据任务需要选择性调用。
-2. **避免重复**：不要重复调用相同工具（相同参数）。
-3. **条件分支**：如果某轮结果已足够做出判断，可以提前终止。
-4. **错误处理**：如果工具返回错误，尝试替代方案或跳过，在最终回复中说明。
-5. **最多 30 轮**：你可以在 1-30 轮之间的任意时刻终止。
-6. **禁止过度思考**：简单问题 1-2 轮即可结束。
-7. **需要实时数据时必须调用工具**，不要用 final_answer 伪造已执行的搜索、查询、下单。
-8. **遇到天气、行情、账户、持仓、下单等业务能力时**，优先调用 `skill_call`，用 `skill_id` 指定注册技能或 MCP 技能。
-9. **BTC/ETH 等加密货币交易任务**必须优先使用 Alpaca MCP 技能。
-10. **用户要求搜索/网上查时**必须先调用搜索工具；如果所有工具失败，final_answer 必须明确说明未能完成实时联网验证。
-11. **如需某个 skill 的 L3 完整文档**，可在 thought 中说明「需要 {skill_id} 的详细文档」，系统会在下一轮自动追加。
-12. **final_answer.content 只能写给用户看的最终答复**，禁止包含 thought、action、工具命令或内部执行过程。
-"#}
-
+1. Choose tools only when useful; do not call every tool.
+2. Use tools when the answer depends on current, external, account, market, weather, local filesystem, command, or otherwise verifiable state.
+3. Use workspace tools for files, code, commands, or environment inspection instead of saying you cannot inspect them.
+4. Use `skill_call` for registered BeeBotOS/MCP abilities such as weather, market data, accounts, positions, and orders.
+5. Use search/fetch tools when the user asks to search, look up, or verify online information.
+6. Avoid duplicate tool calls with identical arguments.
+7. If a tool fails, try a reasonable alternative or explain the failure in the final answer.
+8. If enough information is available, stop and return `final_answer`.
+9. If detailed skill docs are needed, write in `thought`: `need detailed doc for {skill_id}`.
+10. `final_answer.content` is only for the user; never include thought/action/tool JSON, commands, or internal process notes.
+"#
+}

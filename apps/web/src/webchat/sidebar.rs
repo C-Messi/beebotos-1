@@ -96,6 +96,7 @@ impl SideQuestion {
                 model: None,
                 latency_ms: None,
                 edits: vec![],
+                tool_calls: vec![],
             },
             token_usage: None,
         }

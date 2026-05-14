@@ -215,6 +215,14 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
+/// Structured LLM response that preserves native tool calls.
+#[derive(Debug, Clone, Default)]
+pub struct ToolAwareResponse {
+    pub content: String,
+    pub tool_calls: Vec<crate::llm::ToolCall>,
+    pub reasoning_content: Option<String>,
+}
+
 /// LLM call interface for communication manager
 #[async_trait]
 pub trait LLMCallInterface: Send + Sync {
@@ -260,6 +268,21 @@ pub trait LLMCallInterface: Send + Sync {
         context: Option<HashMap<String, String>>,
     ) -> Result<String> {
         self.call_llm(messages, context).await
+    }
+
+    /// Call one LLM turn with native tools and preserve structured tool calls.
+    async fn call_llm_tool_turn(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+        context: Option<HashMap<String, String>>,
+    ) -> Result<ToolAwareResponse> {
+        let content = self.call_llm_with_tools(messages, tools, context).await?;
+        Ok(ToolAwareResponse {
+            content,
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+        })
     }
 }
 

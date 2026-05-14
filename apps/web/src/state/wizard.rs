@@ -714,8 +714,8 @@ impl WizardState {
                     ProviderDraft {
                         name: "deepseek".to_string(),
                         api_key: String::new(),
-                        model: "deepseek-chat".to_string(),
-                        base_url: "https://api.deepseek.com".to_string(),
+                        model: "deepseek-v4-flash".to_string(),
+                        base_url: "https://api.deepseek.com/v1".to_string(),
                         temperature: 0.7,
                         context_window: Some(8192),
                     },

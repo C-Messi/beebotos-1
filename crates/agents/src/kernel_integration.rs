@@ -481,6 +481,8 @@ pub struct KernelAgentBuilder {
     with_llm_client: Option<Arc<crate::llm::LLMClient>>,
     // 🆕 Tool working directory for sandboxed file operations
     with_tool_work_dir: Option<std::path::PathBuf>,
+    // Optional sink for live ReAct/tool trace events
+    with_react_trace_sink: Option<Arc<dyn crate::react_trace::ReActTraceSink>>,
 }
 
 impl KernelAgentBuilder {
@@ -506,6 +508,7 @@ impl KernelAgentBuilder {
             with_system_info_provider: None,
             with_llm_client: None,
             with_tool_work_dir: None,
+            with_react_trace_sink: None,
         }
     }
 
@@ -626,6 +629,15 @@ impl KernelAgentBuilder {
         self
     }
 
+    /// Attach live ReAct/tool trace sink.
+    pub fn with_react_trace_sink(
+        mut self,
+        sink: Arc<dyn crate::react_trace::ReActTraceSink>,
+    ) -> Self {
+        self.with_react_trace_sink = Some(sink);
+        self
+    }
+
     /// Build and spawn the agent in kernel sandbox
     pub async fn spawn(self) -> Result<(TaskId, mpsc::UnboundedSender<KernelTaskRequest>)> {
         let kernel = self.kernel.ok_or_else(|| {
@@ -701,6 +713,10 @@ impl KernelAgentBuilder {
         // 🆕 Set tool working directory
         if let Some(dir) = self.with_tool_work_dir {
             agent = agent.with_tool_work_dir(dir);
+        }
+
+        if let Some(sink) = self.with_react_trace_sink {
+            agent = agent.with_react_trace_sink(sink);
         }
 
         // Attach kernel for WASM execution

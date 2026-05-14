@@ -12,20 +12,61 @@ use crate::api::{LlmGlobalConfig, UpdateLlmConfigRequest};
 use crate::components::InlineLoading;
 use crate::state::use_app_state;
 
-/// Predefined model options for Kimi provider.
-/// Note: kimi-k2.6 (reasoning model) only supports temperature=1.0.
-const KIMI_MODELS: &[(&str, &str, f32)] = &[
-    ("kimi-k2.6", "kimi-k2.6 思考版", 1.0),
-    ("kimi-k2.5", "kimi-k2.5 思考版", 1.0),
-    ("kimi-k2.5", "kimi-k2.5 快速版", 0.6),
+/// Predefined model options for thinking-capable providers.
+/// `thinking` maps directly to the backend TOML value.
+const KIMI_MODELS: &[(&str, &str, f32, &str, Option<&str>)] = &[
+    ("kimi-k2.6", "kimi-k2.6 思考版", 1.0, "enabled", None),
+    ("kimi-k2.6", "kimi-k2.6 快速版", 0.6, "disabled", None),
+    ("kimi-k2.5", "kimi-k2.5 思考版", 1.0, "enabled", None),
+    ("kimi-k2.5", "kimi-k2.5 快速版", 0.6, "disabled", None),
+];
+
+const DEEPSEEK_MODELS: &[(&str, &str, f32, &str, Option<&str>)] = &[
+    (
+        "deepseek-v4-flash",
+        "DeepSeek V4 Flash 思考版",
+        0.7,
+        "enabled",
+        Some("high"),
+    ),
+    (
+        "deepseek-v4-flash",
+        "DeepSeek V4 Flash 非思考版",
+        0.7,
+        "disabled",
+        None,
+    ),
+    (
+        "deepseek-v4-pro",
+        "DeepSeek V4 Pro 思考版",
+        0.7,
+        "enabled",
+        Some("high"),
+    ),
+    (
+        "deepseek-v4-pro",
+        "DeepSeek V4 Pro 非思考版",
+        0.7,
+        "disabled",
+        None,
+    ),
 ];
 
 /// Find the display label for a given model + temperature combo.
-fn find_kimi_label(model: &str, temperature: f32) -> Option<&'static str> {
-    KIMI_MODELS
+fn find_variant_label(
+    variants: &'static [(&str, &str, f32, &str, Option<&str>)],
+    model: &str,
+    thinking: Option<&str>,
+    temperature: f32,
+) -> Option<&'static str> {
+    variants
         .iter()
-        .find(|(m, _, t)| *m == model && (*t - temperature).abs() < 0.01)
-        .map(|(_, label, _)| *label)
+        .find(|(m, _, t, th, _)| {
+            *m == model
+                && thinking.map(|v| v == *th).unwrap_or(true)
+                && (*t - temperature).abs() < 0.01
+        })
+        .map(|(_, label, _, _, _)| *label)
 }
 
 #[component]
@@ -42,6 +83,8 @@ pub fn LlmSettingsPage() -> impl IntoView {
     let selected_provider = RwSignal::new(String::new());
     let selected_model = RwSignal::new(String::new());
     let selected_temperature = RwSignal::new(1.0_f32);
+    let selected_thinking = RwSignal::new(String::new());
+    let selected_reasoning_effort = RwSignal::new(String::new());
     let selected_variant_label = RwSignal::new(String::new());
 
     let fetch_config = move || {
@@ -59,17 +102,29 @@ pub fn LlmSettingsPage() -> impl IntoView {
                         selected_provider.set(provider.name.clone());
                         selected_model.set(provider.model.clone());
                         selected_temperature.set(provider.temperature);
+                        selected_thinking.set(provider.thinking.clone().unwrap_or_default());
+                        selected_reasoning_effort
+                            .set(provider.reasoning_effort.clone().unwrap_or_default());
                         // Try to match variant label
                         if provider.name == "kimi" {
-                            // Auto-correct k2.6 to temperature=1.0 (API restriction)
-                            let temp = if provider.model.contains("k2.6") {
-                                1.0
-                            } else {
-                                provider.temperature
-                            };
-                            selected_temperature.set(temp);
-                            let label =
-                                find_kimi_label(&provider.model, temp).unwrap_or(&provider.model);
+                            let thinking = provider.thinking.as_deref().or(Some("disabled"));
+                            let label = find_variant_label(
+                                KIMI_MODELS,
+                                &provider.model,
+                                thinking,
+                                provider.temperature,
+                            )
+                            .unwrap_or(&provider.model);
+                            selected_variant_label.set(label.to_string());
+                        } else if provider.name == "deepseek" {
+                            let thinking = provider.thinking.as_deref().or(Some("enabled"));
+                            let label = find_variant_label(
+                                DEEPSEEK_MODELS,
+                                &provider.model,
+                                thinking,
+                                provider.temperature,
+                            )
+                            .unwrap_or(&provider.model);
                             selected_variant_label.set(label.to_string());
                         } else {
                             selected_variant_label.set(provider.model.clone());
@@ -92,18 +147,83 @@ pub fn LlmSettingsPage() -> impl IntoView {
     // When provider changes, reset model selection
     let on_provider_change = move |provider: String| {
         selected_provider.set(provider.clone());
-        selected_model.set(String::new());
-        selected_variant_label.set(String::new());
-        selected_temperature.set(1.0);
+        if let Some(existing) = config
+            .get()
+            .and_then(|c| c.providers.into_iter().find(|p| p.name == provider))
+        {
+            selected_model.set(existing.model.clone());
+            selected_temperature.set(existing.temperature);
+            selected_thinking.set(existing.thinking.clone().unwrap_or_default());
+            selected_reasoning_effort.set(existing.reasoning_effort.clone().unwrap_or_default());
+            if existing.name == "kimi" {
+                let label = find_variant_label(
+                    KIMI_MODELS,
+                    &existing.model,
+                    existing.thinking.as_deref().or(Some("disabled")),
+                    existing.temperature,
+                )
+                .unwrap_or(&existing.model);
+                selected_variant_label.set(label.to_string());
+            } else if existing.name == "deepseek" {
+                let label = find_variant_label(
+                    DEEPSEEK_MODELS,
+                    &existing.model,
+                    existing.thinking.as_deref().or(Some("enabled")),
+                    existing.temperature,
+                )
+                .unwrap_or(&existing.model);
+                selected_variant_label.set(label.to_string());
+            } else {
+                selected_variant_label.set(existing.model);
+            }
+        } else if provider == "kimi" {
+            if let Some((model, label, temp, thinking, effort)) = KIMI_MODELS.first() {
+                selected_model.set(model.to_string());
+                selected_variant_label.set(label.to_string());
+                selected_temperature.set(*temp);
+                selected_thinking.set(thinking.to_string());
+                selected_reasoning_effort.set(effort.unwrap_or("").to_string());
+            }
+        } else if provider == "deepseek" {
+            if let Some((model, label, temp, thinking, effort)) = DEEPSEEK_MODELS.first() {
+                selected_model.set(model.to_string());
+                selected_variant_label.set(label.to_string());
+                selected_temperature.set(*temp);
+                selected_thinking.set(thinking.to_string());
+                selected_reasoning_effort.set(effort.unwrap_or("").to_string());
+            }
+        } else {
+            selected_model.set(String::new());
+            selected_variant_label.set(String::new());
+            selected_thinking.set(String::new());
+            selected_reasoning_effort.set(String::new());
+            selected_temperature.set(1.0);
+        }
         save_error.set(None);
     };
 
     // When model variant changes for kimi
     let on_kimi_variant_change = move |label: String| {
         selected_variant_label.set(label.clone());
-        if let Some((model, _, temp)) = KIMI_MODELS.iter().find(|(_, l, _)| *l == label) {
+        if let Some((model, _, temp, thinking, effort)) =
+            KIMI_MODELS.iter().find(|(_, l, _, _, _)| *l == label)
+        {
             selected_model.set(model.to_string());
             selected_temperature.set(*temp);
+            selected_thinking.set(thinking.to_string());
+            selected_reasoning_effort.set(effort.unwrap_or("").to_string());
+        }
+    };
+
+    let on_deepseek_variant_change = move |label: String| {
+        selected_variant_label.set(label.clone());
+        if let Some((model, _, temp, thinking, effort)) =
+            DEEPSEEK_MODELS.iter().find(|(_, l, _, _, _)| *l == label)
+        {
+            selected_model.set(model.to_string());
+            selected_temperature.set(*temp);
+            selected_thinking.set(thinking.to_string());
+            selected_reasoning_effort.set(effort.unwrap_or("").to_string());
         }
     };
 
@@ -177,7 +297,7 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                                 }
                                             >
                                                 <option value="">"-- 请选择 --"</option>
-                                                {KIMI_MODELS.iter().map(|(_, label, _)| {
+                                                {KIMI_MODELS.iter().map(|(_, label, _, _, _)| {
                                                     let label = label.to_string();
                                                     view! {
                                                         <option value={label.clone()}>{label.clone()}</option>
@@ -185,7 +305,31 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                                 }).collect::<Vec<_>>()}
                                             </select>
                                             <p class="form-help">
-                                                "kimi-k2.6 仅支持 temperature=1.0（思考版）；kimi-k2.5 支持思考版(1.0)和快速版(0.6)"
+                                                "选择会同步写入 model、thinking 和 temperature。"
+                                            </p>
+                                        </div>
+                                    }.into_any()
+                                } else if provider == "deepseek" {
+                                    view! {
+                                        <div class="form-group">
+                                            <label>"选择 DeepSeek 模型"</label>
+                                            <select
+                                                prop:value=selected_variant_label
+                                                on:change=move |e| {
+                                                    let val = crate::utils::event_target_value(&e);
+                                                    on_deepseek_variant_change(val);
+                                                }
+                                            >
+                                                <option value="">"-- 请选择 --"</option>
+                                                {DEEPSEEK_MODELS.iter().map(|(_, label, _, _, _)| {
+                                                    let label = label.to_string();
+                                                    view! {
+                                                        <option value={label.clone()}>{label.clone()}</option>
+                                                    }
+                                                }).collect::<Vec<_>>()}
+                                            </select>
+                                            <p class="form-help">
+                                                "DeepSeek 官方当前模型为 deepseek-v4-flash / deepseek-v4-pro，选择会同步写入 thinking 和 reasoning_effort。"
                                             </p>
                                         </div>
                                     }.into_any()
@@ -245,6 +389,14 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                     <span>"Temperature"</span>
                                     <span class="info-value">{move || format!("{:.1}", selected_temperature.get())}</span>
                                 </div>
+                                <div class="info-row">
+                                    <span>"Thinking"</span>
+                                    <span class="info-value">{move || selected_thinking.get()}</span>
+                                </div>
+                                <div class="info-row">
+                                    <span>"Reasoning Effort"</span>
+                                    <span class="info-value">{move || selected_reasoning_effort.get()}</span>
+                                </div>
                             </div>
                         </section>
 
@@ -270,6 +422,14 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                             provider: selected_provider.get(),
                                             model: selected_model.get(),
                                             temperature: selected_temperature.get(),
+                                            thinking: {
+                                                let value = selected_thinking.get();
+                                                if value.is_empty() { None } else { Some(value) }
+                                            },
+                                            reasoning_effort: {
+                                                let value = selected_reasoning_effort.get();
+                                                if value.is_empty() { None } else { Some(value) }
+                                            },
                                             set_default: Some(true),
                                         };
 
@@ -286,6 +446,7 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                                         .and_then(|v| v.as_str())
                                                         .unwrap_or("保存成功");
                                                     message.set(Some(msg.to_string()));
+                                                    fetch_stored.get_value()();
                                                 }
                                                 Err(e) => save_error.set(Some(format!("保存失败: {}", e))),
                                             }
@@ -315,6 +476,7 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                                         .and_then(|v| v.as_str())
                                                         .unwrap_or("配置已重载");
                                                     message.set(Some(msg.to_string()));
+                                                    fetch_stored.get_value()();
                                                 }
                                                 Err(e) => save_error.set(Some(format!("重载失败: {}", e))),
                                             }

@@ -6,8 +6,10 @@
 //! execution.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -94,457 +96,17 @@ pub struct Agent {
     pub(crate) tool_work_dir: std::path::PathBuf,
     // 🆕 Direct LLM client for native tool calling ( bypasses LLMCallInterface stub )
     pub(crate) llm_client: Option<Arc<crate::llm::LLMClient>>,
+    // OpenClaw-style ReAct: optional sink for real-time tool loop feedback.
+    pub(crate) react_trace_sink: Option<Arc<dyn crate::react_trace::ReActTraceSink>>,
+    // OpenClaw-style ReAct: session-scoped skill context activated by the LLM.
+    pub(crate) active_skill_contexts: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 
-struct AgentSkillDispatcher {
-    config: AgentConfig,
-    skill_registry: Option<Arc<skills::SkillRegistry>>,
-    mcp_manager: Option<Arc<mcp::MCPManager>>,
-    llm_interface: Option<Arc<dyn communication::LLMCallInterface>>,
-    approval_gate: Option<crate::security::ApprovalGate>,
-    pending_approvals: Arc<RwLock<HashMap<String, crate::security::ApprovalRequest>>>,
-    pending_parameter_forms: Arc<RwLock<HashMap<String, crate::skills::PendingParameterForm>>>,
-    skip_approval: bool,
-    llm_response_cache: Arc<RwLock<HashMap<String, (String, Instant)>>>,
-    current_plan_goal: Arc<RwLock<Option<String>>>,
-    skill_catalog: Option<String>,
-    tool_work_dir: std::path::PathBuf,
-    llm_client: Option<Arc<crate::llm::LLMClient>>,
-    user_request: Option<String>,
-}
-
-#[async_trait::async_trait]
-impl crate::skills::ToolDispatcher for AgentSkillDispatcher {
-    async fn dispatch(
-        &self,
-        tool_name: &str,
-        arguments: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<String, String> {
-        match tool_name {
-            "skill_call" => {
-                let agent = self.as_agent();
-                agent
-                    .execute_skill_call_from_react_with_context(
-                        arguments,
-                        self.user_request.as_deref(),
-                    )
-                    .await
-            }
-            "parallel_delegate" => self.execute_parallel_delegate(arguments).await,
-            other => Err(format!("ToolDispatcher cannot handle '{}'", other)),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ParallelDelegateBranch {
-    id: String,
-    task: String,
-    skill_id: Option<String>,
-    input: Option<String>,
-    params: Option<serde_json::Map<String, serde_json::Value>>,
-}
-
-#[derive(Debug, Clone)]
-struct ParallelDelegateBranchResult {
-    id: String,
-    task: String,
-    result: Result<String, String>,
-}
-
-impl AgentSkillDispatcher {
-    fn from_agent(agent: &Agent) -> Self {
-        Self {
-            config: agent.config.clone(),
-            skill_registry: agent.skill_registry.clone(),
-            mcp_manager: agent.mcp_manager.clone(),
-            llm_interface: agent.llm_interface.clone(),
-            approval_gate: agent.approval_gate.clone(),
-            pending_approvals: agent.pending_approvals.clone(),
-            pending_parameter_forms: agent.pending_parameter_forms.clone(),
-            skip_approval: agent
-                .skip_approval
-                .load(std::sync::atomic::Ordering::SeqCst),
-            llm_response_cache: agent.llm_response_cache.clone(),
-            current_plan_goal: agent.current_plan_goal.clone(),
-            skill_catalog: agent.skill_catalog.clone(),
-            tool_work_dir: agent.tool_work_dir.clone(),
-            llm_client: agent.llm_client.clone(),
-            user_request: None,
-        }
-    }
-
-    fn with_user_request(mut self, user_request: impl Into<String>) -> Self {
-        self.user_request = Some(user_request.into());
-        self
-    }
-
-    fn as_agent(&self) -> Agent {
-        Agent {
-            config: self.config.clone(),
-            a2a_client: None,
-            mcp_manager: self.mcp_manager.clone(),
-            outbound_router: None,
-            message_rx: None,
-            queue_manager: None,
-            skill_registry: self.skill_registry.clone(),
-            llm_interface: self.llm_interface.clone(),
-            state: state_manager::AgentState::Registered,
-            wallet: None,
-            event_bus: None,
-            kernel: None,
-            planning_engine: None,
-            plan_executor: None,
-            replanner: None,
-            active_plans: Arc::new(RwLock::new(HashMap::new())),
-            device: None,
-            memory_system: None,
-            llm_response_cache: self.llm_response_cache.clone(),
-            current_plan_goal: self.current_plan_goal.clone(),
-            skill_catalog: self.skill_catalog.clone(),
-            workflow_registry: None,
-            intent_engine: None,
-            llm_intent_analyzer: None,
-            skill_selector: None,
-            trace_store: None,
-            approval_gate: self.approval_gate.clone(),
-            pending_approvals: self.pending_approvals.clone(),
-            pending_parameter_forms: self.pending_parameter_forms.clone(),
-            skip_approval: std::sync::atomic::AtomicBool::new(self.skip_approval),
-            prompt_cache: None,
-            max_rounds: 10,
-            skill_feedback_collector: None,
-            evolution_scheduler: None,
-            system_info_provider: None,
-            tool_work_dir: self.tool_work_dir.clone(),
-            llm_client: self.llm_client.clone(),
-        }
-    }
-
-    async fn execute_parallel_delegate(
-        &self,
-        arguments: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<String, String> {
-        let branches = self.parse_parallel_delegate_branches(&arguments)?;
-        let merge_strategy = arguments
-            .get("merge_strategy")
-            .and_then(|v| v.as_str())
-            .unwrap_or("summarize")
-            .to_ascii_lowercase();
-        let max_concurrency = arguments
-            .get("max_concurrency")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3)
-            .clamp(1, 5) as usize;
-
-        info!(
-            "parallel_delegate: executing {} branches with max_concurrency={} merge_strategy={}",
-            branches.len(),
-            max_concurrency,
-            merge_strategy
-        );
-
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrency));
-        let mut handles = Vec::with_capacity(branches.len());
-        for branch in branches {
-            let permit = semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|e| format!("parallel_delegate semaphore closed: {}", e))?;
-            let dispatcher = self.clone_for_parallel_branch();
-            handles.push(tokio::spawn(async move {
-                let _permit = permit;
-                dispatcher.execute_parallel_delegate_branch(branch).await
-            }));
-        }
-
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            match handle.await {
-                Ok(result) => results.push(result),
-                Err(e) => results.push(ParallelDelegateBranchResult {
-                    id: "unknown".to_string(),
-                    task: "branch task panicked".to_string(),
-                    result: Err(format!("branch join error: {}", e)),
-                }),
-            }
-        }
-
-        self.merge_parallel_delegate_results(&merge_strategy, &results)
-            .await
-    }
-
-    fn parse_parallel_delegate_branches(
-        &self,
-        arguments: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<Vec<ParallelDelegateBranch>, String> {
-        let values = arguments
-            .get("branches")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                "parallel_delegate missing required array parameter 'branches'".to_string()
-            })?;
-
-        if values.is_empty() {
-            return Err("parallel_delegate requires at least one branch".to_string());
-        }
-        if values.len() > 8 {
-            return Err("parallel_delegate supports at most 8 branches per call".to_string());
-        }
-
-        values
-            .iter()
-            .enumerate()
-            .map(|(idx, value)| {
-                let obj = value
-                    .as_object()
-                    .ok_or_else(|| format!("branch {} must be an object", idx))?;
-                let id = obj
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("branch_{}", idx + 1));
-                let task = obj
-                    .get("task")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .ok_or_else(|| format!("branch '{}' missing required 'task'", id))?;
-
-                Ok(ParallelDelegateBranch {
-                    id,
-                    task,
-                    skill_id: obj
-                        .get("skill_id")
-                        .or_else(|| obj.get("skill"))
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string),
-                    input: obj
-                        .get("input")
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string),
-                    params: obj.get("params").and_then(|v| v.as_object()).cloned(),
-                })
-            })
-            .collect()
-    }
-
-    fn clone_for_parallel_branch(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            skill_registry: self.skill_registry.clone(),
-            mcp_manager: self.mcp_manager.clone(),
-            llm_interface: self.llm_interface.clone(),
-            approval_gate: self.approval_gate.clone(),
-            pending_approvals: self.pending_approvals.clone(),
-            pending_parameter_forms: self.pending_parameter_forms.clone(),
-            skip_approval: self.skip_approval,
-            llm_response_cache: self.llm_response_cache.clone(),
-            current_plan_goal: self.current_plan_goal.clone(),
-            skill_catalog: self.skill_catalog.clone(),
-            tool_work_dir: self.tool_work_dir.clone(),
-            llm_client: self.llm_client.clone(),
-            user_request: self.user_request.clone(),
-        }
-    }
-
-    async fn execute_parallel_delegate_branch(
-        self,
-        branch: ParallelDelegateBranch,
-    ) -> ParallelDelegateBranchResult {
-        if branch
-            .skill_id
-            .as_deref()
-            .map(is_high_risk_write_skill)
-            .unwrap_or(false)
-        {
-            return ParallelDelegateBranchResult {
-                id: branch.id,
-                task: branch.task,
-                result: Err(
-                    "parallel_delegate refuses to execute high-risk write skills. Query required \
-                     data in parallel first, then call the order skill separately so approval and \
-                     confirmation stay in the main flow."
-                        .to_string(),
-                ),
-            };
-        }
-        if branch.skill_id.is_none() && looks_like_high_risk_write_task(&branch.task) {
-            return ParallelDelegateBranchResult {
-                id: branch.id,
-                task: branch.task,
-                result: Err(
-                    "parallel_delegate refuses natural-language branches that appear to place, \
-                     cancel, or modify orders. Query-only branches are allowed; execute the \
-                     write action separately in the main flow."
-                        .to_string(),
-                ),
-            };
-        }
-
-        let mut config = AgentConfig::default();
-        config.name = format!("parallel-delegate-{}", branch.id);
-        config.description = format!("Parallel delegate branch for task: {}", branch.task);
-        config.capabilities = vec!["parallel_delegate_branch".to_string()];
-
-        let parent = self.as_agent();
-        let branch_agent = match parent.spawn_sub_agent(config) {
-            Ok(agent) => agent,
-            Err(e) => {
-                warn!(
-                    "parallel_delegate: failed to spawn branch agent '{}': {}; using shared agent \
-                     handle",
-                    branch.id, e
-                );
-                parent
-            }
-        };
-
-        let result = if let Some(skill_id) = &branch.skill_id {
-            let mut skill_args = serde_json::Map::new();
-            skill_args.insert(
-                "skill_id".to_string(),
-                serde_json::Value::String(skill_id.clone()),
-            );
-            skill_args.insert(
-                "input".to_string(),
-                serde_json::Value::String(
-                    branch.input.clone().unwrap_or_else(|| branch.task.clone()),
-                ),
-            );
-            if let Some(params) = branch.params.clone() {
-                skill_args.insert("params".to_string(), serde_json::Value::Object(params));
-            }
-            branch_agent.execute_skill_call_from_react(skill_args).await
-        } else {
-            call_parallel_delegate_llm_branch(&branch_agent, &branch.task).await
-        };
-
-        ParallelDelegateBranchResult {
-            id: branch.id,
-            task: branch.task,
-            result,
-        }
-    }
-
-    async fn merge_parallel_delegate_results(
-        &self,
-        merge_strategy: &str,
-        results: &[ParallelDelegateBranchResult],
-    ) -> Result<String, String> {
-        match merge_strategy {
-            "json_merge" => {
-                let merged = serde_json::Value::Object(
-                    results
-                        .iter()
-                        .map(|branch| {
-                            let value = match &branch.result {
-                                Ok(result) => serde_json::json!({
-                                    "task": branch.task,
-                                    "success": true,
-                                    "result": result,
-                                }),
-                                Err(error) => serde_json::json!({
-                                    "task": branch.task,
-                                    "success": false,
-                                    "error": error,
-                                }),
-                            };
-                            (branch.id.clone(), value)
-                        })
-                        .collect(),
-                );
-                Ok(merged.to_string())
-            }
-            "concat" => Ok(format_parallel_delegate_sections(results)),
-            "summarize" | "" => {
-                let sections = format_parallel_delegate_sections(results);
-                if self.llm_interface.is_none() {
-                    return Ok(sections);
-                }
-                let prompt = format!(
-                    "请把以下并行分支执行结果合并成一个简洁、面向用户的观察摘要。保留关键数字、\
-                     错误和需要后续处理的事项，不要编造未返回的数据。\n\n{}",
-                    sections
-                );
-                self.as_agent()
-                    .call_llm_prompt(
-                        prompt,
-                        Some("你负责合并并行任务结果，只输出摘要，不要输出内部过程。".to_string()),
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-                    .map(|s| s.trim().to_string())
-            }
-            other => Err(format!(
-                "Unsupported merge_strategy '{}'. Use concat, json_merge, or summarize.",
-                other
-            )),
-        }
-    }
-}
-
-fn format_parallel_delegate_sections(results: &[ParallelDelegateBranchResult]) -> String {
-    let mut lines = vec!["parallel_delegate results:".to_string()];
-    for branch in results {
-        lines.push(format!("\n## {}", branch.id));
-        lines.push(format!("task: {}", branch.task));
-        match &branch.result {
-            Ok(result) => {
-                lines.push("status: success".to_string());
-                lines.push(result.clone());
-            }
-            Err(error) => {
-                lines.push("status: error".to_string());
-                lines.push(error.clone());
-            }
-        }
-    }
-    lines.join("\n")
-}
-
-fn is_high_risk_write_skill(skill_id: &str) -> bool {
-    let lower = skill_id.to_ascii_lowercase();
-    (lower.contains("place_") && lower.contains("_order"))
-        || lower.contains("cancel_order")
-        || lower.contains("cancel_all")
-        || lower.contains("close_position")
-        || lower.contains("close_all_positions")
-        || lower.contains("transfer")
-        || lower.contains("withdraw")
-}
-
-fn looks_like_high_risk_write_task(task: &str) -> bool {
-    let lower = task.to_ascii_lowercase();
-    let text = task.trim();
-    [
-        "下单",
-        "开一单",
-        "买入",
-        "卖出",
-        "做多",
-        "做空",
-        "提交订单",
-        "取消订单",
-        "平仓",
-        "撤单",
-        "place order",
-        "submit order",
-        "buy ",
-        "sell ",
-        "cancel order",
-        "close position",
-    ]
-    .iter()
-        .any(|needle| text.contains(needle) || lower.contains(needle))
+struct TextSkillObservation {
+    skill_id: String,
+    arguments: String,
+    output: String,
+    success: bool,
 }
 
 fn extract_usd_notional(text: &str) -> Option<String> {
@@ -575,36 +137,6 @@ fn extract_usd_notional(text: &str) -> Option<String> {
     None
 }
 
-#[allow(dead_code)]
-fn should_force_general_react(message_text: &str) -> bool {
-    let lower = message_text.to_ascii_lowercase();
-    let text = message_text.trim();
-    [
-        "互联网",
-        "网上",
-        "搜索",
-        "搜一下",
-        "查一下最新",
-        "实时",
-        "当前行情",
-        "当前价格",
-        "持仓",
-        "下单",
-        "开一单",
-        "买入",
-        "卖出",
-        "order",
-        "trade",
-        "position",
-        "market",
-        "latest",
-        "current",
-        "search",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle) || lower.contains(needle))
-}
-
 fn is_pending_approval_adjustment(message_text: &str) -> bool {
     let text = message_text.trim();
     if text.is_empty() || text.len() > 80 {
@@ -627,17 +159,1483 @@ fn is_pending_approval_adjustment(message_text: &str) -> bool {
             || lower.contains("amount"))
 }
 
-async fn call_parallel_delegate_llm_branch(agent: &Agent, task: &str) -> Result<String, String> {
-    let system = "你是 BeeBotOS 通用 ReAct 的一个并行分支执行器。只完成当前分支任务，输出可用于主 \
-                  ReAct 合并的简洁结果；不要输出 thought/action/JSON 协议。";
-    agent
-        .call_llm_prompt(task.to_string(), Some(system.to_string()))
-        .await
-        .map_err(|e| e.to_string())
-        .map(|s| s.trim().to_string())
-}
-
 impl Agent {
+    fn runtime_context_prompt() -> String {
+        let now = chrono::Local::now();
+        let utc_now = chrono::Utc::now();
+        format!(
+            "## Runtime Context\nCurrent local date and time: {}.\nCurrent UTC date and time: \
+             {}.\nWhen the user says today, now, current, latest, this morning, tonight, or uses \
+             another relative time expression, resolve it against the current local date above. \
+             Do not invent or reuse an old date. For real-time or recently-changing facts such as \
+             weather, prices, news, schedules, availability, or account state, use the \
+             appropriate tool instead of relying on model memory. When searching the web for a \
+             relative-time request, keep the user's relative wording or use the current local \
+             date above; never substitute a stale date.",
+            now.format("%Y-%m-%d %H:%M:%S %:z"),
+            utc_now.format("%Y-%m-%d %H:%M:%S UTC")
+        )
+    }
+
+    fn workspace_dir(&self) -> PathBuf {
+        if let Ok(path) = std::env::var("BEEBOTOS_WORKSPACE") {
+            let path = PathBuf::from(path);
+            if !path.as_os_str().is_empty() {
+                return path;
+            }
+        }
+
+        let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Some(root) = Self::find_workspace_root(&current) {
+            return root.join("data").join("workspace");
+        }
+
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir
+            .ancestors()
+            .nth(2)
+            .map(|root| root.join("data").join("workspace"))
+            .unwrap_or(current)
+    }
+
+    fn workspace_dir_display(&self) -> String {
+        self.workspace_dir().display().to_string()
+    }
+
+    fn find_workspace_root(start: &Path) -> Option<PathBuf> {
+        for dir in start.ancestors() {
+            if dir.join("Cargo.toml").is_file()
+                && dir.join("crates").is_dir()
+                && dir.join("apps").is_dir()
+            {
+                return Some(dir.to_path_buf());
+            }
+        }
+        None
+    }
+
+    fn is_builtin_workspace_tool(name: &str) -> bool {
+        matches!(
+            name,
+            "read_file"
+                | "write_file"
+                | "edit_file"
+                | "list_dir"
+                | "glob"
+                | "grep"
+                | "exec"
+                | "file_read"
+                | "file_write"
+                | "file_list"
+                | "bash_shell"
+                | "process_exec"
+        )
+    }
+
+    fn is_controlled_workspace_tool(name: &str) -> bool {
+        matches!(
+            name,
+            "write_file" | "edit_file" | "exec" | "file_write" | "bash_shell" | "process_exec"
+        )
+    }
+
+    fn controlled_workspace_tools_enabled(&self) -> bool {
+        std::env::var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false)
+    }
+
+    fn approval_env() -> HashMap<String, String> {
+        let mut env = HashMap::new();
+
+        if let Ok(value) = std::env::var("ALPACA_PAPER_TRADE") {
+            let normalized = value.trim().to_ascii_lowercase();
+            if !normalized.is_empty() {
+                env.insert("ALPACA_PAPER_TRADE".to_string(), normalized);
+            }
+        }
+
+        env
+    }
+
+    fn builtin_workspace_tools(&self) -> Vec<communication::ToolDefinition> {
+        vec![
+            communication::ToolDefinition {
+                name: "read_file".to_string(),
+                description: "Read a UTF-8 text file from the current workspace. Parameters: path \
+                              (string), max_chars (integer, optional)."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File path, relative to the workspace unless absolute" },
+                        "max_chars": { "type": "integer", "description": "Maximum characters to return", "default": 12000 }
+                    },
+                    "required": ["path"]
+                }),
+            },
+            communication::ToolDefinition {
+                name: "list_dir".to_string(),
+                description: "List files and directories in the current workspace. Parameters: \
+                              path (string, optional)."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Directory path, relative to the workspace unless absolute", "default": "." }
+                    },
+                    "required": []
+                }),
+            },
+            communication::ToolDefinition {
+                name: "glob".to_string(),
+                description: "Find workspace files whose relative paths match a glob pattern. \
+                              Parameters: pattern (string), path (string, optional), max_results \
+                              (integer, optional)."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Glob pattern such as **/*.rs or Cargo.toml" },
+                        "path": { "type": "string", "description": "Directory to search, relative to the workspace", "default": "." },
+                        "max_results": { "type": "integer", "description": "Maximum matches to return", "default": 200 }
+                    },
+                    "required": ["pattern"]
+                }),
+            },
+            communication::ToolDefinition {
+                name: "grep".to_string(),
+                description: "Search workspace text files with a regular expression. Parameters: \
+                              pattern (string), path (string, optional), include (glob, \
+                              optional), case_sensitive (boolean, optional), max_matches \
+                              (integer, optional)."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Regex pattern to search for" },
+                        "path": { "type": "string", "description": "File or directory to search, relative to the workspace", "default": "." },
+                        "include": { "type": "string", "description": "Optional glob filter such as **/*.rs" },
+                        "case_sensitive": { "type": "boolean", "description": "Whether matching is case-sensitive", "default": true },
+                        "max_matches": { "type": "integer", "description": "Maximum matches to return", "default": 200 }
+                    },
+                    "required": ["pattern"]
+                }),
+            },
+        ]
+    }
+
+    fn web_tools_enabled(&self) -> bool {
+        std::env::var("BEEBOTOS_WEB_TOOLS_ENABLED")
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+            .unwrap_or(true)
+    }
+
+    fn builtin_react_tools(&self) -> Vec<communication::ToolDefinition> {
+        let mut tools = self.builtin_workspace_tools();
+        if self.controlled_workspace_tools_enabled() {
+            tools.extend(self.controlled_workspace_tool_definitions());
+        }
+        tools.push(communication::ToolDefinition {
+            name: "activate_skill".to_string(),
+            description: "Activate a BeeBotOS skill as additional context for this conversation. \
+                          Use this when the skill index suggests a skill is relevant. This does \
+                          not execute the skill; it injects its instructions into future turns."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "skill_id": { "type": "string", "description": "The exact skill id from the skill index" }
+                },
+                "required": ["skill_id"]
+            }),
+        });
+
+        if self.web_tools_enabled() {
+            tools.push(communication::ToolDefinition {
+                name: "web_fetch".to_string(),
+                description: "Fetch a public HTTP/HTTPS URL and return readable text. Local, \
+                              private, and non-web URLs are blocked."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "Public HTTP or HTTPS URL to fetch" },
+                        "max_chars": { "type": "integer", "description": "Maximum characters to return", "default": 12000 }
+                    },
+                    "required": ["url"]
+                }),
+            });
+            tools.push(communication::ToolDefinition {
+                name: "web_search".to_string(),
+                description: "Search the web for current information. Use this for real-time or \
+                              recently-changing facts such as weather, prices, news, schedules, \
+                              and availability. For relative dates such as today or now, resolve \
+                              them against the runtime date in the system prompt; never invent a \
+                              stale date. Defaults to keyless DuckDuckGo search when no \
+                              configured provider is available."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query" },
+                        "count": { "type": "integer", "description": "Number of results to return", "default": 5 },
+                        "country": { "type": "string", "description": "Optional region/country hint" },
+                        "language": { "type": "string", "description": "Optional language hint" },
+                        "freshness": { "type": "string", "description": "Optional freshness hint: day, week, month, year" }
+                    },
+                    "required": ["query"]
+                }),
+            });
+        }
+
+        tools
+    }
+
+    fn controlled_workspace_tool_definitions(&self) -> Vec<communication::ToolDefinition> {
+        vec![
+            communication::ToolDefinition {
+                name: "write_file".to_string(),
+                description: "Write a UTF-8 text file inside the current workspace. Controlled \
+                              tool: only available when runtime policy enables workspace writes."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File path, relative to the workspace unless absolute" },
+                        "content": { "type": "string", "description": "Full file content to write" }
+                    },
+                    "required": ["path", "content"]
+                }),
+            },
+            communication::ToolDefinition {
+                name: "edit_file".to_string(),
+                description: "Replace text in a UTF-8 workspace file. Controlled tool: only \
+                              available when runtime policy enables workspace writes."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File path, relative to the workspace unless absolute" },
+                        "old_text": { "type": "string", "description": "Exact text to replace" },
+                        "new_text": { "type": "string", "description": "Replacement text" },
+                        "replace_all": { "type": "boolean", "description": "Replace all matches instead of requiring exactly one match", "default": false }
+                    },
+                    "required": ["path", "old_text", "new_text"]
+                }),
+            },
+            communication::ToolDefinition {
+                name: "exec".to_string(),
+                description: "Execute a shell command in the current workspace. Controlled tool: \
+                              only available when runtime policy enables command execution."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "Shell command to run" },
+                        "working_dir": { "type": "string", "description": "Optional workspace-relative working directory", "default": "." },
+                        "timeout_ms": { "type": "integer", "description": "Timeout in milliseconds", "default": 30000 }
+                    },
+                    "required": ["command"]
+                }),
+            },
+        ]
+    }
+
+    fn resolve_workspace_path(&self, path: &str) -> Result<PathBuf, AgentError> {
+        let workspace = self.workspace_dir();
+        let candidate = PathBuf::from(path);
+        let joined = if candidate.is_absolute() {
+            candidate
+        } else {
+            workspace.join(candidate)
+        };
+        let normalized = Self::normalize_path_without_fs(&joined);
+        let workspace_normalized = Self::normalize_path_without_fs(&workspace);
+        if !normalized.starts_with(&workspace_normalized) {
+            return Err(AgentError::Execution(format!(
+                "Path '{}' escapes workspace root '{}'",
+                path,
+                workspace_normalized.display()
+            )));
+        }
+        Ok(normalized)
+    }
+
+    fn normalize_path_without_fs(path: &Path) -> PathBuf {
+        let mut out = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+
+    async fn execute_builtin_workspace_tool(
+        &self,
+        tool_name: &str,
+        params: Option<&HashMap<String, String>>,
+        fallback_input: &str,
+    ) -> Result<String, AgentError> {
+        let canonical_name = match tool_name {
+            "file_read" => "read_file",
+            "file_write" => "write_file",
+            "file_list" => "list_dir",
+            "bash_shell" | "process_exec" => "exec",
+            other => other,
+        };
+        if Self::is_controlled_workspace_tool(canonical_name)
+            && !self.controlled_workspace_tools_enabled()
+        {
+            return Err(AgentError::Execution(format!(
+                "Workspace tool '{}' is controlled and disabled by default",
+                canonical_name
+            )));
+        }
+        let get = |key: &str| params.and_then(|p| p.get(key)).map(|s| s.as_str());
+
+        match canonical_name {
+            "read_file" => {
+                let path = get("path").unwrap_or(fallback_input).trim();
+                if path.is_empty() {
+                    return Err(AgentError::Execution(
+                        "read_file requires a non-empty path".to_string(),
+                    ));
+                }
+                let max_chars = get("max_chars")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(12000);
+                let resolved = self.resolve_workspace_path(path)?;
+                let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
+                    AgentError::Execution(format!("Failed to read '{}': {}", resolved.display(), e))
+                })?;
+                let truncated: String = content.chars().take(max_chars).collect();
+                let suffix = if truncated.len() < content.len() {
+                    format!(
+                        "\n\n...[truncated, total chars: {}]",
+                        content.chars().count()
+                    )
+                } else {
+                    String::new()
+                };
+                Ok(format!(
+                    "File: {}\n\n{}{}",
+                    resolved.display(),
+                    truncated,
+                    suffix
+                ))
+            }
+            "list_dir" => {
+                let path = get("path").unwrap_or(".").trim();
+                let resolved =
+                    self.resolve_workspace_path(if path.is_empty() { "." } else { path })?;
+                let mut entries = tokio::fs::read_dir(&resolved).await.map_err(|e| {
+                    AgentError::Execution(format!("Failed to list '{}': {}", resolved.display(), e))
+                })?;
+                let mut lines = vec![format!("Directory: {}", resolved.display())];
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let kind = match entry.file_type().await {
+                        Ok(ft) if ft.is_dir() => "dir",
+                        Ok(ft) if ft.is_symlink() => "link",
+                        _ => "file",
+                    };
+                    lines.push(format!("[{}] {}", kind, name));
+                }
+                lines.sort();
+                Ok(lines.join("\n"))
+            }
+            "glob" => {
+                let pattern = get("pattern")
+                    .ok_or_else(|| AgentError::Execution("glob requires pattern".to_string()))?
+                    .trim();
+                if pattern.is_empty() {
+                    return Err(AgentError::Execution(
+                        "glob requires a non-empty pattern".to_string(),
+                    ));
+                }
+                let path = get("path").unwrap_or(".").trim();
+                let max_results = get("max_results")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(200)
+                    .clamp(1, 1000);
+                self.execute_workspace_glob(pattern, path, max_results)
+            }
+            "grep" => {
+                let pattern = get("pattern")
+                    .ok_or_else(|| AgentError::Execution("grep requires pattern".to_string()))?
+                    .trim();
+                if pattern.is_empty() {
+                    return Err(AgentError::Execution(
+                        "grep requires a non-empty pattern".to_string(),
+                    ));
+                }
+                let path = get("path").unwrap_or(".").trim();
+                let include = get("include").map(str::trim).filter(|s| !s.is_empty());
+                let case_sensitive = get("case_sensitive")
+                    .map(|s| !matches!(s, "false" | "0" | "FALSE" | "no" | "NO"))
+                    .unwrap_or(true);
+                let max_matches = get("max_matches")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(200)
+                    .clamp(1, 1000);
+                self.execute_workspace_grep(pattern, path, include, case_sensitive, max_matches)
+            }
+            "write_file" => {
+                let path = get("path")
+                    .ok_or_else(|| AgentError::Execution("write_file requires path".to_string()))?;
+                let content = get("content").ok_or_else(|| {
+                    AgentError::Execution("write_file requires content".to_string())
+                })?;
+                let resolved = self.resolve_workspace_path(path)?;
+                if let Some(parent) = resolved.parent() {
+                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                        AgentError::Execution(format!(
+                            "Failed to create '{}': {}",
+                            parent.display(),
+                            e
+                        ))
+                    })?;
+                }
+                tokio::fs::write(&resolved, content).await.map_err(|e| {
+                    AgentError::Execution(format!(
+                        "Failed to write '{}': {}",
+                        resolved.display(),
+                        e
+                    ))
+                })?;
+                Ok(format!("Wrote file: {}", resolved.display()))
+            }
+            "edit_file" => {
+                let path = get("path")
+                    .ok_or_else(|| AgentError::Execution("edit_file requires path".to_string()))?;
+                let old_text = get("old_text").ok_or_else(|| {
+                    AgentError::Execution("edit_file requires old_text".to_string())
+                })?;
+                let new_text = get("new_text").ok_or_else(|| {
+                    AgentError::Execution("edit_file requires new_text".to_string())
+                })?;
+                if old_text.is_empty() {
+                    return Err(AgentError::Execution(
+                        "edit_file old_text cannot be empty".to_string(),
+                    ));
+                }
+                let replace_all = get("replace_all")
+                    .map(|s| s == "true" || s == "1")
+                    .unwrap_or(false);
+                let resolved = self.resolve_workspace_path(path)?;
+                let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
+                    AgentError::Execution(format!("Failed to read '{}': {}", resolved.display(), e))
+                })?;
+                let count = content.matches(old_text).count();
+                if count == 0 {
+                    return Err(AgentError::Execution(format!(
+                        "edit_file could not find old_text in '{}'",
+                        resolved.display()
+                    )));
+                }
+                if !replace_all && count != 1 {
+                    return Err(AgentError::Execution(format!(
+                        "edit_file found {} matches in '{}'; set replace_all=true or provide a \
+                         more specific old_text",
+                        count,
+                        resolved.display()
+                    )));
+                }
+                let updated = if replace_all {
+                    content.replace(old_text, new_text)
+                } else {
+                    content.replacen(old_text, new_text, 1)
+                };
+                tokio::fs::write(&resolved, updated).await.map_err(|e| {
+                    AgentError::Execution(format!(
+                        "Failed to write '{}': {}",
+                        resolved.display(),
+                        e
+                    ))
+                })?;
+                Ok(format!(
+                    "Edited file: {} ({} replacement(s))",
+                    resolved.display(),
+                    if replace_all { count } else { 1 }
+                ))
+            }
+            "exec" => {
+                let command = get("command").unwrap_or(fallback_input).trim();
+                if command.is_empty() {
+                    return Err(AgentError::Execution(
+                        "exec requires a non-empty command".to_string(),
+                    ));
+                }
+                self.validate_workspace_command(command)?;
+                let working_dir = match get("working_dir") {
+                    Some(dir) if !dir.trim().is_empty() => self.resolve_workspace_path(dir)?,
+                    _ => self.workspace_dir(),
+                };
+                let timeout_ms = get("timeout_ms")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(30000);
+                let mut cmd = tokio::process::Command::new("sh");
+                cmd.arg("-c").arg(command);
+                cmd.current_dir(&working_dir);
+                cmd.kill_on_drop(true);
+                let output = tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout_ms),
+                    cmd.output(),
+                )
+                .await
+                .map_err(|_| {
+                    AgentError::Execution(format!(
+                        "Command timed out after {}ms: {}",
+                        timeout_ms, command
+                    ))
+                })?
+                .map_err(|e| AgentError::Execution(format!("Failed to execute command: {}", e)))?;
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Ok(format!(
+                    "Exit code: {}\nWorking directory: {}\n\nSTDOUT:\n{}\nSTDERR:\n{}",
+                    output.status.code().unwrap_or(-1),
+                    working_dir.display(),
+                    stdout,
+                    stderr
+                ))
+            }
+            _ => Err(AgentError::Execution(format!(
+                "Unknown builtin workspace tool: {}",
+                tool_name
+            ))),
+        }
+    }
+
+    fn validate_workspace_command(&self, command: &str) -> Result<(), AgentError> {
+        let lower = command.to_lowercase();
+        let blocked = [
+            "rm -rf /",
+            "rm -rf /*",
+            ":(){ :|:& };:",
+            "> /dev/sda",
+            "dd if=/dev/zero",
+            "mkfs.",
+        ];
+        for pattern in blocked {
+            if lower.contains(pattern) {
+                return Err(AgentError::Execution(format!(
+                    "Dangerous command pattern blocked: {}",
+                    pattern
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn execute_native_tool_call(
+        &self,
+        tool_call: &crate::llm::ToolCall,
+        tool_name_map: &HashMap<String, String>,
+        input_text: &str,
+        weather_data: &Option<String>,
+    ) -> Result<(String, bool), AgentError> {
+        let tool_name = tool_call.function.name.as_str();
+        let mut params = Self::parse_tool_arguments(&tool_call.function.arguments)?;
+
+        if Self::is_builtin_workspace_tool(tool_name) {
+            return self
+                .execute_builtin_workspace_tool(tool_name, params.as_ref(), input_text)
+                .await
+                .map(|output| (output, true));
+        }
+
+        let registered = self.resolve_native_skill(tool_name, tool_name_map).await?;
+        let registry = self
+            .skill_registry
+            .as_ref()
+            .ok_or_else(|| AgentError::SkillNotFound(tool_name.to_string()))?;
+        let resolved_id = registered.skill.id.clone();
+        let enriched_input = self.enriched_skill_input(input_text, weather_data);
+        Self::apply_react_skill_param_defaults(
+            &resolved_id,
+            &enriched_input,
+            Some(input_text),
+            &mut params,
+        );
+        let params_are_empty = params.as_ref().map_or(true, |p| p.is_empty());
+        let skill_input = if params_are_empty {
+            enriched_input.as_str()
+        } else {
+            input_text
+        };
+        let result = self
+            .execute_registered_skill(&registered, skill_input, params)
+            .await;
+
+        let result = match result {
+            Ok(result) => result,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+        let _ = registry.record_usage(&resolved_id).await;
+        let output = if result.success {
+            self.synthesize_skill_output(input_text, &result.output, &resolved_id)
+        } else {
+            Self::recoverable_skill_observation(&resolved_id, &result.output)
+        };
+        Ok((output, result.success))
+    }
+
+    async fn resolve_native_skill(
+        &self,
+        tool_name: &str,
+        tool_name_map: &HashMap<String, String>,
+    ) -> Result<skills::registry::RegisteredSkill, AgentError> {
+        let registry = self
+            .skill_registry
+            .as_ref()
+            .ok_or_else(|| AgentError::SkillNotFound(tool_name.to_string()))?;
+
+        let mut resolved_skill = registry.get(tool_name).await;
+        if resolved_skill.is_none() {
+            if let Some(original_id) = tool_name_map.get(tool_name) {
+                resolved_skill = registry.get(original_id).await;
+            }
+        }
+        if resolved_skill.is_none() && !tool_name.contains(':') && !tool_name.contains('/') {
+            let all_skills = registry.list_all().await;
+            for skill in &all_skills {
+                if skill.skill.id.ends_with(&format!("/{}", tool_name)) {
+                    resolved_skill = Some(skill.clone());
+                    break;
+                }
+            }
+        }
+
+        resolved_skill.ok_or_else(|| AgentError::SkillNotFound(tool_name.to_string()))
+    }
+
+    fn enriched_skill_input(&self, input_text: &str, weather_data: &Option<String>) -> String {
+        let enriched_input = if let Some(weather) = weather_data {
+            if !weather.is_empty() {
+                format!(
+                    "{}\n\n[参考数据] 实时天气：{}\n请基于以上数据回答。",
+                    input_text, weather
+                )
+            } else {
+                input_text.to_string()
+            }
+        } else {
+            input_text.to_string()
+        };
+        enriched_input
+    }
+
+    fn parse_tool_arguments(
+        arguments: &str,
+    ) -> Result<Option<HashMap<String, String>>, AgentError> {
+        if arguments.trim().is_empty() || arguments.trim() == "{}" {
+            return Ok(None);
+        }
+        let map = serde_json::from_str::<HashMap<String, serde_json::Value>>(arguments)
+            .map_err(|e| AgentError::Execution(format!("Invalid tool arguments: {}", e)))?;
+        let string_map = map
+            .into_iter()
+            .map(|(k, v)| {
+                let value = match v {
+                    serde_json::Value::String(s) => s,
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    other => other.to_string(),
+                };
+                (k, value)
+            })
+            .collect();
+        Ok(Some(string_map))
+    }
+
+    fn apply_react_skill_param_defaults(
+        skill_id: &str,
+        input: &str,
+        user_request: Option<&str>,
+        params: &mut Option<HashMap<String, String>>,
+    ) {
+        let context = format!("{}\n{}", user_request.unwrap_or_default(), input);
+        let lower = context.to_ascii_lowercase();
+        let mentions_btc = lower.contains("btc") || lower.contains("bitcoin");
+        let mentions_eth = lower.contains("eth") || lower.contains("ethereum");
+        let default_crypto_symbol = if mentions_eth {
+            Some("ETH/USD")
+        } else if mentions_btc || skill_id.contains("crypto") || skill_id.contains("alpaca") {
+            Some("BTC/USD")
+        } else {
+            None
+        };
+
+        if matches!(
+            skill_id,
+            "mcp:alpaca/get_crypto_latest_quote" | "mcp:alpaca/get_crypto_snapshot"
+        ) {
+            if let Some(symbol) = default_crypto_symbol {
+                let params = params.get_or_insert_with(HashMap::new);
+                params
+                    .entry("symbols".to_string())
+                    .or_insert(symbol.to_string());
+                params.entry("loc".to_string()).or_insert("us".to_string());
+            }
+        }
+
+        if skill_id == "mcp:alpaca/place_crypto_order" {
+            let params = params.get_or_insert_with(HashMap::new);
+            if let Some(symbol) = default_crypto_symbol {
+                params
+                    .entry("symbol".to_string())
+                    .or_insert(symbol.to_string());
+            }
+            if lower.contains("卖") || lower.contains("sell") || lower.contains("做空") {
+                params
+                    .entry("side".to_string())
+                    .or_insert("sell".to_string());
+            } else if lower.contains("买") || lower.contains("buy") || lower.contains("做多") {
+                params
+                    .entry("side".to_string())
+                    .or_insert("buy".to_string());
+            }
+            if lower.contains("市场") || lower.contains("市价") || lower.contains("market") {
+                params
+                    .entry("type".to_string())
+                    .or_insert("market".to_string());
+            }
+            if !params.contains_key("notional") && !params.contains_key("qty") {
+                if let Some(notional) = extract_usd_notional(&context) {
+                    params.insert("notional".to_string(), notional);
+                }
+            }
+        }
+    }
+
+    fn apply_mcp_default_params(
+        skill_id: &str,
+        params: &mut serde_json::Map<String, serde_json::Value>,
+    ) {
+        match skill_id {
+            "mcp:alpaca/place_crypto_order" => {
+                params
+                    .entry("type".to_string())
+                    .or_insert_with(|| serde_json::Value::String("market".to_string()));
+                params
+                    .entry("time_in_force".to_string())
+                    .or_insert_with(|| serde_json::Value::String("gtc".to_string()));
+            }
+            "mcp:alpaca/get_crypto_latest_quote" | "mcp:alpaca/get_crypto_snapshot" => {
+                params
+                    .entry("loc".to_string())
+                    .or_insert_with(|| serde_json::Value::String("us".to_string()));
+            }
+            _ => {}
+        }
+    }
+
+    fn tool_arg<'a>(params: &'a Option<HashMap<String, String>>, key: &str) -> Option<&'a str> {
+        params.as_ref().and_then(|p| p.get(key)).map(|s| s.as_str())
+    }
+
+    fn should_skip_walk_entry(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|name| {
+                matches!(
+                    name,
+                    ".git"
+                        | "target"
+                        | "node_modules"
+                        | ".next"
+                        | "dist"
+                        | "build"
+                        | ".cache"
+                        | ".turbo"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn is_probably_binary(bytes: &[u8]) -> bool {
+        bytes.iter().take(1024).any(|b| *b == 0)
+    }
+
+    fn glob_pattern_matches(pattern: &str, text: &str) -> bool {
+        fn inner(p: &[u8], t: &[u8]) -> bool {
+            if p.is_empty() {
+                return t.is_empty();
+            }
+            match p[0] {
+                b'*' => {
+                    if p.get(1) == Some(&b'*') {
+                        let rest = &p[2..];
+                        inner(rest, t) || (!t.is_empty() && inner(p, &t[1..]))
+                    } else {
+                        inner(&p[1..], t) || (!t.is_empty() && t[0] != b'/' && inner(p, &t[1..]))
+                    }
+                }
+                b'?' => !t.is_empty() && t[0] != b'/' && inner(&p[1..], &t[1..]),
+                byte => !t.is_empty() && byte == t[0] && inner(&p[1..], &t[1..]),
+            }
+        }
+        inner(pattern.as_bytes(), text.as_bytes())
+    }
+
+    fn collect_workspace_files(
+        &self,
+        root: &Path,
+        limit: usize,
+    ) -> Result<Vec<PathBuf>, AgentError> {
+        let mut files = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            if Self::should_skip_walk_entry(&path) {
+                continue;
+            }
+            if files.len() >= limit {
+                break;
+            }
+            if path.is_file() {
+                files.push(path);
+                continue;
+            }
+            if !path.is_dir() {
+                continue;
+            }
+            let entries = std::fs::read_dir(&path).map_err(|e| {
+                AgentError::Execution(format!("Failed to read '{}': {}", path.display(), e))
+            })?;
+            for entry in entries.flatten() {
+                stack.push(entry.path());
+            }
+        }
+        files.sort();
+        Ok(files)
+    }
+
+    fn execute_workspace_glob(
+        &self,
+        pattern: &str,
+        path: &str,
+        max_results: usize,
+    ) -> Result<String, AgentError> {
+        let root = self.resolve_workspace_path(if path.is_empty() { "." } else { path })?;
+        let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
+        let files = self.collect_workspace_files(&root, max_results.saturating_mul(20).max(200))?;
+        let mut matches = Vec::new();
+        for file in files {
+            let rel = file
+                .strip_prefix(&workspace)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if Self::glob_pattern_matches(pattern, &rel)
+                || file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|name| Self::glob_pattern_matches(pattern, name))
+                    .unwrap_or(false)
+            {
+                matches.push(rel);
+                if matches.len() >= max_results {
+                    break;
+                }
+            }
+        }
+
+        if matches.is_empty() {
+            Ok(format!(
+                "No files matched pattern '{}' under {}",
+                pattern,
+                root.display()
+            ))
+        } else {
+            Ok(format!(
+                "Glob: {}\nRoot: {}\nMatches: {}\n\n{}",
+                pattern,
+                root.display(),
+                matches.len(),
+                matches.join("\n")
+            ))
+        }
+    }
+
+    fn execute_workspace_grep(
+        &self,
+        pattern: &str,
+        path: &str,
+        include: Option<&str>,
+        case_sensitive: bool,
+        max_matches: usize,
+    ) -> Result<String, AgentError> {
+        let root = self.resolve_workspace_path(if path.is_empty() { "." } else { path })?;
+        let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
+        let regex_pattern = if case_sensitive {
+            pattern.to_string()
+        } else {
+            format!("(?i){}", pattern)
+        };
+        let re = regex::Regex::new(&regex_pattern)
+            .map_err(|e| AgentError::Execution(format!("Invalid grep regex: {}", e)))?;
+        let files = if root.is_file() {
+            vec![root.clone()]
+        } else {
+            self.collect_workspace_files(&root, max_matches.saturating_mul(50).max(500))?
+        };
+
+        let mut lines = Vec::new();
+        for file in files {
+            let rel = file
+                .strip_prefix(&workspace)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if let Some(include_pattern) = include {
+                if !Self::glob_pattern_matches(include_pattern, &rel)
+                    && !file
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|name| Self::glob_pattern_matches(include_pattern, name))
+                        .unwrap_or(false)
+                {
+                    continue;
+                }
+            }
+            let bytes = match std::fs::read(&file) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            if Self::is_probably_binary(&bytes) {
+                continue;
+            }
+            let content = String::from_utf8_lossy(&bytes);
+            for (idx, line) in content.lines().enumerate() {
+                if re.is_match(line) {
+                    lines.push(format!("{}:{}:{}", rel, idx + 1, line.trim_end()));
+                    if lines.len() >= max_matches {
+                        break;
+                    }
+                }
+            }
+            if lines.len() >= max_matches {
+                break;
+            }
+        }
+
+        if lines.is_empty() {
+            Ok(format!(
+                "No matches for pattern '{}' under {}",
+                pattern,
+                root.display()
+            ))
+        } else {
+            Ok(format!(
+                "Grep: {}\nRoot: {}\nMatches: {}\n\n{}",
+                pattern,
+                root.display(),
+                lines.len(),
+                lines.join("\n")
+            ))
+        }
+    }
+
+    fn is_blocked_web_host(host: &str) -> bool {
+        let lower = host.trim_matches('.').to_lowercase();
+        if matches!(lower.as_str(), "localhost" | "0.0.0.0")
+            || lower.ends_with(".localhost")
+            || lower.ends_with(".local")
+        {
+            return true;
+        }
+        if let Ok(ip) = lower.parse::<IpAddr>() {
+            return match ip {
+                IpAddr::V4(v4) => {
+                    v4.is_private()
+                        || v4.is_loopback()
+                        || v4.is_link_local()
+                        || v4.is_broadcast()
+                        || v4.is_documentation()
+                        || v4.octets()[0] == 0
+                }
+                IpAddr::V6(v6) => {
+                    v6.is_loopback()
+                        || v6.is_unspecified()
+                        || v6.is_unique_local()
+                        || v6.is_unicast_link_local()
+                }
+            };
+        }
+        false
+    }
+
+    fn validate_public_web_url(raw_url: &str) -> Result<url::Url, AgentError> {
+        let parsed = url::Url::parse(raw_url)
+            .map_err(|e| AgentError::Execution(format!("Invalid URL '{}': {}", raw_url, e)))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(AgentError::Execution(format!(
+                "Blocked non-HTTP URL scheme: {}",
+                parsed.scheme()
+            )));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| AgentError::Execution("URL must include a host".to_string()))?;
+        if Self::is_blocked_web_host(host) {
+            return Err(AgentError::Execution(format!(
+                "Blocked local or private web host: {}",
+                host
+            )));
+        }
+        Ok(parsed)
+    }
+
+    fn strip_html_to_text(html: &str) -> String {
+        let mut without_scripts = html.to_string();
+        for tag in ["script", "style", "noscript"] {
+            let pattern = format!(r"(?is)<{0}[^>]*>.*?</{0}>", tag);
+            if let Ok(re) = regex::Regex::new(&pattern) {
+                without_scripts = re.replace_all(&without_scripts, " ").into_owned();
+            }
+        }
+        let without_tags = regex::Regex::new("(?is)<[^>]+>")
+            .map(|re| re.replace_all(&without_scripts, " ").into_owned())
+            .unwrap_or(without_scripts);
+        let decoded = without_tags
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'");
+        regex::Regex::new(r"\s+")
+            .map(|re| re.replace_all(&decoded, " ").trim().to_string())
+            .unwrap_or_else(|_| decoded.trim().to_string())
+    }
+
+    async fn execute_web_fetch(
+        &self,
+        raw_url: &str,
+        max_chars: usize,
+    ) -> Result<String, AgentError> {
+        if !self.web_tools_enabled() {
+            return Err(AgentError::Execution("web tools are disabled".to_string()));
+        }
+        let url = Self::validate_public_web_url(raw_url)?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .user_agent("BeeBotOS/1.0 (+https://github.com/beebotos/beebotos)")
+            .build()
+            .map_err(|e| AgentError::Execution(format!("Failed to build HTTP client: {}", e)))?;
+        let response = client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|e| AgentError::Execution(format!("web_fetch failed: {}", e)))?;
+        let final_url = response.url().clone();
+        Self::validate_public_web_url(final_url.as_str())?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AgentError::Execution(format!(
+                "web_fetch returned HTTP {} for {}",
+                status, final_url
+            )));
+        }
+        let text = response
+            .text()
+            .await
+            .map_err(|e| AgentError::Execution(format!("Failed to read response body: {}", e)))?;
+        let cleaned = Self::strip_html_to_text(&text);
+        let truncated: String = cleaned.chars().take(max_chars).collect();
+        let suffix = if cleaned.chars().count() > max_chars {
+            format!(
+                "\n\n...[truncated, total chars: {}]",
+                cleaned.chars().count()
+            )
+        } else {
+            String::new()
+        };
+        Ok(format!(
+            "URL: {}\nStatus: {}\n\n{}{}",
+            final_url, status, truncated, suffix
+        ))
+    }
+
+    fn decode_html_entities(text: &str) -> String {
+        text.replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+    }
+
+    fn decode_duckduckgo_url(raw: &str) -> String {
+        if let Ok(parsed) = url::Url::parse(raw) {
+            if parsed.domain() == Some("duckduckgo.com") {
+                for (key, value) in parsed.query_pairs() {
+                    if key == "uddg" {
+                        return value.to_string();
+                    }
+                }
+            }
+        }
+        raw.to_string()
+    }
+
+    fn parse_duckduckgo_results(html: &str, count: usize) -> Vec<(String, String, String)> {
+        let mut results = Vec::new();
+        let link_re = match regex::Regex::new(
+            r#"(?is)<a[^>]+class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>"#,
+        ) {
+            Ok(re) => re,
+            Err(_) => return results,
+        };
+        for caps in link_re.captures_iter(html) {
+            let raw_url = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let title_html = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let url = Self::decode_duckduckgo_url(&Self::decode_html_entities(raw_url));
+            let title = Self::strip_html_to_text(title_html);
+            if title.is_empty() || url.is_empty() {
+                continue;
+            }
+            results.push((title, url, String::new()));
+            if results.len() >= count {
+                break;
+            }
+        }
+        results
+    }
+
+    async fn execute_web_search(
+        &self,
+        query: &str,
+        count: usize,
+        _country: Option<&str>,
+        _language: Option<&str>,
+        _freshness: Option<&str>,
+    ) -> Result<String, AgentError> {
+        if !self.web_tools_enabled() {
+            return Err(AgentError::Execution("web tools are disabled".to_string()));
+        }
+        let provider = std::env::var("BEEBOTOS_WEB_SEARCH_PROVIDER")
+            .unwrap_or_else(|_| "duckduckgo".to_string())
+            .to_lowercase();
+        if provider != "duckduckgo" {
+            return Err(AgentError::Execution(format!(
+                "web_search provider '{}' is not configured; only keyless duckduckgo is available",
+                provider
+            )));
+        }
+        let url = format!(
+            "https://html.duckduckgo.com/html/?q={}",
+            urlencoding::encode(query)
+        );
+        let parsed_url = Self::validate_public_web_url(&url)?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .user_agent("BeeBotOS/1.0 (+https://github.com/beebotos/beebotos)")
+            .build()
+            .map_err(|e| AgentError::Execution(format!("Failed to build HTTP client: {}", e)))?;
+        let response = client
+            .get(parsed_url)
+            .send()
+            .await
+            .map_err(|e| AgentError::Execution(format!("DuckDuckGo search failed: {}", e)))?;
+        let final_url = response.url().clone();
+        Self::validate_public_web_url(final_url.as_str())?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AgentError::Execution(format!(
+                "DuckDuckGo search returned HTTP {}",
+                status
+            )));
+        }
+        let html = response
+            .text()
+            .await
+            .map_err(|e| AgentError::Execution(format!("Failed to read search response: {}", e)))?;
+        let results = Self::parse_duckduckgo_results(&html, count);
+        if results.is_empty() {
+            return Err(AgentError::Execution(
+                "DuckDuckGo returned no parseable results; it may be blocking automated search"
+                    .to_string(),
+            ));
+        }
+        let mut lines = vec![format!(
+            "Provider: duckduckgo\nQuery: {}\nResults: {}",
+            query,
+            results.len()
+        )];
+        for (idx, (title, url, snippet)) in results.into_iter().enumerate() {
+            if snippet.is_empty() {
+                lines.push(format!("{}. {}\n   {}", idx + 1, title, url));
+            } else {
+                lines.push(format!(
+                    "{}. {}\n   {}\n   {}",
+                    idx + 1,
+                    title,
+                    url,
+                    snippet
+                ));
+            }
+        }
+        Ok(lines.join("\n"))
+    }
+
+    async fn activate_skill_context(
+        &self,
+        session_key: &str,
+        skill_id: &str,
+    ) -> Result<String, AgentError> {
+        let registry = self
+            .skill_registry
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("Skill registry not configured".into()))?;
+        let skill = registry
+            .get(skill_id)
+            .await
+            .ok_or_else(|| AgentError::SkillNotFound(skill_id.to_string()))?;
+        if !skill.enabled {
+            return Err(AgentError::Execution(format!(
+                "Skill '{}' is disabled",
+                skill_id
+            )));
+        }
+        let doc = registry
+            .get_skill_description(skill_id, crate::skills::registry::SkillDisclosureLevel::L3)
+            .await
+            .unwrap_or_else(|| skill.skill.manifest.prompt_template.clone());
+        let context = format!(
+            "## Active Skill: {} (`{}`)\n{}\n\nCapabilities: {}",
+            skill.skill.name,
+            skill.skill.id,
+            if doc.trim().is_empty() {
+                skill.skill.manifest.description.clone()
+            } else {
+                doc
+            },
+            skill.skill.manifest.capabilities.join(", ")
+        );
+        {
+            let mut active = self.active_skill_contexts.write().await;
+            let entry = active.entry(session_key.to_string()).or_default();
+            if !entry
+                .iter()
+                .any(|item| item.contains(&format!("`{}`", skill_id)))
+            {
+                entry.push(context);
+            }
+        }
+        let _ = registry.record_usage(skill_id).await;
+        Ok(format!(
+            "Activated skill '{}' for session '{}'. Future turns will include its context.",
+            skill_id, session_key
+        ))
+    }
+
+    async fn build_skill_index_context(&self) -> String {
+        let Some(registry) = &self.skill_registry else {
+            return "No skill registry is configured.".to_string();
+        };
+        let mut skills = registry.list_enabled().await;
+        skills.sort_by(|a, b| a.skill.id.cmp(&b.skill.id));
+        if skills.is_empty() {
+            return "No enabled skills are available.".to_string();
+        }
+        let mut lines = vec![
+            "Available skills are context packs, not executable tools. If one is relevant, call \
+             activate_skill with its exact id before using its guidance."
+                .to_string(),
+        ];
+        for skill in skills.iter().take(80) {
+            let l2 = registry
+                .get_skill_description(
+                    &skill.skill.id,
+                    crate::skills::registry::SkillDisclosureLevel::L2,
+                )
+                .await
+                .unwrap_or_else(|| skill.skill.manifest.description.clone());
+            lines.push(format!(
+                "- `{}`: {}",
+                skill.skill.id,
+                l2.chars().take(220).collect::<String>()
+            ));
+        }
+        if skills.len() > 80 {
+            lines.push(format!("...{} more skills omitted.", skills.len() - 80));
+        }
+        lines.join("\n")
+    }
+
+    async fn active_skill_context_for_session(&self, session_key: &str) -> Option<String> {
+        let active = self.active_skill_contexts.read().await;
+        let contexts = active.get(session_key)?;
+        if contexts.is_empty() {
+            None
+        } else {
+            Some(contexts.join("\n\n"))
+        }
+    }
+
+    async fn execute_react_tool_call(
+        &self,
+        tool_call: &crate::llm::ToolCall,
+        session_key: &str,
+        input_text: &str,
+    ) -> Result<String, AgentError> {
+        let tool_name = tool_call.function.name.as_str();
+        let params = Self::parse_tool_arguments(&tool_call.function.arguments)?;
+        match tool_name {
+            "activate_skill" => {
+                let skill_id = Self::tool_arg(&params, "skill_id")
+                    .ok_or_else(|| {
+                        AgentError::Execution("activate_skill requires skill_id".to_string())
+                    })?
+                    .trim();
+                self.activate_skill_context(session_key, skill_id).await
+            }
+            "web_fetch" => {
+                let url = Self::tool_arg(&params, "url")
+                    .ok_or_else(|| AgentError::Execution("web_fetch requires url".to_string()))?;
+                let max_chars = Self::tool_arg(&params, "max_chars")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(12000)
+                    .clamp(1, 50000);
+                self.execute_web_fetch(url, max_chars).await
+            }
+            "web_search" => {
+                let query = Self::tool_arg(&params, "query").ok_or_else(|| {
+                    AgentError::Execution("web_search requires query".to_string())
+                })?;
+                let count = Self::tool_arg(&params, "count")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(5)
+                    .clamp(1, 10);
+                self.execute_web_search(
+                    query,
+                    count,
+                    Self::tool_arg(&params, "country"),
+                    Self::tool_arg(&params, "language"),
+                    Self::tool_arg(&params, "freshness"),
+                )
+                .await
+            }
+            _ if Self::is_builtin_workspace_tool(tool_name) => {
+                self.execute_builtin_workspace_tool(tool_name, params.as_ref(), input_text)
+                    .await
+            }
+            _ => Err(AgentError::Execution(format!(
+                "Unknown ReAct tool '{}'. Skills must be activated with activate_skill, not \
+                 executed as tools.",
+                tool_name
+            ))),
+        }
+    }
+
+    fn assistant_tool_call_message(
+        tool_calls: &[crate::llm::ToolCall],
+        reasoning_content: Option<&str>,
+    ) -> communication::Message {
+        let mut metadata = HashMap::new();
+        metadata.insert("role".to_string(), "assistant".to_string());
+        if let Ok(json) = serde_json::to_string(tool_calls) {
+            metadata.insert("tool_calls_json".to_string(), json);
+        }
+        if let Some(reasoning_content) = reasoning_content {
+            metadata.insert(
+                "reasoning_content".to_string(),
+                reasoning_content.to_string(),
+            );
+        }
+        communication::Message::with_metadata(
+            uuid::Uuid::new_v4(),
+            communication::PlatformType::Custom,
+            "",
+            metadata,
+        )
+    }
+
+    fn tool_result_message(
+        tool_call_id: &str,
+        result: impl Into<String>,
+    ) -> communication::Message {
+        let mut metadata = HashMap::new();
+        metadata.insert("role".to_string(), "tool".to_string());
+        metadata.insert("tool_call_id".to_string(), tool_call_id.to_string());
+        communication::Message::with_metadata(
+            uuid::Uuid::new_v4(),
+            communication::PlatformType::Custom,
+            result,
+            metadata,
+        )
+    }
+
+    async fn emit_react_trace(&self, event: crate::react_trace::ReActTraceEvent) {
+        if let Some(sink) = &self.react_trace_sink {
+            if let Err(e) = sink.emit(event).await {
+                warn!("Failed to emit ReAct trace event: {}", e);
+            }
+        }
+    }
+
+    fn react_run_id(task_id: &str) -> String {
+        format!("react-{}-{}", task_id, uuid::Uuid::new_v4())
+    }
+
+    fn tool_arguments_preview(tool_call: &crate::llm::ToolCall) -> String {
+        crate::react_trace::sanitize_preview(&tool_call.function.arguments)
+    }
+
+    fn recoverable_tool_error(tool_name: &str, error: impl std::fmt::Display) -> String {
+        crate::react_trace::format_tool_error(tool_name, error)
+    }
+
+    fn recoverable_skill_observation(skill_id: &str, output: &str) -> String {
+        format!(
+            "Skill '{}' returned a recoverable failure.\nObservation: {}\n\nDo not treat this as \
+             the final answer. Use this observation to retry with corrected parameters, choose a \
+             more appropriate tool/skill, or ask the user one concise clarification question if \
+             the missing information cannot be inferred.",
+            skill_id,
+            output.trim()
+        )
+    }
+
+    async fn force_final_react_answer(
+        &self,
+        llm: &Arc<dyn communication::LLMCallInterface>,
+        mut loop_messages: Vec<communication::Message>,
+        tools: Vec<communication::ToolDefinition>,
+        extra_params: HashMap<String, String>,
+        max_tool_rounds: u32,
+    ) -> Result<String, AgentError> {
+        let mut metadata = HashMap::new();
+        metadata.insert("role".to_string(), "system".to_string());
+        loop_messages.push(communication::Message::with_metadata(
+            uuid::Uuid::new_v4(),
+            communication::PlatformType::Custom,
+            format!(
+                "The ReAct/tool loop has reached the maximum of {} rounds. Do not call any more \
+                 tools. Produce the best final answer based on the observations already available.",
+                max_tool_rounds
+            ),
+            metadata,
+        ));
+
+        let mut final_params = extra_params;
+        final_params.insert("tool_choice".to_string(), "none".to_string());
+        llm.call_llm_tool_turn(loop_messages, tools, Some(final_params))
+            .await
+            .map(|turn| Self::cleanup_thinking_process(&turn.content))
+            .map_err(|e| AgentError::Execution(format!("Forced final answer failed: {}", e)))
+    }
+
     pub fn new(config: AgentConfig) -> Self {
         Self {
             config,
@@ -680,147 +1678,14 @@ impl Agent {
             pending_parameter_forms: Arc::new(RwLock::new(HashMap::new())),
             skip_approval: std::sync::atomic::AtomicBool::new(false),
             prompt_cache: Some(Arc::new(crate::prompt::PromptCache::new())),
-            max_rounds: 10,
+            max_rounds: crate::react_trace::DEFAULT_REACT_MAX_TOOL_ROUNDS,
             skill_feedback_collector: Some(crate::skills::feedback::SkillImprovementEngine::new()),
             evolution_scheduler: None,
             system_info_provider: None,
-            tool_work_dir: std::path::PathBuf::from("/data/workspace"),
+            tool_work_dir: std::path::PathBuf::from("data/workspace"),
             llm_client: None,
-        }
-    }
-
-    async fn execute_skill_call_from_react(
-        &self,
-        arguments: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<String, String> {
-        self.execute_skill_call_from_react_with_context(arguments, None)
-            .await
-    }
-
-    async fn execute_skill_call_from_react_with_context(
-        &self,
-        arguments: serde_json::Map<String, serde_json::Value>,
-        user_request: Option<&str>,
-    ) -> Result<String, String> {
-        let skill_id = arguments
-            .get("skill_id")
-            .or_else(|| arguments.get("id"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "skill_call missing required parameter 'skill_id'".to_string())?;
-
-        let input = arguments
-            .get("input")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                let mut fallback = arguments.clone();
-                fallback.remove("skill_id");
-                fallback.remove("id");
-                fallback.remove("params");
-                if fallback.is_empty() {
-                    user_request.unwrap_or_default().to_string()
-                } else {
-                    serde_json::Value::Object(fallback).to_string()
-                }
-            });
-
-        let mut params = arguments
-            .get("params")
-            .and_then(|v| v.as_object())
-            .map(|obj| {
-                obj.iter()
-                    .filter_map(|(k, v)| {
-                        if let Some(s) = v.as_str() {
-                            Some((k.clone(), s.to_string()))
-                        } else if v.is_null() {
-                            None
-                        } else {
-                            Some((k.clone(), v.to_string()))
-                        }
-                    })
-                    .collect::<HashMap<_, _>>()
-            });
-
-        self.apply_react_skill_param_defaults(skill_id, &input, user_request, &mut params);
-
-        let result = self
-            .execute_skill_by_id(skill_id, &input, params)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        Ok(self.synthesize_skill_output(&input, &result.output, skill_id))
-    }
-
-    fn apply_react_skill_param_defaults(
-        &self,
-        skill_id: &str,
-        input: &str,
-        user_request: Option<&str>,
-        params: &mut Option<HashMap<String, String>>,
-    ) {
-        let context = format!("{}\n{}", user_request.unwrap_or_default(), input);
-        let lower = context.to_ascii_lowercase();
-        let mentions_btc = lower.contains("btc") || lower.contains("bitcoin");
-        let mentions_eth = lower.contains("eth") || lower.contains("ethereum");
-        let default_crypto_symbol = if mentions_eth {
-            Some("ETH/USD")
-        } else if mentions_btc || skill_id.contains("crypto") || skill_id.contains("alpaca") {
-            Some("BTC/USD")
-        } else {
-            None
-        };
-
-        if matches!(
-            skill_id,
-            "mcp:alpaca/get_crypto_latest_quote" | "mcp:alpaca/get_crypto_snapshot"
-        ) {
-            if let Some(symbol) = default_crypto_symbol {
-                let params = params.get_or_insert_with(HashMap::new);
-                params.entry("symbols".to_string()).or_insert(symbol.to_string());
-                params.entry("loc".to_string()).or_insert("us".to_string());
-            }
-        }
-
-        if skill_id == "mcp:alpaca/place_crypto_order" {
-            let params = params.get_or_insert_with(HashMap::new);
-            if let Some(symbol) = default_crypto_symbol {
-                params.entry("symbol".to_string()).or_insert(symbol.to_string());
-            }
-            if lower.contains("卖") || lower.contains("sell") || lower.contains("做空") {
-                params.entry("side".to_string()).or_insert("sell".to_string());
-            } else if lower.contains("买") || lower.contains("buy") || lower.contains("做多") {
-                params.entry("side".to_string()).or_insert("buy".to_string());
-            }
-            if lower.contains("市场") || lower.contains("市价") || lower.contains("market") {
-                params.entry("type".to_string()).or_insert("market".to_string());
-            }
-            if !params.contains_key("notional") && !params.contains_key("qty") {
-                if let Some(notional) = extract_usd_notional(&context) {
-                    params.insert("notional".to_string(), notional);
-                }
-            }
-        }
-    }
-
-    fn apply_mcp_default_params(
-        skill_id: &str,
-        params: &mut serde_json::Map<String, serde_json::Value>,
-    ) {
-        match skill_id {
-            "mcp:alpaca/place_crypto_order" => {
-                params
-                    .entry("type".to_string())
-                    .or_insert_with(|| serde_json::Value::String("market".to_string()));
-                params
-                    .entry("time_in_force".to_string())
-                    .or_insert_with(|| serde_json::Value::String("gtc".to_string()));
-            }
-            "mcp:alpaca/get_crypto_latest_quote" | "mcp:alpaca/get_crypto_snapshot" => {
-                params
-                    .entry("loc".to_string())
-                    .or_insert_with(|| serde_json::Value::String("us".to_string()));
-            }
-            _ => {}
+            react_trace_sink: None,
+            active_skill_contexts: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -852,7 +1717,7 @@ impl Agent {
         child.system_info_provider = self.system_info_provider.clone();
         child.tool_work_dir = self.tool_work_dir.clone();
         child.llm_client = self.llm_client.clone();
-
+        child.react_trace_sink = self.react_trace_sink.clone();
         info!(
             "Spawned sub-agent {} from parent {}",
             child.config.id, self.config.id
@@ -860,13 +1725,13 @@ impl Agent {
         Ok(child)
     }
 
-    /// 🆕 Set the tool working directory for sandboxed file operations
+    /// Set the tool working directory for sandboxed file operations.
     pub fn with_tool_work_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.tool_work_dir = dir.into();
         self
     }
 
-    /// 🆕 Attach a direct LLM client for native tool calling
+    /// Attach a direct LLM client for native tool calling.
     pub fn with_llm_client(mut self, client: Arc<crate::llm::LLMClient>) -> Self {
         self.llm_client = Some(client);
         self
@@ -1140,7 +2005,6 @@ impl Agent {
     ///   STEP 1: get_stock_latest_quote|{"symbols":"AAPL"}
     ///   IF result.price > 180 THEN
     ///   STEP 2: place_stock_order|{"symbol":"AAPL","side":"buy","qty":"10"}
-    #[allow(dead_code)]
     async fn try_execute_tool_chain(
         &self,
         response: &str,
@@ -1222,7 +2086,6 @@ impl Agent {
     }
 
     /// Execute a tool by name (skill registry or MCP fallback)
-    #[allow(dead_code)]
     async fn execute_tool_by_name(
         &self,
         tool_name: &str,
@@ -1270,14 +2133,12 @@ impl Agent {
             }
         }
 
-        Err(AgentError::Execution(format!(
-            "Tool '{}' not found",
-            tool_name
-        )))
+        Err(AgentError::Execution(
+            crate::react_trace::format_unknown_tool_error(tool_name, &[]),
+        ))
     }
 
     /// Evaluate a simple tool chain condition against step results
-    #[allow(dead_code)]
     fn evaluate_tool_chain_condition(&self, condition: &str, step_results: &[String]) -> bool {
         let condition_lower = condition.to_lowercase();
         // Simple heuristic: if condition mentions success/ok/passed and last result
@@ -1343,15 +2204,6 @@ impl Agent {
         self
     }
 
-    /// 🆕 Attach a system info provider for querying Gateway-layer data
-    pub fn with_system_info_provider(
-        mut self,
-        provider: Arc<dyn crate::system_info::SystemInfoProvider>,
-    ) -> Self {
-        self.system_info_provider = Some(provider);
-        self
-    }
-
     /// 🆕 OPTIMIZATION PHASE 1: Set intent engine
     pub fn with_intent_engine(mut self, engine: crate::intent::IntentEngine) -> Self {
         self.intent_engine = Some(engine);
@@ -1375,11 +2227,28 @@ impl Agent {
 
     /// 🆕 OPTIMIZATION PHASE 4: Set max rounds limit
     pub fn with_max_rounds(mut self, max_rounds: u32) -> Self {
-        self.max_rounds = max_rounds;
+        self.max_rounds = crate::react_trace::clamp_react_max_tool_rounds(max_rounds);
         info!(
             "Max rounds set to {} for agent {}",
-            max_rounds, self.config.id
+            self.max_rounds, self.config.id
         );
+        self
+    }
+
+    pub fn with_react_trace_sink(
+        mut self,
+        sink: Arc<dyn crate::react_trace::ReActTraceSink>,
+    ) -> Self {
+        self.react_trace_sink = Some(sink);
+        self
+    }
+
+    /// Set system information provider for querying Gateway-layer data.
+    pub fn with_system_info_provider(
+        mut self,
+        provider: Arc<dyn crate::system_info::SystemInfoProvider>,
+    ) -> Self {
+        self.system_info_provider = Some(provider);
         self
     }
 
@@ -1400,8 +2269,7 @@ impl Agent {
     ///
     /// Caches the base persona (name + description) which changes rarely,
     /// avoiding repeated token assembly for identical agent configurations.
-    #[allow(dead_code)]
-    async fn build_system_prompt_cached(&self, _intent: &crate::intent::UserIntent) -> String {
+    async fn build_system_prompt_cached(&self, intent: &crate::intent::UserIntent) -> String {
         let base_persona = format!(
             "You are {} ({}). Please remain friendly, professional, and helpful when answering \
              questions.",
@@ -1425,7 +2293,7 @@ impl Agent {
                     let builder = crate::prompt::PromptBuilder::new()
                         .with_soul(comps.soul.clone().unwrap_or_default())
                         .with_model(&comps.model);
-                    builder.build_unified_react()
+                    builder.build(intent)
                 })
                 .await
         } else {
@@ -1434,7 +2302,6 @@ impl Agent {
     }
 
     /// 🆕 OPTIMIZATION: Classify intent for a task input
-    #[allow(dead_code)]
     pub async fn classify_intent(&self, input: &str) -> crate::intent::IntentAnalysis {
         if self.intent_engine.is_some() {
             // 🆕 OPTIMIZATION PHASE 3: Dual-track intent classification
@@ -1708,7 +2575,6 @@ impl Agent {
     /// Clean up LLM responses that contain thinking/process analysis instead of
     /// direct answers. 🆕 OPTIMIZATION PHASE 2: Supports
     /// <REASONING_SCRATCHPAD> extraction
-    #[allow(dead_code)]
     fn cleanup_thinking_process(response: &str) -> String {
         let response = response.trim();
         if response.is_empty() {
@@ -1899,7 +2765,6 @@ impl Agent {
 
     /// 🆕 OPTIMIZATION PHASE 2: Extract <REASONING_SCRATCHPAD> content and
     /// return cleaned response
-    #[allow(dead_code)]
     fn extract_reasoning_scratchpad(response: &str) -> (String, Option<String>) {
         let start_tag = "<REASONING_SCRATCHPAD>";
         let end_tag = "</REASONING_SCRATCHPAD>";
@@ -1974,12 +2839,7 @@ impl Agent {
             task_id: task.id.clone(),
         };
 
-        // 🆕 OPTIMIZATION PHASE 4: Apply max rounds limit for LLM chat tasks
-        let result = if matches!(task.task_type, TaskType::LlmChat | TaskType::Custom(_)) {
-            self.process_task_with_round_limit(task).await
-        } else {
-            self.process_task(task).await
-        };
+        let result = self.process_task(task).await;
 
         self.state = state_manager::AgentState::Idle;
         result
@@ -2060,11 +2920,8 @@ impl Agent {
         let start_time = std::time::Instant::now();
         let task_id = task.id.clone();
 
-        // 🆕 UNIFIED REACT: All LlmChat tasks go through unified ReAct.
-        // Form submission / approval confirmation are handled inside process_task_v2
-        // before reaching the unified ReAct executor.
         let result = if matches!(task.task_type, TaskType::LlmChat | TaskType::Custom(_)) {
-            self.process_task_v2(task).await
+            self.process_task_react(&task).await
         } else {
             self.process_task_legacy(task).await
         };
@@ -2095,12 +2952,498 @@ impl Agent {
         }
     }
 
+    fn extract_react_input(
+        &self,
+        task: &Task,
+    ) -> (
+        String,
+        HashMap<String, String>,
+        Vec<(String, String)>,
+        Option<String>,
+        Option<String>,
+        String,
+    ) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+            let message = json
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or(&task.input)
+                .to_string();
+            let mut params = task.parameters.clone();
+            for key in ["platform", "channel_id", "user_id", "session_id"] {
+                if let Some(value) = json.get(key).and_then(|v| v.as_str()) {
+                    params.insert(key.to_string(), value.to_string());
+                }
+            }
+            let history: Vec<(String, String)> = json
+                .get("history")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            let role = v.get("role").and_then(|r| r.as_str())?;
+                            let content = v.get("content").and_then(|c| c.as_str())?;
+                            Some((role.to_string(), content.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let memory_context = json
+                .get("memory_context")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string());
+            let weather_data = json
+                .get("weather_data")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string());
+            let session_key = params
+                .get("session_id")
+                .or_else(|| params.get("channel_id"))
+                .cloned()
+                .unwrap_or_else(|| task.id.clone());
+            (
+                message,
+                params,
+                history,
+                memory_context,
+                weather_data,
+                session_key,
+            )
+        } else {
+            (
+                task.input.clone(),
+                task.parameters.clone(),
+                Vec::new(),
+                None,
+                None,
+                task.parameters
+                    .get("session_id")
+                    .or_else(|| task.parameters.get("channel_id"))
+                    .cloned()
+                    .unwrap_or_else(|| task.id.clone()),
+            )
+        }
+    }
+
+    async fn build_react_messages(
+        &self,
+        input_text: &str,
+        history: &[(String, String)],
+        gateway_memory_context: &Option<String>,
+        weather_data: &Option<String>,
+        session_key: &str,
+    ) -> Vec<communication::Message> {
+        let skill_index = self.build_skill_index_context().await;
+        let active_skill_context = self.active_skill_context_for_session(session_key).await;
+        let controlled_tool_prompt = if self.controlled_workspace_tools_enabled() {
+            "Controlled workspace tools are currently enabled. You may use write_file, edit_file, \
+             and exec when the user asks you to create files, modify files, run code, or execute \
+             commands. Keep all paths inside the workspace root."
+        } else {
+            "Controlled workspace tools such as write_file, edit_file, and exec are not exposed \
+             right now. Do not claim you can write files or run commands unless those tools are \
+             present."
+        };
+        let runtime_context = Self::runtime_context_prompt();
+        let mut system = format!(
+            "You are {} ({}).\n\nUse an OpenClaw-style ReAct loop: answer directly when no tool \
+             is needed; otherwise call the most appropriate tool, observe the result, then \
+             continue until you can give the user a natural final answer. Do not claim you cannot \
+             inspect the environment; use tools when inspection is needed.\n\n{}\n\n## \
+             Workspace\nWorking directory: {}\nAll workspace tools are restricted to this \
+             root.\n\nThis is the BeeBotOS user workspace, normally ./data/workspace relative to \
+             the repo. Treat it as your current working directory, not the repository root.\n\n## \
+             Tools\nExecutable tools include read_file, list_dir, glob, grep, web_fetch, \
+             web_search, and activate_skill. {}\n\n## Skills\n{}",
+            self.config.name,
+            self.config.description,
+            runtime_context,
+            self.workspace_dir_display(),
+            controlled_tool_prompt,
+            skill_index
+        );
+        if let Some(active) = active_skill_context {
+            system.push_str("\n\n## Active Skill Contexts\n");
+            system.push_str(&active);
+        }
+
+        let mut messages = vec![communication::Message::with_metadata(
+            uuid::Uuid::new_v4(),
+            communication::PlatformType::Custom,
+            system,
+            {
+                let mut metadata = HashMap::new();
+                metadata.insert("role".to_string(), "system".to_string());
+                metadata
+            },
+        )];
+
+        if let Some(memory) = gateway_memory_context {
+            if !memory.trim().is_empty() {
+                messages.push(communication::Message::with_metadata(
+                    uuid::Uuid::new_v4(),
+                    communication::PlatformType::Custom,
+                    format!("Relevant memory:\n{}", memory),
+                    {
+                        let mut metadata = HashMap::new();
+                        metadata.insert("role".to_string(), "system".to_string());
+                        metadata
+                    },
+                ));
+            }
+        } else if let Some(ref memory) = self.memory_system {
+            if let Ok(results) = memory.search(input_text).await {
+                let context = results
+                    .iter()
+                    .take(4)
+                    .map(|r| format!("- {}", r.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !context.is_empty() {
+                    messages.push(communication::Message::with_metadata(
+                        uuid::Uuid::new_v4(),
+                        communication::PlatformType::Custom,
+                        format!("Relevant memory:\n{}", context),
+                        {
+                            let mut metadata = HashMap::new();
+                            metadata.insert("role".to_string(), "system".to_string());
+                            metadata
+                        },
+                    ));
+                }
+            }
+        }
+
+        for (role, content) in history {
+            let normalized_role = match role.as_str() {
+                "assistant" => "assistant",
+                "system" => "system",
+                _ => "user",
+            };
+            let mut metadata = HashMap::new();
+            metadata.insert("role".to_string(), normalized_role.to_string());
+            messages.push(communication::Message::with_metadata(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                content.clone(),
+                metadata,
+            ));
+        }
+
+        let user_message = if let Some(weather) = weather_data {
+            if weather.trim().is_empty() {
+                input_text.to_string()
+            } else {
+                format!(
+                    "{}\n\nReference weather data:\n{}\nUse this data if relevant.",
+                    input_text, weather
+                )
+            }
+        } else {
+            input_text.to_string()
+        };
+        let mut metadata = HashMap::new();
+        metadata.insert("role".to_string(), "user".to_string());
+        messages.push(communication::Message::with_metadata(
+            uuid::Uuid::new_v4(),
+            communication::PlatformType::Custom,
+            user_message,
+            metadata,
+        ));
+        messages
+    }
+
+    async fn process_task_react(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {
+        let llm = self
+            .llm_interface
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
+        if !llm.supports_native_tools() {
+            return self.handle_llm_task_internal(task, None).await;
+        }
+
+        let (input_text, mut extra_params, history, memory_context, weather_data, session_key) =
+            self.extract_react_input(task);
+        let tools = self.builtin_react_tools();
+        let mut loop_messages = self
+            .build_react_messages(
+                &input_text,
+                &history,
+                &memory_context,
+                &weather_data,
+                &session_key,
+            )
+            .await;
+        extra_params.insert("tool_choice".to_string(), "auto".to_string());
+        extra_params.insert("max_tokens".to_string(), "1600".to_string());
+        if let Ok(json) = serde_json::to_string(&tools) {
+            extra_params.insert("tools_json".to_string(), json);
+        }
+        extra_params.insert("max_tool_rounds".to_string(), self.max_rounds.to_string());
+
+        let max_tool_rounds = crate::react_trace::clamp_react_max_tool_rounds(self.max_rounds);
+        let run_id = Self::react_run_id(&task.id);
+        extra_params.insert("agent_id".to_string(), self.config.id.clone());
+        extra_params.insert("react_run_id".to_string(), run_id.clone());
+        self.emit_react_trace(
+            crate::react_trace::ReActTraceEvent::new(
+                run_id.clone(),
+                session_key.clone(),
+                self.config.id.clone(),
+                0,
+                max_tool_rounds,
+                crate::react_trace::ReActTracePhase::LoopStarted,
+            )
+            .with_content_preview(&input_text),
+        )
+        .await;
+        for round in 0..max_tool_rounds {
+            let round_number = round + 1;
+            extra_params.insert("react_round".to_string(), round_number.to_string());
+            let turn = llm
+                .call_llm_tool_turn(
+                    loop_messages.clone(),
+                    tools.clone(),
+                    Some(extra_params.clone()),
+                )
+                .await
+                .map_err(|e| AgentError::Execution(format!("LLM ReAct turn failed: {}", e)))?;
+
+            if turn.tool_calls.is_empty() {
+                let response = Self::cleanup_thinking_process(&turn.content);
+                self.emit_react_trace(
+                    crate::react_trace::ReActTraceEvent::new(
+                        run_id.clone(),
+                        session_key.clone(),
+                        self.config.id.clone(),
+                        round_number,
+                        max_tool_rounds,
+                        crate::react_trace::ReActTracePhase::FinalAnswer,
+                    )
+                    .with_content_preview(&response),
+                )
+                .await;
+                if response.trim().is_empty() {
+                    return Ok((
+                        "抱歉，AI 暂时无法生成回复，请稍后再试。".to_string(),
+                        vec![],
+                    ));
+                }
+                if let Some(skill_observation) = self
+                    .try_execute_skill_trigger_text(&response, &input_text, &weather_data)
+                    .await?
+                {
+                    if skill_observation.success {
+                        return Ok((skill_observation.output, vec![]));
+                    }
+
+                    info!(
+                        "Text skill trigger returned recoverable observation; continuing ReAct \
+                         loop"
+                    );
+                    let synthetic_tool_id = format!("skill-text-{}", uuid::Uuid::new_v4());
+                    loop_messages.push(Self::assistant_tool_call_message(
+                        &[crate::llm::ToolCall {
+                            id: synthetic_tool_id.clone(),
+                            r#type: "function".to_string(),
+                            function: crate::llm::FunctionCall {
+                                name: skill_observation.skill_id,
+                                arguments: skill_observation.arguments,
+                            },
+                        }],
+                        None,
+                    ));
+                    loop_messages.push(Self::tool_result_message(
+                        &synthetic_tool_id,
+                        skill_observation.output,
+                    ));
+                    continue;
+                }
+                return Ok((response, vec![]));
+            }
+
+            info!(
+                "process_task_react: round {} returned {} tool call(s)",
+                round_number,
+                turn.tool_calls.len()
+            );
+            self.emit_react_trace(
+                crate::react_trace::ReActTraceEvent::new(
+                    run_id.clone(),
+                    session_key.clone(),
+                    self.config.id.clone(),
+                    round_number,
+                    max_tool_rounds,
+                    crate::react_trace::ReActTracePhase::AssistantToolCall,
+                )
+                .with_content_preview(format!("{} tool call(s)", turn.tool_calls.len())),
+            )
+            .await;
+            loop_messages.push(Self::assistant_tool_call_message(
+                &turn.tool_calls,
+                turn.reasoning_content.as_deref(),
+            ));
+            for tool_call in &turn.tool_calls {
+                self.emit_react_trace(
+                    crate::react_trace::ReActTraceEvent::new(
+                        run_id.clone(),
+                        session_key.clone(),
+                        self.config.id.clone(),
+                        round_number,
+                        max_tool_rounds,
+                        crate::react_trace::ReActTracePhase::ToolStarted,
+                    )
+                    .with_tool(tool_call.function.name.clone(), tool_call.id.clone())
+                    .with_arguments_preview(Self::tool_arguments_preview(tool_call)),
+                )
+                .await;
+                let output = match self
+                    .execute_react_tool_call(tool_call, &session_key, &input_text)
+                    .await
+                {
+                    Ok(output) => {
+                        self.emit_react_trace(
+                            crate::react_trace::ReActTraceEvent::new(
+                                run_id.clone(),
+                                session_key.clone(),
+                                self.config.id.clone(),
+                                round_number,
+                                max_tool_rounds,
+                                crate::react_trace::ReActTracePhase::ToolResult,
+                            )
+                            .with_tool(tool_call.function.name.clone(), tool_call.id.clone())
+                            .with_content_preview(&output),
+                        )
+                        .await;
+                        output
+                    }
+                    Err(e) => {
+                        warn!("ReAct tool '{}' failed: {}", tool_call.function.name, e);
+                        let output = Self::recoverable_tool_error(&tool_call.function.name, e);
+                        self.emit_react_trace(
+                            crate::react_trace::ReActTraceEvent::new(
+                                run_id.clone(),
+                                session_key.clone(),
+                                self.config.id.clone(),
+                                round_number,
+                                max_tool_rounds,
+                                crate::react_trace::ReActTracePhase::ToolError,
+                            )
+                            .with_tool(tool_call.function.name.clone(), tool_call.id.clone())
+                            .with_content_preview(&output)
+                            .error(),
+                        )
+                        .await;
+                        output
+                    }
+                };
+                loop_messages.push(Self::tool_result_message(&tool_call.id, output));
+
+                if tool_call.function.name == "activate_skill" {
+                    if let Some(active) = self.active_skill_context_for_session(&session_key).await
+                    {
+                        let mut metadata = HashMap::new();
+                        metadata.insert("role".to_string(), "system".to_string());
+                        loop_messages.push(communication::Message::with_metadata(
+                            uuid::Uuid::new_v4(),
+                            communication::PlatformType::Custom,
+                            format!("Updated active skill contexts:\n{}", active),
+                            metadata,
+                        ));
+                    }
+                }
+            }
+        }
+
+        self.emit_react_trace(
+            crate::react_trace::ReActTraceEvent::new(
+                run_id.clone(),
+                session_key.clone(),
+                self.config.id.clone(),
+                max_tool_rounds,
+                max_tool_rounds,
+                crate::react_trace::ReActTracePhase::LoopLimitReached,
+            )
+            .with_content_preview("Maximum ReAct/tool rounds reached; requesting final answer."),
+        )
+        .await;
+        let response = self
+            .force_final_react_answer(llm, loop_messages, tools, extra_params, max_tool_rounds)
+            .await
+            .unwrap_or_else(|e| {
+                warn!("Forced final ReAct answer failed: {}", e);
+                format!(
+                    "工具循环达到最大轮次限制 ({} 轮)，且模型未能生成最终回复。",
+                    max_tool_rounds
+                )
+            });
+        Ok((response, vec![]))
+    }
+
+    async fn try_execute_skill_trigger_text(
+        &self,
+        response: &str,
+        input_text: &str,
+        weather_data: &Option<String>,
+    ) -> Result<Option<TextSkillObservation>, AgentError> {
+        let trimmed = response.trim();
+        let Some(skill_start) = trimmed.find("SKILL:") else {
+            return Ok(None);
+        };
+        let skill_part = trimmed[skill_start + "SKILL:".len()..].trim();
+        if skill_part.is_empty() {
+            return Ok(None);
+        }
+
+        let (skill_id, arguments) = if let Some(pos) = skill_part.find('|') {
+            let skill_id = skill_part[..pos].trim();
+            let arguments = skill_part[pos + 1..]
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            (skill_id, arguments)
+        } else {
+            let skill_id = skill_part.split_whitespace().next().unwrap_or("").trim();
+            (skill_id, "{}".to_string())
+        };
+
+        if skill_id.is_empty() {
+            return Ok(None);
+        }
+
+        info!(
+            "ReAct returned text skill trigger '{}'; executing instead of returning raw protocol",
+            skill_id
+        );
+
+        let tool_call = crate::llm::ToolCall {
+            id: format!("skill-text-{}", uuid::Uuid::new_v4()),
+            r#type: "function".to_string(),
+            function: crate::llm::FunctionCall {
+                name: skill_id.to_string(),
+                arguments: arguments.clone(),
+            },
+        };
+
+        let (output, success) = self
+            .execute_native_tool_call(&tool_call, &HashMap::new(), input_text, weather_data)
+            .await?;
+        Ok(Some(TextSkillObservation {
+            skill_id: skill_id.to_string(),
+            arguments,
+            output,
+            success,
+        }))
+    }
+
     /// 🆕 SKILL MATCHING V2: Pure LLM-driven task processing
     ///
     /// Graceful degradation: if V2 analysis times out or fails, falls back to
     /// legacy path.
     async fn process_task_v2(&self, task: Task) -> Result<(String, Vec<Artifact>), AgentError> {
-        let _task_id = task.id.clone();
+        let task_id = task.id.clone();
         let message_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input)
         {
             json.get("message")
@@ -2201,7 +3544,10 @@ impl Agent {
         let is_confirmation = matches!(
             confirmation_text,
             "确认" | "同意" | "可以" | "执行" | "是" | "好" | "好的" | "确认执行"
-        ) || matches!(confirmation_lower.as_str(), "yes" | "y" | "ok" | "okay" | "confirm");
+        ) || matches!(
+            confirmation_lower.as_str(),
+            "yes" | "y" | "ok" | "okay" | "confirm"
+        );
 
         if is_confirmation {
             let mut approvals = self.pending_approvals.write().await;
@@ -2239,7 +3585,10 @@ impl Agent {
                                     .collect::<HashMap<_, _>>()
                             });
                             let confirmed_input = if !request.params.is_null()
-                                && request.params.as_object().map_or(false, |obj| !obj.is_empty())
+                                && request
+                                    .params
+                                    .as_object()
+                                    .map_or(false, |obj| !obj.is_empty())
                             {
                                 request.params.to_string()
                             } else if request.original_input.trim().is_empty() {
@@ -2260,29 +3609,11 @@ impl Agent {
                             match skill_result {
                                 Ok(result) => {
                                     let _ = registry.record_usage(&request.skill_id).await;
-                                    let mut output = self.synthesize_skill_output(
+                                    let output = self.synthesize_skill_output(
                                         &message_text,
                                         &result.output,
                                         &request.skill_id,
                                     );
-                                    if request.skill_id == "mcp:alpaca/place_crypto_order" {
-                                        if let Ok(positions) = self
-                                            .execute_skill_by_id(
-                                                "mcp:alpaca/get_all_positions",
-                                                "",
-                                                None,
-                                            )
-                                            .await
-                                        {
-                                            let formatted_positions = self.synthesize_skill_output(
-                                                "",
-                                                &positions.output,
-                                                "mcp:alpaca/get_all_positions",
-                                            );
-                                            output.push_str("\n\n");
-                                            output.push_str(&formatted_positions);
-                                        }
-                                    }
                                     return Ok((output, vec![]));
                                 }
                                 Err(e) => {
@@ -2296,255 +3627,514 @@ impl Agent {
             }
         }
 
-        // 🆕 UNIFIED REACT: No intent classification. All messages enter unified ReAct.
-        self.execute_unified_react(task).await
+        // Step 1: LLM Intent Analysis (zero hardcoded rules)
+        let intent_analyzer = self.llm_intent_analyzer.as_ref().ok_or_else(|| {
+            AgentError::InvalidConfig("LLM Intent Analyzer not configured".into())
+        })?;
+
+        let intent_v2 = match intent_analyzer.analyze(&message_text, None).await {
+            Ok(intent) => intent,
+            Err(e) => {
+                warn!(
+                    "V2 Intent analysis failed for task {} ({}), falling back to legacy path",
+                    task_id, e
+                );
+                return self.process_task_legacy(task).await;
+            }
+        };
+
+        info!(
+            "V2 Intent: direct_answer={}, needs_skill={}, needs_planning={}, confidence={:.2} for \
+             task {}",
+            intent_v2.direct_answer,
+            intent_v2.needs_skill,
+            intent_v2.needs_planning,
+            intent_v2.confidence,
+            task_id
+        );
+
+        // 🆕 FIX (Plan B): Skill introspection shortcut — when user asks about
+        // available skills, directly query the registry instead of relying on
+        // LLM knowledge (which is stale). This handles queries like
+        // "有哪些skills", "本机技能", "你有什么能力" etc.
+        let query_lower = message_text.to_lowercase();
+        let is_skill_query = query_lower.contains("skill")
+            || query_lower.contains("技能")
+            || query_lower.contains("有哪些能力")
+            || query_lower.contains("你能做什么")
+            || query_lower.contains("会什么")
+            || (query_lower.contains("有哪些")
+                && (query_lower.contains("功能") || query_lower.contains("工具")))
+            || query_lower.contains("list skills")
+            || query_lower.contains("available skills")
+            || query_lower.contains("what can you do");
+
+        if is_skill_query {
+            if let Some(ref registry) = self.skill_registry {
+                let skills = registry.list_enabled().await;
+                let mut lines = vec![
+                    format!("🛠️ 本机共有 {} 个可用技能 (enabled skills):", skills.len()),
+                    String::new(),
+                ];
+                for skill in &skills {
+                    let manifest = &skill.skill.manifest;
+                    lines.push(format!("• **{}** (`{}`)", skill.skill.name, skill.skill.id));
+                    if !manifest.description.is_empty() {
+                        lines.push(format!("  - {}", manifest.description));
+                    }
+                    if !manifest.capabilities.is_empty() {
+                        lines.push(format!("  - 能力: {}", manifest.capabilities.join(", ")));
+                    }
+                    lines.push(String::new());
+                }
+                let response = lines.join("\n");
+                info!(
+                    "Plan B: Skill introspection shortcut answered query with {} skills",
+                    skills.len()
+                );
+                return Ok((response, vec![]));
+            }
+        }
+
+        // Initialize trace for observability
+        let mut trace =
+            crate::skill_matching::SkillActivationTrace::new(&message_text, intent_v2.clone());
+
+        // Step 2: Route based on LLM intent (no hardcoded keyword matching)
+        let result = if intent_v2.direct_answer || !intent_v2.needs_skill {
+            // Direct answer path — no skill injection
+            self.handle_direct_answer(&task).await
+        } else {
+            // Step 3: Skill Selection (pure LLM-driven)
+            let selector = self
+                .skill_selector
+                .as_ref()
+                .ok_or_else(|| AgentError::InvalidConfig("Skill Selector not configured".into()))?;
+
+            let selection = match selector
+                .select(&message_text, &intent_v2.query_summary)
+                .await
+            {
+                Ok(sel) => sel,
+                Err(e) => {
+                    warn!(
+                        "V2 Skill selection failed for task {} ({}), continuing without skill \
+                         injection",
+                        task_id, e
+                    );
+                    // Fallback: proceed without skill hint, let LLM handle directly
+                    return self
+                        .handle_llm_task_v2(
+                            &task,
+                            &intent_v2,
+                            &crate::skill_matching::SkillSelection {
+                                selected_skill: None,
+                                selected_skill_name: None,
+                                needs_planning: intent_v2.needs_planning,
+                                confidence: 0.0,
+                                scores: Vec::new(),
+                                selection_reasoning: format!("Skill selection failed: {}", e),
+                                disclosure_level: crate::skills::registry::SkillDisclosureLevel::L0,
+                            },
+                        )
+                        .await;
+                }
+            };
+
+            info!(
+                "V2 Skill Selection: selected={:?}, confidence={:.2}, reasoning='{}'",
+                selection.selected_skill,
+                selection.confidence,
+                selection
+                    .selection_reasoning
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
+            );
+
+            // Update trace with retrieval and ranking results
+            let candidate_ids: Vec<String> = selection
+                .scores
+                .iter()
+                .map(|s| s.skill_id.clone())
+                .collect();
+            let recall_scores: Vec<(String, f32)> = selection
+                .scores
+                .iter()
+                .map(|s| (s.skill_id.clone(), s.overall_score))
+                .collect();
+            trace = trace.with_retrieval(crate::skill_matching::RetrievalTrace {
+                method: "registry_search".to_string(),
+                candidate_skills: candidate_ids,
+                recall_scores,
+            });
+            trace = trace.with_ranking(crate::skill_matching::RankingTrace {
+                llm_model: String::new(),
+                scores: selection.scores.clone(),
+                selected_skill: selection.selected_skill.clone(),
+                reasoning: selection.selection_reasoning.clone(),
+                confidence: selection.confidence,
+            });
+
+            // Step 4: Build task with skill hint if selected
+            let mut task = task;
+            if let Some(ref skill_id) = selection.selected_skill {
+                let registry = self.skill_registry.as_ref().ok_or_else(|| {
+                    AgentError::InvalidConfig("Skill registry not configured".into())
+                })?;
+
+                match registry.get(skill_id).await {
+                    Some(skill) => {
+                        let l3_doc = registry
+                            .get_skill_description(
+                                skill_id,
+                                crate::skills::registry::SkillDisclosureLevel::L3,
+                            )
+                            .await;
+
+                        // Inject skill hint into task input
+                        if let Ok(mut input_json) =
+                            serde_json::from_str::<serde_json::Value>(&task.input)
+                        {
+                            if let Some(obj) = input_json.as_object_mut() {
+                                obj.insert("skill_hint_v2".to_string(), serde_json::json!({
+                                    "id": skill_id,
+                                    "name": skill.skill.name,
+                                    "description": skill.skill.manifest.description,
+                                    "prompt_template": l3_doc.unwrap_or_else(|| skill.skill.manifest.prompt_template.clone()),
+                                    "confidence": selection.confidence,
+                                    "needs_planning": intent_v2.needs_planning || selection.needs_planning,
+                                }));
+                                task.input = input_json.to_string();
+                            }
+                        }
+                    }
+                    None => {
+                        warn!(
+                            "V2 Skill Selection: skill '{}' selected but not found in registry",
+                            skill_id
+                        );
+                    }
+                }
+            }
+
+            // Step 5: Route to handler based on planning need
+            let mut should_use_planning = intent_v2.needs_planning || selection.needs_planning;
+
+            // 🆕 FIX: If selected skill is a knowledge skill (no executable scripts),
+            // skip planning and execute it directly. Planning is only useful for
+            // multi-step code execution or skill composition.
+            if should_use_planning
+                && selection.selected_skill.is_some()
+                && selection.confidence >= 0.5
+            {
+                if let Some(ref registry) = self.skill_registry {
+                    if let Some(skill) = registry
+                        .get(selection.selected_skill.as_ref().unwrap())
+                        .await
+                    {
+                        let source = &skill.skill.source_path;
+                        let is_knowledge = !source.as_os_str().is_empty() && !source.is_dir();
+                        if is_knowledge {
+                            info!(
+                                "Selected skill '{}' is a knowledge skill (no scripts). Skipping \
+                                 planning and executing directly.",
+                                skill.skill.id
+                            );
+                            should_use_planning = false;
+                        }
+                    }
+                }
+            }
+
+            // 🆕 UNIFIED REACT: ReAct autonomous planning takes priority over
+            // traditional P2 Planning. All planning tasks are delegated to LLM
+            // self-decision (ReAct loop).
+            if self.should_use_react_planning(&message_text, &intent_v2, &selection) {
+                self.execute_with_react_planning(&task, &message_text, &intent_v2)
+                    .await
+            } else if should_use_planning {
+                self.execute_with_planning(task).await
+            } else {
+                self.handle_llm_task_v2(&task, &intent_v2, &selection).await
+            }
+        };
+
+        // Store trace for observability (fire-and-forget, don't fail the task)
+        if let Some(ref store) = self.trace_store {
+            if let Err(e) = store.store(&trace).await {
+                warn!("Failed to store skill activation trace: {}", e);
+            }
+        }
+
+        result
     }
 
     // =====================================================================
-    // 🆕 ROUTING V3: Single-skill direct execution
+    // 🆕 UNIFIED REACT: Autonomous Planning & Investment Analysis
     // =====================================================================
 
-
-    // =====================================================================
-    // 🆕 UNIFIED REACT V3: General-purpose ReAct (domain-agnostic)
-    // =====================================================================
-    // 🆕 UNIFIED REACT: Single entry point for all LlmChat tasks
-    // =====================================================================
-
-    /// 🆕 Unified ReAct entry: all user messages enter here.
-    /// No intent classification. Full skills (L1+L2) + all tools injected into context.
-    async fn execute_unified_react(
+    /// Determine whether a task should use the Unified ReAct executor
+    /// for autonomous multi-step planning instead of the static planning
+    /// engine.
+    fn should_use_react_planning(
         &self,
-        task: Task,
-    ) -> Result<(String, Vec<Artifact>), AgentError> {
-        let task_id = task.id.clone();
-        let message_text = Self::extract_user_input(&task);
-        let display_msg: String = message_text.chars().take(80).collect();
-        info!(
-            "Unified ReAct entry for task {}: {}",
-            task_id,
-            display_msg
-        );
+        message_text: &str,
+        intent: &crate::skill_matching::IntentAnalysisV2,
+        selection: &crate::skill_matching::SkillSelection,
+    ) -> bool {
+        let lower = message_text.to_lowercase();
 
-        // 1. Build full-context system prompt
-        let system_prompt = self.build_unified_react_prompt(&task).await?;
+        // Trigger 1: User explicitly asks for analysis / advice
+        let analysis_keywords = [
+            "分析",
+            "走势",
+            "能不能买",
+            "能不能卖",
+            "建议",
+            "怎么看",
+            "值得买",
+            "值得投",
+            "抄底",
+            "逃顶",
+            "预测",
+            "前景",
+            "analyze",
+            "analysis",
+            "trend",
+            "should i buy",
+            "should i sell",
+            "advice",
+            "recommend",
+            "outlook",
+            "forecast",
+        ];
+        let has_analysis_keyword = analysis_keywords.iter().any(|kw| lower.contains(kw));
 
-        // 2. Build all available tools (builtin)
-        let mut tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
-        tools.insert(
-            "skill_call".to_string(),
-            Box::new(crate::skills::SkillCallDescriptorTool),
-        );
-        tools.insert(
-            "parallel_delegate".to_string(),
-            Box::new(crate::skills::ParallelDelegateDescriptorTool),
-        );
-        if tools.is_empty() {
-            warn!("Unified ReAct: no tools available for task {}", task_id);
+        // Trigger 2: Selected skill is crypto/finance related
+        let selected_crypto = selection.selected_skill.as_ref().map_or(false, |id| {
+            let id_lower = id.to_lowercase();
+            id_lower.contains("crypto")
+                || id_lower.contains("trade")
+                || id_lower.contains("alpaca")
+                || id_lower.contains("finance")
+                || id_lower.contains("invest")
+                || id_lower.contains("stock")
+                || id_lower.contains("btc")
+                || id_lower.contains("eth")
+        });
+
+        // Trigger 3: User input contains crypto symbols
+        let crypto_symbols = [
+            "btc",
+            "bitcoin",
+            "比特币",
+            "eth",
+            "ethereum",
+            "以太坊",
+            "sol",
+            "xrp",
+            "doge",
+            "加密货币",
+            "crypto",
+            "数字货币",
+        ];
+        let has_crypto_symbol = crypto_symbols.iter().any(|sym| lower.contains(sym));
+
+        // Trigger 4: Intent indicates multi-step data gathering
+        let is_multi_step =
+            intent.needs_planning || intent.intent == crate::intent::UserIntent::MultiStepPlanning;
+
+        // 🆕 FIX: ReAct triggers for ANY crypto-related multi-step task,
+        // regardless of whether an analysis keyword is present.
+        // This ensures "帮我开一单BTC" (no analysis keyword) still routes to ReAct.
+        let use_react = has_crypto_symbol && (has_analysis_keyword || is_multi_step);
+
+        if use_react {
+            info!(
+                "Unified ReAct: triggered for message='{}' (analysis_kw={}, selected_crypto={}, \
+                 crypto_sym={}, multi_step={})",
+                message_text.chars().take(40).collect::<String>(),
+                has_analysis_keyword,
+                selected_crypto,
+                has_crypto_symbol,
+                is_multi_step
+            );
         }
 
-        // 3. Get cancellation receiver
-        let cancel_key = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
-            json.get("db_session_id")
-                .and_then(|v| v.as_str())
-                .or_else(|| json.get("session_id").and_then(|v| v.as_str()))
-                .unwrap_or(&task_id)
-                .to_string()
-        } else {
-            task_id.clone()
-        };
-        let cancel_rx = crate::session_cancellation::get_receiver(&cancel_key).await;
+        use_react
+    }
 
-        // 4. Execute ReAct loop
+    /// Execute a task using the Unified ReAct executor with autonomous
+    /// planning.
+    async fn execute_with_react_planning(
+        &self,
+        task: &Task,
+        message_text: &str,
+        intent: &crate::skill_matching::IntentAnalysisV2,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        let task_id = task.id.clone();
+        info!(
+            "Unified ReAct: executing task {} with autonomous planning",
+            task_id
+        );
+
+        // Step 1: Get LLM interface
         let llm = self
             .llm_interface
             .clone()
             .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
 
-        let skill_dispatcher = std::sync::Arc::new(
-            AgentSkillDispatcher::from_agent(self).with_user_request(message_text.clone()),
-        );
-        let mut executor = crate::skills::UnifiedReActExecutor::new(llm)
-            .with_config(crate::skills::UnifiedReActConfig {
-                max_rounds: self.max_rounds as usize,
-                round_timeout_sec: 30,
-                enable_reflection: true,
-                require_structured_output: false,
-                cancel_rx,
-                stream_tx: task.stream_tx.clone(),
-            })
-            .with_tool_dispatcher(skill_dispatcher);
+        // Step 2: Build analysis tools (MCP crypto tools + computed indicators)
+        let tools =
+            crate::skills::investment_analysis::build_analysis_tools(self.mcp_manager.as_deref())
+                .await;
 
-        // Attach skill registry for on-demand L3 injection
-        if let Some(ref registry) = self.skill_registry {
-            executor = executor.with_skill_registry(registry.clone());
+        if tools.is_empty() {
+            warn!("Unified ReAct: no analysis tools available, falling back to direct LLM answer");
+            return Box::pin(self.handle_direct_answer(task)).await;
         }
 
-        let react_result = executor.execute(&system_prompt, &message_text, &tools).await;
+        // Step 3: Build user context (risk level, positions, emotional state, etc.)
+        let user_risk_level = "moderate"; // TODO: load from user profile
+        let user_positions = "未知"; // TODO: load from user portfolio
+        let emotional_state = if message_text.contains("慌") || message_text.contains("怕") {
+            "焦虑"
+        } else if message_text.contains("追") || message_text.contains("错过") {
+            "FOMO"
+        } else {
+            "理性"
+        };
+        let preferences = "偏好技术指标: RSI, MACD, 布林带"; // TODO: load from user profile
+        let psychological_prices = "暂无记录"; // TODO: load from memory
+
+        // Step 4: Build the investment analysis System Prompt
+        let system_prompt = crate::skills::investment_analysis::build_investment_analysis_prompt(
+            &tools,
+            user_risk_level,
+            user_positions,
+            emotional_state,
+            preferences,
+            psychological_prices,
+        );
+
+        // Step 5: Execute the ReAct loop
+        let executor = crate::skills::UnifiedReActExecutor::new(llm).with_config(
+            crate::skills::UnifiedReActConfig {
+                max_rounds: crate::react_trace::clamp_react_max_tool_rounds(self.max_rounds)
+                    as usize,
+                round_timeout_sec: 30,
+                enable_reflection: true,
+                require_structured_output: true,
+                cancel_rx: None,
+                stream_tx: None,
+            },
+        );
+
+        let react_result = executor.execute(&system_prompt, message_text, &tools).await;
 
         match react_result {
-            Ok(content) => {
+            Ok(raw_content) => {
                 info!(
                     "Unified ReAct: task {} completed, result length={}",
                     task_id,
-                    content.len()
+                    raw_content.len()
                 );
-                Ok((content, vec![]))
+
+                // Step 6: Post-process the final answer (safety checks)
+                let mut processed =
+                    match crate::skills::investment_analysis::post_process_final_answer(
+                        &raw_content,
+                        user_risk_level,
+                    ) {
+                        Ok(report_json) => {
+                            // Step 7: Format as user-friendly Markdown
+                            let formatted =
+                                match crate::skills::investment_analysis::format_report_for_user(
+                                    &report_json,
+                                ) {
+                                    Ok(formatted) => formatted,
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to format report: {}. Returning raw JSON.",
+                                            e
+                                        );
+                                        report_json.clone()
+                                    }
+                                };
+
+                            // 🆕 FIX: If user originally requested a trade, try to extract
+                            // trade_request from the ReAct report and trigger execution.
+                            let trade_keywords = [
+                                "开单", "下单", "买入", "卖出", "交易", "买", "卖", "order", "buy",
+                                "sell", "place", "trade",
+                            ];
+                            let has_trade_intent = trade_keywords
+                                .iter()
+                                .any(|kw| message_text.to_lowercase().contains(kw));
+                            if has_trade_intent {
+                                if let Ok(report) = serde_json::from_str::<
+                                crate::skills::investment_analysis::types::InvestmentAnalysisReport,
+                            >(&report_json)
+                            {
+                                if let Some(trade_req) = report.trade_request {
+                                    info!(
+                                        "ReAct report contains trade_request: {:?} for task {}",
+                                        trade_req, task_id
+                                    );
+                                    // Build natural-language input for parameter extraction
+                                    let trade_input = format!(
+                                        "{}，{}，{} USD",
+                                        trade_req.symbol,
+                                        trade_req.side,
+                                        trade_req.notional.unwrap_or_else(|| trade_req.qty.clone().unwrap_or_default())
+                                    );
+                                    // Trigger trade skill execution (will go through approval gate)
+                                    match self.execute_skill_by_id(
+                                        "mcp:alpaca/place_crypto_order",
+                                        &trade_input,
+                                        None,
+                                    )
+                                    .await
+                                    {
+                                        Ok(skill_result) => {
+                                            let mut combined = formatted;
+                                            combined.push('\n');
+                                            combined.push_str("---");
+                                            combined.push('\n');
+                                            combined.push_str(&skill_result.output);
+                                            return Ok((combined, vec![]));
+                                        }
+                                        Err(e) => {
+                                            warn!("Trade execution after ReAct failed: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            }
+
+                            formatted
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Post-processing failed for task {}: {}. Returning raw LLM output.",
+                                task_id, e
+                            );
+                            raw_content
+                        }
+                    };
+
+                Ok((processed, vec![]))
             }
             Err(e) => {
-                warn!("Unified ReAct: task {} failed: {}", task_id, e);
-                Err(e)
+                warn!(
+                    "Unified ReAct: task {} failed: {}. Falling back to direct answer.",
+                    task_id, e
+                );
+                Box::pin(self.handle_direct_answer(task)).await
             }
         }
     }
-
-    /// 🆕 Build unified ReAct system prompt with full context injection.
-    async fn build_unified_react_prompt(&self, task: &Task) -> Result<String, AgentError> {
-        let model_name = self.config.models.model.clone();
-        let mut builder = crate::prompt::PromptBuilder::new()
-            .with_model(&model_name);
-
-        // Base persona
-        let persona = format!(
-            "You are {} ({}). Please remain friendly, professional, and helpful when answering \
-             questions.",
-            self.config.name, self.config.description
-        );
-        builder = builder.with_soul(persona);
-
-        // Dynamic memories (all, no intent filtering)
-        if let Some(memory_system) = &self.memory_system {
-            let search_results = memory_system.search(&task.input).await?;
-            let memories: Vec<crate::memory::MemoryEntry> = search_results
-                .into_iter()
-                .map(|r| crate::memory::MemoryEntry {
-                    id: r.id,
-                    content: r.content,
-                    timestamp: chrono::Utc::now(),
-                    metadata: std::collections::HashMap::new(),
-                })
-                .collect();
-            builder = builder.with_memories(memories);
-        }
-
-        // Skills — L1 + L2 hierarchical (all skills)
-        let skill_levels = self.build_all_skills_levels().await?;
-        builder = builder.with_skills(skill_levels);
-
-        // Tools — all available tools
-        let tool_defs = self.build_all_tool_definitions().await?;
-        builder = builder.with_tools(tool_defs);
-
-        // Model-specific instructions
-        let model_instr = match model_name.as_str() {
-            m if m.contains("kimi") => crate::prompt::model_presets::kimi_k26().to_string(),
-            m if m.contains("gpt") => crate::prompt::model_presets::gpt4o().to_string(),
-            m if m.contains("claude") => crate::prompt::model_presets::claude3().to_string(),
-            _ => String::new(),
-        };
-        if !model_instr.is_empty() {
-            builder = builder.with_model_instructions(model_instr);
-        }
-
-        Ok(builder.build_unified_react())
-    }
-
-    /// 🆕 Build all skills at L1 + L2 levels (L3 excluded, injected on-demand).
-    async fn build_all_skills_levels(&self) -> Result<Vec<crate::prompt::SkillLevelDesc>, AgentError> {
-        let registry = self.skill_registry.as_ref()
-            .ok_or_else(|| AgentError::InvalidConfig("Skill registry not configured".into()))?;
-
-        let mut skills = Vec::new();
-        let all_skills = registry.list_all().await;
-
-        for skill in all_skills {
-            // L1: always inject
-            let l1_text = skill.l1_index.clone()
-                .or_else(|| Some(format!(
-                    "{}: {}",
-                    skill.skill.name,
-                    skill.skill.manifest.description.chars().take(80).collect::<String>()
-                )))
-                .unwrap_or_default();
-            skills.push(crate::prompt::SkillLevelDesc::L1 {
-                id: skill.skill.id.clone(),
-                name: skill.skill.name.clone(),
-                one_liner: l1_text,
-            });
-
-            // L2: inject if available
-            if let Some(summary) = skill.l2_summary.clone() {
-                skills.push(crate::prompt::SkillLevelDesc::L2 {
-                    id: skill.skill.id.clone(),
-                    name: skill.skill.name.clone(),
-                    summary,
-                });
-            }
-        }
-
-        Ok(skills)
-    }
-
-    /// 🆕 Build all builtin tool definitions for prompt injection.
-    /// MCP tools are invoked via `skill_call`, so they are listed in the skills section.
-    async fn build_all_tool_definitions(&self) -> Result<Vec<crate::prompt::ToolDefinition>, AgentError> {
-        let mut defs = Vec::new();
-
-        let builtin = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
-        for (name, tool) in builtin {
-            defs.push(crate::prompt::ToolDefinition {
-                name,
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            });
-        }
-
-        // skill_call and parallel_delegate are meta-tools for invoking skills
-        defs.push(crate::prompt::ToolDefinition {
-            name: "skill_call".to_string(),
-            description: "调用已注册的技能或 MCP 技能。参数: skill_id (string), params (object)".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "skill_id": { "type": "string", "description": "技能 ID，如 mcp:alpaca/place_crypto_order" },
-                    "params": { "type": "object", "description": "技能参数" }
-                },
-                "required": ["skill_id"]
-            }),
-        });
-        defs.push(crate::prompt::ToolDefinition {
-            name: "parallel_delegate".to_string(),
-            description: "并行执行多个独立子任务。参数: branches (array of {id, task, skill_id, input, params})".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "branches": { "type": "array", "description": "并行分支列表" }
-                },
-                "required": ["branches"]
-            }),
-        });
-
-        Ok(defs)
-    }
-
-    /// Extract user input text from task
-    pub fn extract_user_input(task: &Task) -> String {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
-            json.get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or(&task.input)
-                .to_string()
-        } else {
-            task.input.clone()
-        }
-    }
-
-
-    // =====================================================================
-    // 🆕 UNIFIED REACT: Autonomous Planning & Investment Analysis (legacy)
-    // =====================================================================
-
-
 
     /// 🆕 MCP PARAMETER EXTRACTION: Handle structured form submission.
     async fn handle_form_submission(
@@ -2732,17 +4322,75 @@ impl Agent {
         Ok(("找不到对应的技能，请重新发起请求。".to_string(), vec![]))
     }
 
+    /// 🆕 SKILL MATCHING V2: Handle LLM task with V2 intent + skill selection
+    async fn handle_llm_task_v2(
+        &self,
+        task: &Task,
+        intent: &crate::skill_matching::IntentAnalysisV2,
+        _selection: &crate::skill_matching::SkillSelection,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        // Convert V2 types to legacy types for handler compatibility
+        let legacy_intent =
+            crate::intent::IntentAnalysis::new(intent.intent.clone(), intent.confidence)
+                .with_entities(intent.entities.clone())
+                .with_constraints(intent.constraints.clone());
+
+        self.handle_llm_task_with_intent(task, &legacy_intent).await
+    }
 
     /// Legacy task processing path (preserved for backward compatibility)
     async fn process_task_legacy(&self, task: Task) -> Result<(String, Vec<Artifact>), AgentError> {
         let task_id = task.id.clone();
 
+        // 🆕 OPTIMIZATION PHASE 1: Intent Engine前置 — 基于实际消息内容分类意图
+        let intent_analysis = if matches!(task.task_type, TaskType::LlmChat | TaskType::Custom(_)) {
+            let message_text =
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+                    json.get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or(&task.input)
+                        .to_string()
+                } else {
+                    task.input.clone()
+                };
+            self.classify_intent(&message_text).await
+        } else {
+            crate::intent::IntentAnalysis::new(crate::intent::UserIntent::SingleToolCall, 0.8)
+        };
+
+        info!(
+            "Intent classified as {:?} (confidence: {:.2}) for task {}",
+            intent_analysis.intent, intent_analysis.confidence, task_id
+        );
+
         match &task.task_type {
             TaskType::LlmChat => {
-                // 🆕 UNIFIED REACT: All LlmChat tasks go through unified ReAct.
-                // Intent classification is removed; LLM decides tool usage inside ReAct.
-                info!("Unified ReAct routing for legacy LlmChat task {}", task_id);
-                self.execute_unified_react(task).await
+                // 🆕 OPTIMIZATION: Route based on intent classification
+                match intent_analysis.intent {
+                    crate::intent::UserIntent::DirectAnswer => {
+                        // Skip tool injection, direct LLM answer — saves 5k-10k tokens
+                        self.handle_direct_answer(&task).await
+                    }
+                    crate::intent::UserIntent::MetaQuestion => {
+                        // Skip LLM, directly return skill registry info
+                        self.handle_meta_question(&task).await
+                    }
+                    crate::intent::UserIntent::Correction => {
+                        // Handle correction/modification of previous behavior
+                        self.handle_correction(&task, &intent_analysis).await
+                    }
+                    crate::intent::UserIntent::WorkflowTrigger => {
+                        self.handle_workflow_task(&task).await
+                    }
+                    crate::intent::UserIntent::MultiStepPlanning => {
+                        // 🆕 FIX: Legacy P2 Planning replaced by Unified ReAct.
+                        self.execute_with_planning(task).await
+                    }
+                    crate::intent::UserIntent::SingleToolCall => {
+                        self.handle_llm_task_with_intent(&task, &intent_analysis)
+                            .await
+                    }
+                }
             }
             TaskType::SkillExecution => self.handle_skill_task(&task).await,
             TaskType::McpTool => self.handle_mcp_task(&task).await,
@@ -2756,18 +4404,1972 @@ impl Agent {
             TaskType::AppLifecycle => self.handle_app_lifecycle_task(&task).await,
             TaskType::WorkflowExecution => self.handle_workflow_task(&task).await,
             TaskType::Custom(type_name) => {
-                // 🆕 UNIFIED REACT: All custom tasks route through unified ReAct.
-                info!("Unified ReAct routing for custom task '{}'", type_name);
-                self.execute_unified_react(task).await
+                // 🆕 FIX: All custom planning tasks route through Unified ReAct.
+                if self.should_use_planning(&task).await {
+                    self.execute_with_planning(task).await
+                } else {
+                    warn!("Unknown custom task type: {}", type_name);
+                    Err(AgentError::InvalidConfig(format!(
+                        "Unsupported task type: {}",
+                        type_name
+                    )))
+                }
             }
         }
     }
 
+    /// 🆕 OPTIMIZATION PHASE 1: Handle direct answer intents — no tool
+    /// injection, saves tokens 🆕 FIX: Safety net — queries that need
+    /// real-time data (weather, crypto, stock) are
+    /// routed to skill-injection path instead of pure direct answer, preventing
+    /// stale/fabricated data.
+    async fn handle_direct_answer(
+        &self,
+        task: &Task,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        info!("Direct answer path (no tools) for task {}", task.id);
 
+        let input_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+            json.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or(&task.input)
+                .to_string()
+        } else {
+            task.input.clone()
+        };
+        let lower = input_text.to_lowercase();
 
+        let skip_direct_answer_reroute = task
+            .parameters
+            .get("_skip_direct_answer")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        if !skip_direct_answer_reroute
+            && self
+                .llm_interface
+                .as_ref()
+                .map_or(false, |llm| llm.supports_native_tools())
+        {
+            let mut tool_task = task.clone();
+            tool_task
+                .parameters
+                .insert("_skip_direct_answer".to_string(), "true".to_string());
+            let intent =
+                crate::intent::IntentAnalysis::new(crate::intent::UserIntent::DirectAnswer, 0.8);
+            return Box::pin(self.handle_llm_task_with_intent(&tool_task, &intent)).await;
+        }
 
+        // Safety net: real-time data queries must go through skill injection
+        let needs_realtime_data = lower.contains("天气")
+            || lower.contains("weather")
+            || lower.contains("temperature")
+            || lower.contains("气温")
+            || lower.contains("预报")
+            || lower.contains("forecast")
+            || lower.contains("btc")
+            || lower.contains("比特币")
+            || lower.contains("eth")
+            || lower.contains("以太坊")
+            || lower.contains("crypto")
+            || lower.contains("加密货币")
+            || lower.contains("股价")
+            || lower.contains("股票")
+            || lower.contains("stock price")
+            || lower.contains("aapl")
+            || lower.contains("tsla")
+            || lower.contains("行情")
+            || lower.contains("价格");
 
+        let skip_routing = task
+            .parameters
+            .get("_skip_planning")
+            .map(|v| v == "true")
+            .unwrap_or(false);
 
+        if !skip_routing && needs_realtime_data {
+            info!(
+                "Direct answer intercepted for real-time data query: '{}'",
+                input_text
+            );
+            let legacy_intent =
+                crate::intent::IntentAnalysis::new(crate::intent::UserIntent::SingleToolCall, 0.75)
+                    .with_toolsets(vec![
+                        "weather".to_string(),
+                        "crypto-data".to_string(),
+                        "stock-data".to_string(),
+                    ]);
+            return Box::pin(self.handle_llm_task_with_intent(task, &legacy_intent)).await;
+        }
+
+        let llm = self
+            .llm_interface
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
+
+        let messages = vec![
+            communication::Message::new(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                format!(
+                    "You are {} ({}). Please remain friendly, professional, and helpful when \
+                     answering questions.",
+                    self.config.name, self.config.description
+                ),
+            ),
+            communication::Message::new(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                format!("用户: {}", input_text),
+            ),
+        ];
+
+        // 🆕 FIX: Limit max_tokens to 1024 for direct answers to prevent
+        // Kimi k2.6 thinking mode from generating excessive reasoning tokens.
+        let mut context = std::collections::HashMap::new();
+        context.insert("max_tokens".to_string(), "1024".to_string());
+
+        let response = llm
+            .call_llm(messages, Some(context))
+            .await
+            .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?;
+
+        Ok((response, vec![]))
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 1: Handle meta questions — return skill info
+    /// directly
+    async fn handle_meta_question(
+        &self,
+        task: &Task,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        info!("Meta question path for task {}", task.id);
+        let registry = self
+            .skill_registry
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("Skill registry not configured".into()))?;
+
+        let skills = registry.list_enabled().await;
+        let skill_list: Vec<String> = skills
+            .iter()
+            .map(|s| {
+                format!(
+                    "- {}: {}",
+                    s.skill.name,
+                    s.skill
+                        .manifest
+                        .description
+                        .chars()
+                        .take(60)
+                        .collect::<String>()
+                )
+            })
+            .collect();
+
+        let response = format!(
+            "我是 {}，目前可用的技能包括：\n\n{}\n\n您可以直接描述需求，\
+             我会自动调用合适的技能来帮您完成。",
+            self.config.name,
+            skill_list.join("\n")
+        );
+
+        Ok((response, vec![]))
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 1: Handle correction intents
+    async fn handle_correction(
+        &self,
+        task: &Task,
+        intent: &crate::intent::IntentAnalysis,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        info!(
+            "Correction path for task {}: constraints={:?}",
+            task.id, intent.constraints
+        );
+        // For now, treat correction as a direct LLM task with context about constraints
+        // In a full implementation, this would modify/undo previous actions
+        let input_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+            json.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or(&task.input)
+                .to_string()
+        } else {
+            task.input.clone()
+        };
+
+        let llm = self
+            .llm_interface
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
+
+        let constraint_text = if intent.constraints.is_empty() {
+            "用户要求修改或撤销之前的操作。".to_string()
+        } else {
+            format!("用户约束: {}", intent.constraints.join(", "))
+        };
+
+        let messages = vec![
+            communication::Message::new(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                format!("{}", constraint_text),
+            ),
+            communication::Message::new(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                format!("用户: {}", input_text),
+            ),
+        ];
+
+        let response = llm
+            .call_llm(messages, None)
+            .await
+            .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?;
+
+        Ok((response, vec![]))
+    }
+
+    /// 🆕 OPTIMIZATION PHASE 1: Handle LLM task with intent-aware tool
+    /// filtering
+    async fn handle_llm_task_with_intent(
+        &self,
+        task: &Task,
+        intent: &crate::intent::IntentAnalysis,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        Box::pin(self.handle_llm_task_internal(task, Some(intent))).await
+    }
+
+    /// Original handle_llm_task — delegates to internal implementation
+    #[allow(dead_code)]
+    async fn handle_llm_task(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {
+        self.handle_llm_task_internal(task, None).await
+    }
+
+    /// Internal LLM task handler with optional intent for tool filtering
+    async fn handle_llm_task_internal(
+        &self,
+        task: &Task,
+        intent_opt: Option<&crate::intent::IntentAnalysis>,
+    ) -> Result<(String, Vec<Artifact>), AgentError> {
+        // 🆕 PLANNING FIX: 基于实际消息内容判断复杂度，复杂任务使用 planning 执行
+        let (message_text, skill_hint) =
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+                let msg = json
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| task.input.clone());
+                // 🆕 SKILL MATCHING V2: Check for skill_hint_v2 first, fallback to skill_hint
+                let hint = json
+                    .get("skill_hint_v2")
+                    .cloned()
+                    .or_else(|| json.get("skill_hint").cloned());
+                (msg, hint)
+            } else {
+                (task.input.clone(), None)
+            };
+
+        let char_count = message_text.chars().count();
+        let has_explicit_planning_param = task.parameters.contains_key("multi_step")
+            || task.parameters.contains_key("dependencies")
+            || task.parameters.contains_key("plan");
+
+        // 🆕 FIX: 优化 planning 触发条件，适配中文场景
+        // 1. 明确标记的参数总是触发
+        // 2. 中等文本(>50字)且含规划关键词，或含多步骤连接词(先...再...然后)
+        // 3. 较长文本(>120字)默认触发
+        // 4. 英文场景保持原阈值(>200 chars)
+        let has_planning_keywords = message_text.contains("计划")
+            || message_text.contains("步骤")
+            || message_text.contains("安排")
+            || message_text.contains("规划")
+            || message_text.contains("方案")
+            || message_text.contains("攻略")
+            || message_text.contains("流程");
+        let has_multi_step_indicators = (message_text.contains("先")
+            || message_text.contains("首先"))
+            && (message_text.contains("再")
+                || message_text.contains("然后")
+                || message_text.contains("最后")
+                || message_text.contains("接着"));
+
+        // 中文文本密度高，适当降低阈值
+        let is_chinese = message_text
+            .chars()
+            .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+        let planning_threshold = if is_chinese { 50 } else { 120 };
+        let long_threshold = if is_chinese { 120 } else { 300 };
+
+        // 🆕 FIX: 强规划关键词（如"计划"/"规划"/"攻略"）即使短文本也应触发 planning，
+        // 避免"去汕头市旅游五天的计划"（14字）因低于50字阈值而被误判为简单查询。
+        // 设置 6 字符下限防止单字误触发（如"计"）。
+        // 🆕 SKILL MATCHING V2: Removed hardcoded generative skill exclusions.
+        // Planning need is determined by the query semantics, not skill name keywords.
+
+        let is_complex = has_explicit_planning_param
+            || (has_planning_keywords && char_count >= 6)
+            || has_multi_step_indicators
+            || (char_count > planning_threshold
+                && (has_planning_keywords || has_multi_step_indicators))
+            || char_count > long_threshold;
+
+        let skip_planning = task
+            .parameters
+            .get("_skip_planning")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        if !skip_planning && is_complex {
+            info!(
+                "🧠 Complex LLM task detected (message length: {}), using Unified ReAct for task \
+                 {}",
+                message_text.len(),
+                task.id
+            );
+            return Box::pin(self.execute_with_planning(task.clone())).await;
+        }
+
+        // 🆕 P2 FIX: Auto-pipeline detection for multi-step skill chaining
+        if let Some(pipeline) = self.try_build_auto_pipeline(&message_text).await {
+            info!(
+                "🔄 Auto-pipeline detected for task {}, executing {} steps",
+                task.id,
+                pipeline.steps.len()
+            );
+            match pipeline.execute(&message_text, self).await {
+                Ok(result) => {
+                    return Ok((
+                        result.clone(),
+                        vec![Artifact {
+                            id: task.id.clone(),
+                            artifact_type: "pipeline_result".to_string(),
+                            content: result.as_bytes().to_vec(),
+                            mime_type: "text/plain".to_string(),
+                        }],
+                    ));
+                }
+                Err(e) => {
+                    warn!(
+                        "Auto-pipeline execution failed for task {}: {}, falling back to LLM",
+                        task.id, e
+                    );
+                }
+            }
+        }
+
+        let llm = self
+            .llm_interface
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("LLM interface not configured".into()))?;
+
+        // Parse structured input JSON to extract current message and context metadata
+        let (
+            input_text,
+            mut extra_params,
+            image_urls,
+            history,
+            gateway_memory_context,
+            weather_data,
+        ) = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&task.input) {
+            let message = json
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or(&task.input)
+                .to_string();
+            let mut params = task.parameters.clone();
+            if let Some(platform) = json.get("platform").and_then(|p| p.as_str()) {
+                params.insert("platform".to_string(), platform.to_string());
+            }
+            if let Some(channel_id) = json.get("channel_id").and_then(|c| c.as_str()) {
+                params.insert("channel_id".to_string(), channel_id.to_string());
+            }
+            if let Some(user_id) = json.get("user_id").and_then(|u| u.as_str()) {
+                params.insert("user_id".to_string(), user_id.to_string());
+            }
+            if let Some(session_id) = json.get("session_id").and_then(|s| s.as_str()) {
+                params.insert("session_id".to_string(), session_id.to_string());
+            }
+            let images: Vec<String> = json
+                .get("images")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let history: Vec<(String, String)> = json
+                .get("history")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            let role = v.get("role").and_then(|r| r.as_str())?;
+                            let content = v.get("content").and_then(|c| c.as_str())?;
+                            Some((role.to_string(), content.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let memory_context = json
+                .get("memory_context")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string());
+            let weather_data = json
+                .get("weather_data")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string());
+            (
+                message,
+                params,
+                images,
+                history,
+                memory_context,
+                weather_data,
+            )
+        } else {
+            (
+                task.input.clone(),
+                task.parameters.clone(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            )
+        };
+
+        let mut metadata = std::collections::HashMap::new();
+        if !image_urls.is_empty() {
+            metadata.insert(
+                "image_urls".to_string(),
+                serde_json::to_string(&image_urls).unwrap_or_default(),
+            );
+        }
+
+        // 🆕 FIX: When gateway has already matched a skill, execute it directly.
+        // This bypasses the LLM call for MCP tools and other registered skills that
+        // the gateway has confidently matched.
+        if let Some(ref hint) = skill_hint {
+            if let Some(skill_id) = hint.get("id").and_then(|v| v.as_str()) {
+                // Try registry first
+                let registry_result = if let Some(ref registry) = self.skill_registry {
+                    registry.get(skill_id).await
+                } else {
+                    None
+                };
+
+                if let Some(registered) = registry_result {
+                    info!(
+                        "Gateway matched skill '{}', executing directly without LLM call",
+                        skill_id
+                    );
+                    // 🆕 FIX: Enrich input with gateway-provided context (weather_data, etc.)
+                    let mut enriched_input = if let Some(ref weather) = weather_data {
+                        if !weather.is_empty() {
+                            format!(
+                                "{}\n\n[参考数据] 实时天气：{}\n请基于以上数据回答。",
+                                input_text, weather
+                            )
+                        } else {
+                            input_text.clone()
+                        }
+                    } else {
+                        input_text.clone()
+                    };
+
+                    // 🆕 FIX: Inject conversation history into knowledge skill input so
+                    // multi-turn skills (e.g. Travel Planner) can see the full context.
+                    // Without this, the skill only sees the current message and asks for
+                    // information the user already provided in earlier turns.
+                    if !history.is_empty() {
+                        let mut context = String::new();
+                        for (role, content) in &history {
+                            let prefix = match role.as_str() {
+                                "user" => "用户",
+                                "assistant" => "助手",
+                                "system" => "系统",
+                                _ => &role,
+                            };
+                            context.push_str(&format!("{}: {}\n", prefix, content));
+                        }
+                        context.push_str(&format!("用户: {}\n", enriched_input));
+                        enriched_input = context;
+                    }
+
+                    let skill_result = self
+                        .execute_registered_skill(&registered, &enriched_input, None)
+                        .await;
+                    match skill_result {
+                        Ok(result) => {
+                            if let Some(ref registry) = self.skill_registry {
+                                let _ = registry.record_usage(skill_id).await;
+                            }
+                            let output =
+                                self.synthesize_skill_output(&input_text, &result.output, skill_id);
+                            return Ok((output, vec![]));
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            // 🆕 FIX: If direct execution failed due to missing arguments,
+                            // fall back to LLM so it can extract parameters from natural language.
+                            if err_str.contains("Missing required parameter")
+                                || err_str.contains("argument validation failed")
+                                || err_str.contains("Unknown parameter")
+                            {
+                                warn!(
+                                    "Direct skill execution for '{}' failed due to args issue, \
+                                     falling back to LLM: {}",
+                                    skill_id, e
+                                );
+                                // Continue to LLM path below instead of
+                                // returning error
+                            } else {
+                                warn!("Direct skill execution for '{}' failed: {}", skill_id, e);
+                                return Ok((
+                                    format!("执行 skill '{}' 时出错: {}", skill_id, e),
+                                    vec![],
+                                ));
+                            }
+                        }
+                    }
+                } else if let Some((server_name, tool_name)) =
+                    crate::mcp::skill_bridge::parse_mcp_skill_id(skill_id)
+                {
+                    // 🆕 FIX: Fallback for MCP skills not found in registry.
+                    // Execute directly via MCP manager without requiring registry entry.
+                    info!(
+                        "Gateway matched MCP skill '{}' not in registry, executing directly via \
+                         MCP client",
+                        skill_id
+                    );
+                    if let Some(ref mcp) = self.mcp_manager {
+                        if let Some(client) = mcp.get_client(server_name).await {
+                            let mut arguments = serde_json::Map::new();
+                            if !input_text.is_empty() {
+                                match serde_json::from_str::<
+                                    serde_json::Map<String, serde_json::Value>,
+                                >(&input_text)
+                                {
+                                    Ok(map) => arguments = map,
+                                    Err(_) => {
+                                        arguments.insert(
+                                            "query".to_string(),
+                                            serde_json::Value::String(input_text.to_string()),
+                                        );
+                                    }
+                                }
+                            }
+                            let args = if arguments.is_empty() {
+                                None
+                            } else {
+                                Some(arguments)
+                            };
+                            match client.call_tool(tool_name, args).await {
+                                Ok(result) => {
+                                    let output = if result.is_error {
+                                        let error_text = result
+                                            .content
+                                            .iter()
+                                            .filter_map(|c| match c {
+                                                crate::mcp::types::ToolContent::Text { text } => {
+                                                    Some(text.clone())
+                                                }
+                                                _ => None,
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        return Ok((
+                                            format_mcp_call_error(skill_id, &error_text),
+                                            vec![],
+                                        ));
+                                    } else {
+                                        result
+                                            .content
+                                            .iter()
+                                            .filter_map(|c| match c {
+                                                crate::mcp::types::ToolContent::Text { text } => {
+                                                    Some(text.clone())
+                                                }
+                                                _ => None,
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    };
+                                    let output = self.synthesize_skill_output(
+                                        &input_text,
+                                        &output,
+                                        skill_id,
+                                    );
+                                    return Ok((output, vec![]));
+                                }
+                                Err(e) => {
+                                    warn!("Direct MCP tool call for '{}' failed: {}", skill_id, e);
+                                    return Ok((
+                                        format_mcp_call_error(skill_id, &e.to_string()),
+                                        vec![],
+                                    ));
+                                }
+                            }
+                        } else {
+                            warn!(
+                                "MCP client '{}' not found for skill '{}'",
+                                server_name, skill_id
+                            );
+                        }
+                    } else {
+                        warn!("MCP manager not configured for skill '{}'", skill_id);
+                    }
+                } else {
+                    warn!(
+                        "Gateway matched skill '{}' but not found in registry",
+                        skill_id
+                    );
+                }
+            }
+        }
+
+        // Build message list with memory context, history, and current message
+        let mut messages: Vec<communication::Message> = Vec::new();
+
+        // 🆕 FIX: 当 gateway 传入 skill_hint 时，使用其 prompt_template 作为核心
+        // persona。 若 gateway 已通过 memory_context 注入 skill
+        // prompt（当前标准行为），则 persona 只做轻量标识，
+        // 避免同一份 prompt_template 在 persona message 和 memory message
+        // 中重复出现，浪费 token。 🆕 OPTIMIZATION PHASE 2: Use cached base
+        // persona when no skill_hint
+        let base_persona = self
+            .build_system_prompt_cached(
+                intent_opt
+                    .map(|i| &i.intent)
+                    .unwrap_or(&crate::intent::UserIntent::DirectAnswer),
+            )
+            .await;
+
+        let persona = if let Some(ref hint) = skill_hint {
+            let name = hint
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&self.config.name);
+            let prompt_template = hint
+                .get("prompt_template")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !prompt_template.is_empty() {
+                // 检查 gateway 是否已把 skill prompt 注入 memory_context
+                let gateway_has_skill_prompt = gateway_memory_context.as_ref().map_or(false, |m| {
+                    m.contains(prompt_template.trim().split('\n').next().unwrap_or(""))
+                });
+                if gateway_has_skill_prompt {
+                    // Gateway 已注入完整 skill prompt，persona 只做轻量标识
+                    format!(
+                        "You are {}. Please remain friendly, professional, and helpful when \
+                         answering questions.",
+                        name
+                    )
+                } else {
+                    // Gateway 未注入，使用 skill prompt_template 作为 persona
+                    format!("[角色] {}\n\n{}", name, prompt_template)
+                }
+            } else {
+                let desc = hint
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&self.config.description);
+                format!(
+                    "You are {} ({}). Please remain friendly, professional, and helpful when \
+                     answering questions.",
+                    name, desc
+                )
+            }
+        } else {
+            base_persona
+        };
+
+        // 🆕 FIX: Append skill-catalog trigger instruction to persona so the LLM
+        // knows to emit SKILL:<id> when the user request matches a registered skill.
+        // 🆕 SKILL MATCHING V2: Removed hardcoded generative skill exclusions.
+        let persona = if self.skill_catalog.is_some() {
+            if let Some(ref hint) = skill_hint {
+                // 🆕 FIX: Gateway already matched a skill; tell LLM to emit SKILL:id|params
+                // directly
+                let skill_id = hint.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                format!(
+                    "{}\n\n[系统指令] Gateway 建议使用的 skill 是 '{}'. 如果该 skill \
+                     能直接满足用户请求，请只回复 SKILL:{}|{{\"param\":\"value\"}} \
+                     格式，不要添加任何解释。如果该 skill \
+                     无法满足用户请求（例如用户要求的功能不在该 skill \
+                     范围内），请直接以自然语言回答用户的问题，不要强行调用不匹配的 skill。",
+                    persona, skill_id, skill_id
+                )
+            } else {
+                format!(
+                    "{}\n\n[系统指令] 当用户请求与某个 skill 匹配时，请只回复 \
+                     SKILL:<skill_id>|{{\"param\":\"value\"}}，不要提供其他解释。",
+                    persona
+                )
+            }
+        } else {
+            persona
+        };
+        // 🆕 FIX: Force direct answer — Kimi k2.6 tends to explain system instructions
+        let mut persona = format!(
+            "{}\n\n[强制规则] \
+             直接回答用户问题，不要解释你收到了什么数据、什么技能指引或系统指令。禁止以\"\
+             用户问的是...\"、\"系统提示我...\"、\"我需要...\"、\"根据规则...\"开头。",
+            persona
+        );
+        let workspace_context = format!(
+            "\n\n## Workspace\nYour working directory is: {}\nTreat this directory as the single \
+             global workspace for file operations unless the user explicitly gives a narrower \
+             path. By default this is ./data/workspace relative to the BeeBotOS repository, not \
+             the repository root.\n\n## Built-in Workspace Tools\nYou can call these top-level \
+             tools when the user asks about files, code, commands, or the current environment:\n- \
+             read_file(path, max_chars?): read a UTF-8 file\n- list_dir(path?): list a \
+             directory\n{} Use available tools instead of claiming you cannot inspect the \
+             environment.",
+            self.workspace_dir_display(),
+            if self.controlled_workspace_tools_enabled() {
+                "Controlled tools are enabled: write_file(path, content), edit_file(path, \
+                 old_text, new_text, replace_all?), and exec(command, working_dir?, timeout_ms?) \
+                 are available."
+            } else {
+                "Controlled tools such as write_file, edit_file, and exec exist but are disabled \
+                 unless runtime policy explicitly enables them."
+            }
+        );
+        persona.push_str(&workspace_context);
+
+        // 🆕 OPTIMIZATION PHASE 2: Add REASONING_SCRATCHPAD hint for complex tasks
+        if matches!(
+            intent_opt.map(|i| &i.intent),
+            Some(crate::intent::UserIntent::MultiStepPlanning)
+        ) {
+            persona.push_str(
+                "\n\n[推理指南] 这是一个复杂任务，请按以下步骤思考并在回复中包含 \
+                 <REASONING_SCRATCHPAD> 标签：\n1. 分析用户目标\n2. 确定需要调用的工具及顺序\n3. \
+                 验证每一步的依赖关系\n输出格式：<REASONING_SCRATCHPAD>你的思考过程</\
+                 REASONING_SCRATCHPAD>\n然后输出实际回答或工具调用。",
+            );
+        }
+
+        messages.push(communication::Message::new(
+            uuid::Uuid::new_v4(),
+            communication::PlatformType::Custom,
+            persona,
+        ));
+
+        // 🟢 P1 FIX: Use gateway-provided memory_context if available (avoids redundant
+        // search + dirty query)
+        if let Some(ref gateway_memory) = gateway_memory_context {
+            if !gateway_memory.is_empty() {
+                info!(
+                    "Using gateway-provided memory context ({} chars) for agent {}",
+                    gateway_memory.len(),
+                    self.config.id
+                );
+                messages.push(communication::Message::new(
+                    uuid::Uuid::new_v4(),
+                    communication::PlatformType::Custom,
+                    format!(
+                        "[系统提示：以下是该用户的历史记忆，回答时必须结合这些信息]\n{}",
+                        gateway_memory
+                    ),
+                ));
+            }
+        }
+        // Weather data will be appended to the user message below instead of a separate
+        // system message
+        if let Some(ref memory) = self.memory_system {
+            // Fallback: local search using ONLY input_text (never concatenate history —
+            // prevents self-referential duplication)
+            let query = input_text.clone();
+
+            // 🆕 FIX (方案B): fallback 记忆检索也采用独立预算
+            let char_count = query.chars().count();
+            let is_simple = char_count <= 10;
+            let is_complex = char_count > 30
+                || query.contains("计划")
+                || query.contains("规划")
+                || query.contains("步骤")
+                || query.contains("安排")
+                || query.contains("攻略")
+                || query.contains("对比")
+                || query.contains("分析")
+                || query.contains("总结");
+            let search_limit = if is_complex {
+                6
+            } else if char_count > 15 {
+                4
+            } else {
+                2
+            };
+            let max_memory_chars = if is_simple {
+                400
+            } else if is_complex {
+                1200
+            } else {
+                800
+            };
+
+            match memory.search(&query).await {
+                Ok(results) => {
+                    info!(
+                        "Agent {} local memory search returned {} results (limit={}) for query \
+                         '{}'..",
+                        self.config.id,
+                        results.len(),
+                        search_limit,
+                        query.chars().take(40).collect::<String>()
+                    );
+                    let input_lower = input_text.to_lowercase();
+                    let mut total_chars = 0;
+                    let memory_context: String = results
+                        .iter()
+                        .filter(|r| {
+                            // Skip memories that are essentially the current query being repeated
+                            let is_self_referential =
+                                r.content.to_lowercase().contains(&input_lower);
+                            if is_self_referential {
+                                info!(
+                                    "Filtering out self-referential memory: {}",
+                                    r.content.chars().take(40).collect::<String>()
+                                );
+                            }
+                            !is_self_referential
+                        })
+                        .take(search_limit)
+                        .filter_map(|r| {
+                            let entry = format!("- {}", r.content);
+                            if total_chars + entry.len() > max_memory_chars {
+                                if total_chars == 0 {
+                                    // First entry already too long, truncate it
+                                    // FIX: Use chars() to avoid slicing in the middle of a UTF-8
+                                    // char
+                                    let trunc_len = max_memory_chars.saturating_sub(4);
+                                    let truncated = format!(
+                                        "- {}...",
+                                        r.content.chars().take(trunc_len).collect::<String>()
+                                    );
+                                    total_chars += truncated.len();
+                                    return Some(truncated);
+                                }
+                                return Some("- ...（更多记忆已省略）".to_string());
+                            }
+                            total_chars += entry.len();
+                            Some(entry)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !memory_context.is_empty() {
+                        info!(
+                            "Injecting memory context ({} chars) into agent LLM prompt",
+                            memory_context.len()
+                        );
+                        messages.push(communication::Message::new(
+                            uuid::Uuid::new_v4(),
+                            communication::PlatformType::Custom,
+                            format!(
+                                "[系统提示：以下是该用户的历史记忆，回答时必须结合这些信息]\n{}",
+                                memory_context
+                            ),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    warn!("Memory search failed for agent {}: {}", self.config.id, e);
+                }
+            }
+        }
+
+        for (role, content) in history {
+            let prefix = match role.as_str() {
+                "user" => "用户",
+                "assistant" => "助手",
+                "system" => "系统",
+                _ => &role,
+            };
+            messages.push(communication::Message::new(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                format!("{}: {}", prefix, content),
+            ));
+        }
+
+        // Add current user message (with weather data appended if available)
+        let user_message = if let Some(ref weather) = weather_data {
+            if !weather.is_empty() {
+                format!(
+                    "用户: {}\n\n[参考数据] 实时天气：{}\n请基于以上数据回答。",
+                    input_text, weather
+                )
+            } else {
+                format!("用户: {}", input_text)
+            }
+        } else {
+            format!("用户: {}", input_text)
+        };
+        messages.push(communication::Message::with_metadata(
+            uuid::Uuid::new_v4(),
+            communication::PlatformType::Custom,
+            user_message,
+            metadata,
+        ));
+
+        // 🟢 P2 FIX: Dynamic max_tokens based on message complexity
+        // 🆕 SKILL MATCHING V2: Removed hardcoded generative skill exclusions.
+        let dynamic_max_tokens = if input_text.chars().count() < 30 {
+            "300".to_string()
+        } else if input_text.chars().count() < 100 {
+            "600".to_string()
+        } else {
+            "1200".to_string()
+        };
+        extra_params.insert("max_tokens".to_string(), dynamic_max_tokens);
+
+        // 🆕 OPTIMIZATION PHASE 1: Intent-aware tool filtering with Toolsets
+        // Adjust tool count based on intent: DirectAnswer=0, SingleToolCall=10,
+        // MultiStepPlanning=20
+        let top_n = match intent_opt.map(|i| &i.intent) {
+            Some(crate::intent::UserIntent::DirectAnswer) => 0usize,
+            Some(crate::intent::UserIntent::SingleToolCall) => 10usize,
+            Some(crate::intent::UserIntent::MetaQuestion) => 0usize,
+            _ => 20usize,
+        };
+
+        let mut tool_name_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut native_tools: Vec<communication::ToolDefinition> = self.builtin_workspace_tools();
+        if let Some(ref registry) = self.skill_registry {
+            let all_skills = registry.list_all().await;
+            if !all_skills.is_empty() && top_n > 0 {
+                let query_lower = input_text.to_lowercase();
+                let stopwords: std::collections::HashSet<&str> = [
+                    "的",
+                    "了",
+                    "是",
+                    "我",
+                    "你",
+                    "他",
+                    "她",
+                    "它",
+                    "们",
+                    "在",
+                    "有",
+                    "和",
+                    "就",
+                    "不",
+                    "人",
+                    "都",
+                    "一",
+                    "一个",
+                    "上",
+                    "也",
+                    "很",
+                    "到",
+                    "说",
+                    "要",
+                    "去",
+                    "可以",
+                    "会",
+                    "这",
+                    "那",
+                    "有",
+                    "个",
+                    "之",
+                    "与",
+                    "及",
+                    "等",
+                    "从",
+                    "让",
+                    "向",
+                    "往",
+                    "为",
+                    "被",
+                    "把",
+                    "给",
+                    "请",
+                    "帮",
+                    "来",
+                    "做",
+                    "看",
+                    "想",
+                    "知道",
+                    "一下",
+                    "根据",
+                    "当前",
+                    "现在",
+                    "市场",
+                    "形势",
+                    "这个",
+                    "那个",
+                    "the",
+                    "a",
+                    "an",
+                    "is",
+                    "are",
+                    "was",
+                    "were",
+                    "be",
+                    "been",
+                    "being",
+                    "have",
+                    "has",
+                    "had",
+                    "do",
+                    "does",
+                    "did",
+                    "will",
+                    "would",
+                    "could",
+                    "should",
+                    "may",
+                    "might",
+                    "must",
+                    "shall",
+                    "can",
+                    "need",
+                    "dare",
+                    "ought",
+                    "used",
+                    "to",
+                    "of",
+                    "in",
+                    "for",
+                    "on",
+                    "with",
+                    "at",
+                    "by",
+                    "from",
+                    "as",
+                    "into",
+                    "through",
+                    "during",
+                    "before",
+                    "after",
+                    "above",
+                    "below",
+                    "between",
+                    "under",
+                    "and",
+                    "but",
+                    "or",
+                    "yet",
+                    "so",
+                    "if",
+                    "because",
+                    "although",
+                    "though",
+                    "while",
+                    "where",
+                    "when",
+                    "that",
+                    "which",
+                    "who",
+                    "whom",
+                    "whose",
+                    "what",
+                    "how",
+                    "why",
+                    "it",
+                    "its",
+                    "this",
+                    "these",
+                    "those",
+                    "i",
+                    "me",
+                    "my",
+                    "myself",
+                    "we",
+                    "our",
+                    "you",
+                    "your",
+                    "he",
+                    "him",
+                    "his",
+                    "she",
+                    "her",
+                    "they",
+                    "them",
+                    "their",
+                    "just",
+                    "only",
+                    "even",
+                    "also",
+                    "too",
+                    "very",
+                    "so",
+                    "such",
+                    "no",
+                    "not",
+                    "than",
+                    "then",
+                    "now",
+                    "here",
+                    "there",
+                    "up",
+                    "out",
+                    "off",
+                    "down",
+                    "over",
+                    "again",
+                    "further",
+                    "once",
+                    "more",
+                    "most",
+                    "other",
+                    "some",
+                    "any",
+                    "each",
+                    "few",
+                    "much",
+                    "many",
+                    "all",
+                    "both",
+                    "either",
+                    "neither",
+                    "one",
+                    "two",
+                    "first",
+                    "last",
+                    "good",
+                    "new",
+                    "old",
+                    "great",
+                    "high",
+                    "small",
+                    "different",
+                    "large",
+                    "next",
+                    "early",
+                    "young",
+                    "important",
+                    "public",
+                    "same",
+                    "able",
+                ]
+                .iter()
+                .cloned()
+                .collect();
+
+                // 🆕 FIX: Split on non-alphanumeric; for CJK text also extract individual
+                // characters so Chinese queries can match skills with Chinese descriptions.
+                let mut keywords: Vec<String> = Vec::new();
+                for part in query_lower.split(|c: char| !c.is_alphanumeric() && c != '/') {
+                    if part.is_empty() || part.len() < 2 {
+                        continue;
+                    }
+                    if !stopwords.contains(part) {
+                        keywords.push(part.to_string());
+                    }
+                }
+                keywords.sort();
+                keywords.dedup();
+
+                // Expand crypto/trading related terms
+                let query_lower_str = query_lower.as_str();
+                if query_lower_str.contains("btc") || query_lower_str.contains("bitcoin") {
+                    keywords.push("btc".to_string());
+                    keywords.push("bitcoin".to_string());
+                    keywords.push("crypto".to_string());
+                }
+                if query_lower_str.contains("eth") || query_lower_str.contains("ethereum") {
+                    keywords.push("eth".to_string());
+                    keywords.push("ethereum".to_string());
+                    keywords.push("crypto".to_string());
+                }
+                if query_lower_str.contains("下单")
+                    || query_lower_str.contains("order")
+                    || query_lower_str.contains("buy")
+                    || query_lower_str.contains("sell")
+                {
+                    keywords.push("order".to_string());
+                    keywords.push("trade".to_string());
+                    keywords.push("trading".to_string());
+                    keywords.push("place".to_string());
+                    keywords.push("下单".to_string());
+                }
+                if query_lower_str.contains("行情")
+                    || query_lower_str.contains("price")
+                    || query_lower_str.contains("snapshot")
+                {
+                    keywords.push("snapshot".to_string());
+                    keywords.push("price".to_string());
+                    keywords.push("quote".to_string());
+                    keywords.push("market".to_string());
+                    keywords.push("行情".to_string());
+                }
+                // 🆕 FIX (Plan D): Expand search-related keywords to ensure web search skills
+                // are ranked
+                if query_lower_str.contains("搜索")
+                    || query_lower_str.contains("search")
+                    || query_lower_str.contains("查找")
+                    || query_lower_str.contains("查一下")
+                    || query_lower_str.contains("网上")
+                    || query_lower_str.contains("google")
+                    || query_lower_str.contains("百度")
+                    || query_lower_str.contains("look up")
+                    || query_lower_str.contains("find online")
+                    || query_lower_str.contains("搜")
+                {
+                    keywords.push("search".to_string());
+                    keywords.push("web_search".to_string());
+                    keywords.push("web".to_string());
+                    keywords.push("查找".to_string());
+                }
+
+                // Detect explicit trading intent to boost order-placement tools
+                let has_trading_intent = query_lower_str.contains("下单")
+                    || query_lower_str.contains("购买")
+                    || query_lower_str.contains("买入")
+                    || query_lower_str.contains("卖出")
+                    || query_lower_str.contains("buy")
+                    || query_lower_str.contains("sell")
+                    || query_lower_str.contains("order")
+                    || query_lower_str.contains("place");
+
+                // 🆕 FIX: Detect weather intent to boost weather-related skills
+                let has_weather_intent = query_lower_str.contains("天气")
+                    || query_lower_str.contains("weather")
+                    || query_lower_str.contains("temperature")
+                    || query_lower_str.contains("气温")
+                    || query_lower_str.contains("forecast")
+                    || query_lower_str.contains("预报")
+                    || query_lower_str.contains("rain")
+                    || query_lower_str.contains("雨")
+                    || query_lower_str.contains("snow")
+                    || query_lower_str.contains("雪");
+                if has_weather_intent {
+                    keywords.push("weather".to_string());
+                    keywords.push("get_weather".to_string());
+                    keywords.push("forecast".to_string());
+                }
+
+                // 🆕 OPTIMIZATION PHASE 1: Toolsets-based filter-first + scoring
+                let active_toolsets: std::collections::HashSet<String> = intent_opt
+                    .map(|i| i.active_toolsets.iter().cloned().collect())
+                    .unwrap_or_default();
+
+                // Phase 1: Filter — only keep skills from active toolsets (if any are detected)
+                let mut candidates: Vec<&skills::registry::RegisteredSkill> = all_skills
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .filter(|s| {
+                        if active_toolsets.is_empty() {
+                            return true; // no toolset constraints
+                        }
+                        let skill_id_lower = s.skill.id.to_lowercase();
+                        active_toolsets
+                            .iter()
+                            .any(|ts| skill_id_lower.contains(ts) || s.tags.contains(ts))
+                    })
+                    .collect();
+
+                // Fallback: if too few matches after toolset filtering, use all enabled
+                if candidates.len() < 3 && !active_toolsets.is_empty() {
+                    candidates = all_skills.iter().filter(|s| s.enabled).collect();
+                }
+
+                // Phase 2: Score within filtered candidates
+                let mut scored_skills: Vec<(usize, &skills::registry::RegisteredSkill)> =
+                    Vec::new();
+                for registered in &candidates {
+                    let manifest = &registered.skill.manifest;
+                    let searchable =
+                        format!("{} {} {}", manifest.id, manifest.name, manifest.description)
+                            .to_lowercase();
+                    let mut score = keywords
+                        .iter()
+                        .filter(|k| searchable.contains(k.as_str()))
+                        .count();
+
+                    // 🆕 FIX: Boost order placement tools when user explicitly wants to trade
+                    if has_trading_intent {
+                        let skill_id_lower = manifest.id.to_lowercase();
+                        if skill_id_lower.contains("place_") && skill_id_lower.contains("_order") {
+                            score += 20;
+                        }
+                    }
+
+                    // 🆕 FIX: Boost weather skills when user asks about weather
+                    if has_weather_intent {
+                        let skill_id_lower = manifest.id.to_lowercase();
+                        if skill_id_lower.contains("weather")
+                            || skill_id_lower.contains("get_weather")
+                        {
+                            score += 20;
+                        }
+                    }
+                    if score > 0 {
+                        scored_skills.push((score, *registered));
+                    }
+                }
+
+                // Sort by relevance (highest first) and take top N based on intent
+                scored_skills.sort_by(|a, b| b.0.cmp(&a.0));
+                let selected = if scored_skills.len() >= 3 {
+                    scored_skills
+                        .into_iter()
+                        .take(top_n)
+                        .map(|(_, s)| s)
+                        .collect::<Vec<_>>()
+                } else {
+                    // 🆕 FIX: When too few keyword matches, still prioritize scored skills.
+                    // Inject only scored skills + enough top enabled skills to reach 3,
+                    // instead of flooding the LLM with 30 unrelated tools.
+                    let mut selected: Vec<&skills::registry::RegisteredSkill> =
+                        scored_skills.into_iter().map(|(_, s)| s).collect();
+                    if selected.len() < 3 {
+                        for s in all_skills.iter().filter(|s| s.enabled) {
+                            if !selected.iter().any(|sel| sel.skill.id == s.skill.id) {
+                                selected.push(s);
+                            }
+                            if selected.len() >= 3 {
+                                break;
+                            }
+                        }
+                    }
+                    selected
+                };
+
+                let mut tools = Vec::new();
+                for registered in &selected {
+                    let manifest = &registered.skill.manifest;
+                    let func = manifest.functions.first();
+                    let (params_schema, desc) = if let Some(f) = func {
+                        let mut props = serde_json::Map::new();
+                        let mut required = Vec::new();
+                        for param in &f.inputs {
+                            let mut prop = serde_json::Map::new();
+                            prop.insert(
+                                "type".to_string(),
+                                serde_json::Value::String(param.param_type.clone()),
+                            );
+                            if !param.description.is_empty() {
+                                prop.insert(
+                                    "description".to_string(),
+                                    serde_json::Value::String(param.description.clone()),
+                                );
+                            }
+                            props.insert(param.name.clone(), serde_json::Value::Object(prop));
+                            if param.required {
+                                required.push(param.name.clone());
+                            }
+                        }
+                        let schema = serde_json::json!({
+                            "type": "object",
+                            "properties": props,
+                            "required": required,
+                        });
+                        // 🆕 FIX: Avoid duplicating manifest prefix + function docstring.
+                        // Use function description if available (it's usually the focused tool
+                        // description), otherwise fall back to manifest description.
+                        let description = if f.description.is_empty() {
+                            manifest.description.clone()
+                        } else {
+                            f.description.clone()
+                        };
+                        (schema, description)
+                    } else {
+                        (
+                            serde_json::json!({"type": "object", "properties": {}, "required": []}),
+                            manifest.description.clone(),
+                        )
+                    };
+
+                    let original_name = registered.skill.id.clone();
+                    let normalized_name = original_name.replace(':', "-").replace('/', "-");
+                    tool_name_map.insert(normalized_name.clone(), original_name);
+
+                    tools.push(communication::ToolDefinition {
+                        name: normalized_name,
+                        description: desc,
+                        parameters: params_schema,
+                    });
+                }
+
+                if !tools.is_empty() {
+                    native_tools.extend(tools);
+                    match serde_json::to_string(&native_tools) {
+                        Ok(json) => {
+                            extra_params.insert("tools_json".to_string(), json);
+                            info!(
+                                "handle_llm_task: injected {} total tools (including built-ins), \
+                                 {} / {} matched skills for native function calling (keywords: \
+                                 {:?})",
+                                native_tools.len(),
+                                native_tools
+                                    .len()
+                                    .saturating_sub(self.builtin_workspace_tools().len()),
+                                all_skills.len(),
+                                keywords
+                            );
+                        }
+                        Err(e) => warn!("Failed to serialize tools: {}", e),
+                    }
+                }
+            }
+        }
+        if !native_tools.is_empty() && !extra_params.contains_key("tools_json") {
+            match serde_json::to_string(&native_tools) {
+                Ok(json) => {
+                    extra_params.insert("tools_json".to_string(), json);
+                    info!(
+                        "handle_llm_task: injected {} built-in workspace tools for native \
+                         function calling",
+                        native_tools.len()
+                    );
+                }
+                Err(e) => warn!("Failed to serialize built-in tools: {}", e),
+            }
+        }
+
+        // 🟢 P2 FIX: Check LLM response cache for simple text queries (no images, < 500
+        // chars)
+        let cache_key =
+            if native_tools.is_empty() && image_urls.is_empty() && input_text.len() < 500 {
+                let memory_hash = gateway_memory_context
+                    .as_ref()
+                    .map(|m| m.len().to_string())
+                    .unwrap_or_else(|| "0".to_string());
+                Some(format!(
+                    "{}|{}|{}",
+                    self.config.id,
+                    input_text.trim(),
+                    memory_hash
+                ))
+            } else {
+                None
+            };
+
+        if let Some(ref key) = cache_key {
+            let cache = self.llm_response_cache.read().await;
+            if let Some((cached_response, timestamp)) = cache.get(key) {
+                if timestamp.elapsed() < Duration::from_secs(300) {
+                    info!(
+                        "P2 CACHE HIT: agent {} returning cached response for '{}' (age {:?})",
+                        self.config.id,
+                        input_text.chars().take(40).collect::<String>(),
+                        timestamp.elapsed()
+                    );
+                    return Ok((cached_response.clone(), vec![]));
+                }
+            }
+            drop(cache);
+        }
+
+        // 🆕 FIX: When native function calling is active (tools_json present), skip the
+        // bulky text-based skill catalog and inject a strong command-style system hint.
+        let messages = if extra_params.contains_key("tools_json") {
+            let runtime_context = Self::runtime_context_prompt();
+            let mut result = vec![communication::Message::new(
+                uuid::Uuid::new_v4(),
+                communication::PlatformType::Custom,
+                format!(
+                    "You are a workspace-aware assistant. Use function calling when the user asks \
+                     about files, code, commands, the current environment, or a task that clearly \
+                     needs a tool. For ordinary questions that do not need tools, answer \
+                     directly. When you do call a tool, call the most appropriate tool with \
+                     correct parameters. If a parameter is missing, use a reasonable default or \
+                     leave it empty.\n\n{}",
+                    runtime_context
+                ),
+            )];
+            result.extend(messages);
+            result
+        } else {
+            self.inject_skill_catalog(messages)
+        };
+        info!(
+            "handle_llm_task: messages count after inject = {}, skill_catalog set = {}, \
+             native_tools = {}",
+            messages.len(),
+            self.skill_catalog.is_some(),
+            extra_params.contains_key("tools_json")
+        );
+
+        let mut response = if !native_tools.is_empty() && llm.supports_native_tools() {
+            info!(
+                "handle_llm_task: using native tool loop with {} tools",
+                native_tools.len()
+            );
+            let mut loop_messages = messages.clone();
+            let max_tool_rounds = crate::react_trace::clamp_react_max_tool_rounds(self.max_rounds);
+            extra_params.insert("max_tool_rounds".to_string(), max_tool_rounds.to_string());
+            let session_key = extra_params
+                .get("session_id")
+                .or_else(|| extra_params.get("channel_id"))
+                .cloned()
+                .unwrap_or_else(|| task.id.clone());
+            let run_id = Self::react_run_id(&task.id);
+            extra_params.insert("agent_id".to_string(), self.config.id.clone());
+            extra_params.insert("react_run_id".to_string(), run_id.clone());
+            let mut final_text = String::new();
+
+            self.emit_react_trace(
+                crate::react_trace::ReActTraceEvent::new(
+                    run_id.clone(),
+                    session_key.clone(),
+                    self.config.id.clone(),
+                    0,
+                    max_tool_rounds,
+                    crate::react_trace::ReActTracePhase::LoopStarted,
+                )
+                .with_content_preview(&input_text),
+            )
+            .await;
+
+            for round in 0..max_tool_rounds {
+                let round_number = round + 1;
+                extra_params.insert("react_round".to_string(), round_number.to_string());
+                let turn = llm
+                    .call_llm_tool_turn(
+                        loop_messages.clone(),
+                        native_tools.clone(),
+                        Some(extra_params.clone()),
+                    )
+                    .await
+                    .map_err(|e| {
+                        AgentError::Execution(format!("LLM call with tools failed: {}", e))
+                    })?;
+
+                if turn.tool_calls.is_empty() {
+                    final_text = turn.content;
+                    self.emit_react_trace(
+                        crate::react_trace::ReActTraceEvent::new(
+                            run_id.clone(),
+                            session_key.clone(),
+                            self.config.id.clone(),
+                            round_number,
+                            max_tool_rounds,
+                            crate::react_trace::ReActTracePhase::FinalAnswer,
+                        )
+                        .with_content_preview(&final_text),
+                    )
+                    .await;
+                    break;
+                }
+
+                info!(
+                    "handle_llm_task: round {} returned {} tool call(s)",
+                    round_number,
+                    turn.tool_calls.len()
+                );
+                self.emit_react_trace(
+                    crate::react_trace::ReActTraceEvent::new(
+                        run_id.clone(),
+                        session_key.clone(),
+                        self.config.id.clone(),
+                        round_number,
+                        max_tool_rounds,
+                        crate::react_trace::ReActTracePhase::AssistantToolCall,
+                    )
+                    .with_content_preview(format!("{} tool call(s)", turn.tool_calls.len())),
+                )
+                .await;
+                loop_messages.push(Self::assistant_tool_call_message(
+                    &turn.tool_calls,
+                    turn.reasoning_content.as_deref(),
+                ));
+
+                for tool_call in &turn.tool_calls {
+                    self.emit_react_trace(
+                        crate::react_trace::ReActTraceEvent::new(
+                            run_id.clone(),
+                            session_key.clone(),
+                            self.config.id.clone(),
+                            round_number,
+                            max_tool_rounds,
+                            crate::react_trace::ReActTracePhase::ToolStarted,
+                        )
+                        .with_tool(tool_call.function.name.clone(), tool_call.id.clone())
+                        .with_arguments_preview(Self::tool_arguments_preview(tool_call)),
+                    )
+                    .await;
+                    let output = match self
+                        .execute_native_tool_call(
+                            tool_call,
+                            &tool_name_map,
+                            &input_text,
+                            &weather_data,
+                        )
+                        .await
+                    {
+                        Ok((output, success)) => {
+                            self.emit_react_trace(
+                                crate::react_trace::ReActTraceEvent::new(
+                                    run_id.clone(),
+                                    session_key.clone(),
+                                    self.config.id.clone(),
+                                    round_number,
+                                    max_tool_rounds,
+                                    if success {
+                                        crate::react_trace::ReActTracePhase::ToolResult
+                                    } else {
+                                        crate::react_trace::ReActTracePhase::ToolError
+                                    },
+                                )
+                                .with_tool(tool_call.function.name.clone(), tool_call.id.clone())
+                                .with_content_preview(&output),
+                            )
+                            .await;
+                            output
+                        }
+                        Err(e) => {
+                            warn!("Native tool '{}' failed: {}", tool_call.function.name, e);
+                            let output = Self::recoverable_tool_error(&tool_call.function.name, e);
+                            self.emit_react_trace(
+                                crate::react_trace::ReActTraceEvent::new(
+                                    run_id.clone(),
+                                    session_key.clone(),
+                                    self.config.id.clone(),
+                                    round_number,
+                                    max_tool_rounds,
+                                    crate::react_trace::ReActTracePhase::ToolError,
+                                )
+                                .with_tool(tool_call.function.name.clone(), tool_call.id.clone())
+                                .with_content_preview(&output)
+                                .error(),
+                            )
+                            .await;
+                            output
+                        }
+                    };
+                    loop_messages.push(Self::tool_result_message(&tool_call.id, output));
+                }
+            }
+
+            if final_text.trim().is_empty() {
+                warn!(
+                    "Native tool loop ended without final text after {} rounds",
+                    max_tool_rounds
+                );
+                self.emit_react_trace(
+                    crate::react_trace::ReActTraceEvent::new(
+                        run_id.clone(),
+                        session_key.clone(),
+                        self.config.id.clone(),
+                        max_tool_rounds,
+                        max_tool_rounds,
+                        crate::react_trace::ReActTracePhase::LoopLimitReached,
+                    )
+                    .with_content_preview(
+                        "Maximum native tool rounds reached; requesting final answer.",
+                    ),
+                )
+                .await;
+                self.force_final_react_answer(
+                    llm,
+                    loop_messages,
+                    native_tools.clone(),
+                    extra_params.clone(),
+                    max_tool_rounds,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    warn!("Forced final native-tool answer failed: {}", e);
+                    "工具调用已完成，但模型没有生成最终回复。".to_string()
+                })
+            } else {
+                final_text
+            }
+        } else {
+            llm.call_llm(messages.clone(), Some(extra_params.clone()))
+                .await
+                .map_err(|e| AgentError::Execution(format!("LLM call failed: {}", e)))?
+        };
+
+        info!(
+            "handle_llm_task: LLM raw response (first 200 chars) = {}",
+            &response.chars().take(200).collect::<String>()
+        );
+
+        // 🆕 FIX: Guard against empty LLM responses to avoid corrupting conversation
+        // history
+        if response.trim().is_empty() {
+            warn!("LLM returned empty response; skipping cache/history storage");
+            return Ok((
+                "抱歉，AI 暂时无法生成回复，请稍后再试。".to_string(),
+                vec![],
+            ));
+        }
+
+        // 🆕 FIX: Clean up thinking process BEFORE parsing skill triggers so that
+        // trailing analysis text after SKILL: does not pollute skill ID extraction.
+        let mut response = Self::cleanup_thinking_process(&response);
+
+        // 🆕 OPTIMIZATION PHASE 3: Detect and execute tool chains (multi-step
+        // conditional calls)
+        if response.contains("STEP 1:") || response.contains("IF ") {
+            match self.try_execute_tool_chain(&response, &input_text).await {
+                Ok(Some(result)) => return Ok((result, vec![])),
+                Ok(None) => {} // Not a valid tool chain, continue normal flow
+                Err(e) => warn!("Tool chain execution failed: {}", e),
+            }
+        }
+
+        // 🆕 FIX: If the LLM response is a skill trigger (e.g. "SKILL:hello_world"),
+        // look up the skill in the registry and execute it instead of returning raw
+        // text.
+        let trimmed = response.trim();
+        let skill_part = if trimmed.starts_with("SKILL:") {
+            trimmed.strip_prefix("SKILL:")
+        } else if let Some(pos) = trimmed.find("SKILL:") {
+            trimmed[pos..].strip_prefix("SKILL:")
+        } else {
+            None
+        };
+        if let Some(skill_part) = skill_part {
+            let skill_part = skill_part.trim();
+            // 🆕 FIX: Parse skill ID and optional parameters separated by '|'
+            let (skill_id, skill_params, json_parse_failed) = match skill_part.find('|') {
+                Some(pos) => {
+                    let id = skill_part[..pos].trim();
+                    let params_json = skill_part[pos + 1..].trim();
+                    let mut parse_failed = false;
+                    let params = if params_json.is_empty() || params_json == "{}" {
+                        None
+                    } else {
+                        match serde_json::from_str::<
+                            std::collections::HashMap<String, serde_json::Value>,
+                        >(params_json)
+                        {
+                            Ok(map) => {
+                                let string_map: std::collections::HashMap<String, String> = map
+                                    .into_iter()
+                                    .map(|(k, v)| {
+                                        let value = match v {
+                                            serde_json::Value::String(s) => s,
+                                            serde_json::Value::Bool(b) => b.to_string(),
+                                            serde_json::Value::Number(n) => n.to_string(),
+                                            other => other.to_string(),
+                                        };
+                                        (k, value)
+                                    })
+                                    .collect();
+                                Some(string_map)
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "LLM returned invalid JSON parameters for skill '{}': {} \
+                                     (raw: {})",
+                                    id, e, params_json
+                                );
+                                parse_failed = true;
+                                None
+                            }
+                        }
+                    };
+                    (id, params, parse_failed)
+                }
+                None => {
+                    // 🛡️ Fallback: Parse only the skill ID before any whitespace
+                    let id = skill_part.split_whitespace().next().unwrap_or("").trim();
+                    (id, None, false)
+                }
+            };
+
+            // 🆕 FIX: Common words that LLM mistakenly uses as skill IDs when it
+            // misinterprets system prompt
+            let invalid_skill_ids = [
+                "immediately",
+                "format",
+                "directly",
+                "direct",
+                "output",
+                "skill",
+                "id",
+                "real",
+                "actual",
+                "<skill_id>",
+            ];
+            let is_invalid_id = invalid_skill_ids.contains(
+                &skill_id
+                    .to_lowercase()
+                    .trim_matches(|c: char| !c.is_alphanumeric()),
+            );
+            // 🆕 FIX: Detect placeholder/example parameters that LLM copied from system
+            // prompt
+            let is_example_params = skill_params.as_ref().map_or(false, |p| {
+                p.len() == 1 && p.get("param") == Some(&"value".to_string())
+            });
+            if skill_id.is_empty() {
+                warn!(
+                    "LLM returned empty skill ID after parsing: {}",
+                    response.trim()
+                );
+            } else if is_invalid_id || is_example_params {
+                warn!(
+                    "LLM output invalid skill ID '{}' or example params {:?}. Falling back to \
+                     normal LLM path.",
+                    skill_id, skill_params
+                );
+                response = "抱歉，我没有理解您的具体需求。请告诉我您想做什么，我会尽力帮助您。"
+                    .to_string();
+            } else if json_parse_failed {
+                // 🆕 FIX: LLM output SKILL:id|{incomplete_json — JSON parse failed.
+                // Skip skill execution and fall back to normal LLM path so the LLM can retry or
+                // answer directly.
+                warn!(
+                    "LLM returned SKILL:{} with invalid/incomplete JSON parameters. Falling back \
+                     to normal LLM path.",
+                    skill_id
+                );
+                response = format!(
+                    "我注意到您可能需要使用 \
+                     '{}'，但缺少必要的参数。请补充相关信息，我会立即帮您处理。",
+                    skill_id
+                );
+                // Continue to normal LLM path below instead of executing skill
+                // with missing params
+            } else {
+                info!(
+                    "LLM requested skill execution: {} (params: {:?})",
+                    skill_id, skill_params
+                );
+                if Self::is_builtin_workspace_tool(skill_id) {
+                    match self
+                        .execute_builtin_workspace_tool(
+                            skill_id,
+                            skill_params.as_ref(),
+                            &input_text,
+                        )
+                        .await
+                    {
+                        Ok(output) => return Ok((output, vec![])),
+                        Err(e) => {
+                            warn!("Built-in workspace tool '{}' failed: {}", skill_id, e);
+                            return Ok((format!("工具 '{}' 执行失败: {}", skill_id, e), vec![]));
+                        }
+                    }
+                }
+                if let Some(ref registry) = self.skill_registry {
+                    let mut resolved_skill = registry.get(skill_id).await;
+                    // 🆕 FIX: When using native function calling, the LLM sees normalized names
+                    // (colons/slashes replaced by dashes). Map back to the original skill ID.
+                    if resolved_skill.is_none() {
+                        if let Some(original_id) = tool_name_map.get(skill_id) {
+                            info!(
+                                "Resolved normalized skill ID '{}' to original '{}'",
+                                skill_id, original_id
+                            );
+                            resolved_skill = registry.get(original_id).await;
+                        }
+                    }
+                    // 🆕 Fallback: if exact match fails, search for skill ID ending with
+                    // /{skill_id} This handles cases where LLM returns just the
+                    // tool name without mcp:server/ prefix
+                    if resolved_skill.is_none()
+                        && !skill_id.contains(':')
+                        && !skill_id.contains('/')
+                    {
+                        let all_skills = registry.list_all().await;
+                        for skill in &all_skills {
+                            if skill.skill.id.ends_with(&format!("/{}", skill_id)) {
+                                info!(
+                                    "Resolved partial skill ID '{}' to full ID '{}'",
+                                    skill_id, skill.skill.id
+                                );
+                                resolved_skill = Some(skill.clone());
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(registered) = resolved_skill {
+                        let resolved_id = registered.skill.id.clone();
+                        // 🆕 FIX: Pass parsed parameters to skill execution instead of always None
+                        // 🆕 FIX: Enrich input with gateway-provided context (weather_data, etc.)
+                        let enriched_input = if let Some(ref weather) = weather_data {
+                            if !weather.is_empty() {
+                                format!(
+                                    "{}\n\n[参考数据] 实时天气：{}\n请基于以上数据回答。",
+                                    input_text, weather
+                                )
+                            } else {
+                                input_text.clone()
+                            }
+                        } else {
+                            input_text.clone()
+                        };
+                        let skill_input = if skill_params.is_some() {
+                            ""
+                        } else {
+                            enriched_input.as_str()
+                        };
+                        let mut skill_params = skill_params;
+                        Self::apply_react_skill_param_defaults(
+                            &resolved_id,
+                            &enriched_input,
+                            Some(&input_text),
+                            &mut skill_params,
+                        );
+                        let skill_result = self
+                            .execute_registered_skill(&registered, skill_input, skill_params)
+                            .await;
+                        match skill_result {
+                            Ok(result) => {
+                                let _ = registry.record_usage(&resolved_id).await;
+                                let output = self.synthesize_skill_output(
+                                    &input_text,
+                                    &result.output,
+                                    &resolved_id,
+                                );
+                                return Ok((output, vec![]));
+                            }
+                            Err(e) => {
+                                let err_str = e.to_string().to_lowercase();
+                                let is_dependency_failure = err_str.contains("mx_apikey")
+                                    || err_str.contains("apikey")
+                                    || err_str.contains("api key")
+                                    || err_str.contains("environment variable")
+                                    || err_str.contains("not set");
+                                if is_dependency_failure {
+                                    warn!(
+                                        "Skill '{}' disabled due to missing dependency: {}",
+                                        resolved_id, e
+                                    );
+                                    let _ = registry.disable(&resolved_id).await;
+                                }
+                                warn!(
+                                    "Skill execution for '{}' failed: {}. Falling back to direct \
+                                     answer.",
+                                    resolved_id, e
+                                );
+                                return self.handle_direct_answer(task).await;
+                            }
+                        }
+                    } else {
+                        warn!(
+                            "LLM requested unknown skill: '{}'. Falling back to direct answer.",
+                            skill_id
+                        );
+                        return self.handle_direct_answer(task).await;
+                    }
+                }
+            }
+        }
+
+        // 🟢 P2 FIX: Store response in cache
+        if let Some(ref key) = cache_key {
+            let mut cache = self.llm_response_cache.write().await;
+            cache.insert(key.clone(), (response.clone(), Instant::now()));
+            // Simple eviction: if cache grows beyond 100 entries, clear oldest half
+            if cache.len() > 100 {
+                let mut entries: Vec<_> = cache.drain().collect();
+                entries.sort_by(|a, b| b.1 .1.cmp(&a.1 .1)); // newest first
+                let keep = entries.len() / 2;
+                for (k, v) in entries.into_iter().take(keep) {
+                    cache.insert(k, v);
+                }
+            }
+            drop(cache);
+            info!(
+                "P2 CACHE STORE: agent {} cached response for '{}'",
+                self.config.id,
+                input_text.chars().take(40).collect::<String>()
+            );
+        }
+
+        Ok((response, vec![]))
+    }
 
     /// Check whether a skill directory contains executable scripts.
     /// Checks both the root directory and the `scripts/` subdirectory.
@@ -2901,25 +6503,23 @@ impl Agent {
         raw_output: &str,
         skill_id: &str,
     ) -> String {
-        let normalized = strip_successful_command_wrapper(raw_output)
-            .unwrap_or_else(|| raw_output.trim().to_string());
-        let trimmed = normalized.trim();
+        let trimmed = raw_output.trim();
         let is_structured = trimmed.starts_with('{') || trimmed.starts_with('[');
 
         if !is_structured {
-            return normalized;
+            return raw_output.to_string();
         }
 
         // 🆕 FIX: Format known MCP skills with dedicated templates for zero-latency
         // output
-        if let Some(formatted) = format_known_skill_output(skill_id, trimmed) {
+        if let Some(formatted) = format_known_skill_output(skill_id, raw_output) {
             return formatted;
         }
 
         // Generic JSON fallback: flatten to readable key-value list
-        match format_generic_json(trimmed) {
+        match format_generic_json(raw_output) {
             Some(text) => text,
-            None => normalized,
+            None => raw_output.to_string(),
         }
     }
 
@@ -3069,18 +6669,6 @@ impl Agent {
     ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
         let start_time = std::time::Instant::now();
         let skill_id = registered_skill.skill.id.clone();
-
-        // 🆕 System inventory skills: direct query, no LLM overhead
-        match skill_id.as_str() {
-            "tool_inventory" => return self.query_tool_inventory().await,
-            "skill_inventory" => return self.query_skill_inventory().await,
-            "schedule_inventory" => return self.query_schedule_inventory().await,
-            "agent_inventory" => return self.query_agent_inventory().await,
-            "workflow_inventory" => return self.query_workflow_inventory().await,
-            "mcp_inventory" => return self.query_mcp_inventory().await,
-            _ => {}
-        }
-
         let parsed_mcp_skill =
             crate::mcp::skill_bridge::parse_mcp_skill_id(&registered_skill.skill.id);
 
@@ -3090,7 +6678,7 @@ impl Agent {
             && !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst)
         {
             if let Some(ref gate) = self.approval_gate {
-                let env = std::collections::HashMap::new(); // Could be enriched with env vars
+                let env = Self::approval_env();
                 let params_json = parameters
                     .as_ref()
                     .map(|p| {
@@ -3143,8 +6731,7 @@ impl Agent {
                             task_id: skill_id,
                             success: false,
                             output: format!(
-                                "{} {}\n\n{}\n\n⚠️ \
-                                 这是一个高风险操作，需要您的确认后才能执行。\n\\
+                                "{} {}\n\n{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\\
                                  n请回复「确认」或「同意」来执行此操作。",
                                 risk_label, reason, description
                             ),
@@ -3280,13 +6867,17 @@ impl Agent {
                                 skill_id, reason
                             );
                             return Ok(skills::executor::SkillExecutionResult {
-                                task_id: skill_id,
+                                task_id: skill_id.clone(),
                                 success: false,
                                 output: format!(
-                                    "无法从您的描述中提取操作参数。{} \
-                                     请提供更具体的信息，例如：品种（BTC）、方向（买入/卖出）、\
-                                     金额。",
-                                    reason
+                                    "MCP parameter extraction was unclear.\nSkill: {}\nTool: \
+                                     {}\nOriginal user request: {}\nReason: {}\n\nThis may mean \
+                                     the selected tool is wrong for the user's intent, or the \
+                                     user request lacks required fields. Retry with corrected \
+                                     arguments if they can be inferred, choose a better matching \
+                                     skill/tool if available, or ask one concise clarification \
+                                     question.",
+                                    skill_id, tool_name, input, reason
                                 ),
                                 structured_output: None,
                                 execution_time_ms: start_time.elapsed().as_millis() as u64,
@@ -3295,12 +6886,15 @@ impl Agent {
                         Err(e) => {
                             warn!("MCP parameter extraction failed for '{}': {}", skill_id, e);
                             return Ok(skills::executor::SkillExecutionResult {
-                                task_id: skill_id,
+                                task_id: skill_id.clone(),
                                 success: false,
                                 output: format!(
-                                    "参数提取失败: {}。请尝试用更明确的格式描述，例如：'买入 BTC \
-                                     100 美元'。",
-                                    e
+                                    "MCP parameter extraction failed.\nSkill: {}\nTool: \
+                                     {}\nOriginal user request: {}\nError: {}\n\nTreat this as a \
+                                     recoverable observation. Retry with corrected arguments, \
+                                     select a more appropriate skill/tool, or ask the user for \
+                                     the single missing detail needed.",
+                                    skill_id, tool_name, input, e
                                 ),
                                 structured_output: None,
                                 execution_time_ms: start_time.elapsed().as_millis() as u64,
@@ -3320,9 +6914,18 @@ impl Agent {
                     crate::mcp::skill_bridge::validate_tool_arguments(schema, &final_params)
                 {
                     return Ok(skills::executor::SkillExecutionResult {
-                        task_id: skill_id,
+                        task_id: skill_id.clone(),
                         success: false,
-                        output: format!("参数验证失败: {}。请检查您提供的参数是否符合要求。", e),
+                        output: format!(
+                            "MCP parameter validation failed.\nSkill: {}\nTool: {}\nArguments: \
+                             {}\nValidation error: {}\n\nTreat this as a recoverable observation. \
+                             Retry with corrected arguments, choose a better matching skill/tool, \
+                             or ask one concise clarification question.",
+                            skill_id,
+                            tool_name,
+                            serde_json::Value::Object(final_params.clone()),
+                            e
+                        ),
                         structured_output: None,
                         execution_time_ms: start_time.elapsed().as_millis() as u64,
                     });
@@ -3335,7 +6938,7 @@ impl Agent {
             // confirmed)
             if is_high_risk && !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst) {
                 let preview = Self::generate_action_preview(&skill_id, &tool_name, &final_params);
-                let env = std::collections::HashMap::new();
+                let env = Self::approval_env();
                 let params_json: serde_json::Value = final_params
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
@@ -3372,8 +6975,8 @@ impl Agent {
                                 task_id: skill_id,
                                 success: false,
                                 output: format!(
-                                    "{}\n\n{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\n\
-                                     请回复「确认」或「同意」来执行此操作。",
+                                    "{}\n\n{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\\
+                                     n请回复「确认」或「同意」来执行此操作。",
                                     preview, reason
                                 ),
                                 structured_output: None,
@@ -3393,7 +6996,7 @@ impl Agent {
                                 task_id: skill_id,
                                 success: false,
                                 output: format!(
-                                    "{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\n\\
+                                    "{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\\
                                      n请回复「确认」或「同意」来执行此操作。",
                                     preview
                                 ),
@@ -3426,14 +7029,19 @@ impl Agent {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Err(AgentError::Execution(format!(
-                    "MCP tool returned an error: {}",
-                    if error_text.is_empty() {
-                        "unknown error".to_string()
-                    } else {
-                        error_text
-                    }
-                )));
+                let message = if error_text.is_empty() {
+                    "unknown error".to_string()
+                } else {
+                    error_text
+                };
+                let output = format_mcp_call_error(&skill_id, &message);
+                return Ok(skills::executor::SkillExecutionResult {
+                    task_id: skill_id,
+                    success: false,
+                    output,
+                    structured_output: None,
+                    execution_time_ms: start_time.elapsed().as_millis() as u64,
+                });
             } else {
                 result
                     .content
@@ -3650,389 +7258,6 @@ impl Agent {
             .map_err(|e| AgentError::Execution(format!("Skill execution failed: {}", e)))
     }
 
-    // ── System Inventory Query Methods ──
-
-    /// Safely truncate a string to at most `max_chars` Unicode scalar values
-    /// without splitting in the middle of a grapheme cluster.
-    fn safe_truncate(s: &str, max_chars: usize) -> String {
-        let mut result = String::with_capacity(max_chars * 4);
-        for (i, ch) in s.chars().enumerate() {
-            if i >= max_chars {
-                result.push_str("…");
-                break;
-            }
-            result.push(ch);
-        }
-        result
-    }
-
-    /// 🆕 Query tool inventory — lists all available tools from tool_set.rs
-    async fn query_tool_inventory(
-        &self,
-    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
-        let tools = crate::skills::tool_set::default_tool_set(&self.tool_work_dir);
-        let mut lines = vec![
-            "# 本机可用工具清单 (Tools)\n".to_string(),
-            "| 序号 | 工具名 | 描述 | 参数 |
-            "
-            .to_string(),
-            "|------|--------|------|------|".to_string(),
-        ];
-        for (idx, (name, tool)) in tools.iter().enumerate() {
-            let schema = tool.parameters_schema().to_string();
-            let schema_short = Self::safe_truncate(&schema, 60);
-            lines.push(format!(
-                "| {} | `{}` | {} | `{}` |",
-                idx + 1,
-                name,
-                tool.description().trim(),
-                schema_short
-            ));
-        }
-        lines.push(format!("\n**共计 {} 个工具**", tools.len()));
-        lines.push(
-            "\n> 💡 提示：如需了解某个工具的详细用法，可以直接问「tool_name 工具怎么用」"
-                .to_string(),
-        );
-
-        Ok(skills::executor::SkillExecutionResult {
-            task_id: "tool_inventory".to_string(),
-            success: true,
-            output: lines.join("\n"),
-            structured_output: None,
-            execution_time_ms: 0,
-        })
-    }
-
-    /// 🆕 Query skill inventory — lists all registered skills from
-    /// SkillRegistry
-    async fn query_skill_inventory(
-        &self,
-    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
-        let registry = self
-            .skill_registry
-            .as_ref()
-            .ok_or_else(|| AgentError::InvalidConfig("Skill registry not configured".into()))?;
-
-        let skills = registry.list_enabled().await;
-        let mut lines = vec![
-            "# 本机可用技能清单 (Skills)\n".to_string(),
-            "| 序号 | 技能名 | 分类 | 描述 | 使用次数 |
-            "
-            .to_string(),
-            "|------|--------|------|------|----------|".to_string(),
-        ];
-        for (idx, skill) in skills.iter().enumerate() {
-            let desc = if skill.skill.manifest.description.is_empty() {
-                skill.skill.manifest.name.clone()
-            } else {
-                skill.skill.manifest.description.clone()
-            };
-            let category = if skill.category.is_empty() {
-                "general".to_string()
-            } else {
-                skill.category.clone()
-            };
-            let skill_type = if skill.skill.name.starts_with("mcp:") {
-                "MCP"
-            } else if skill.skill.manifest.prompt_template.is_empty() {
-                "内置"
-            } else {
-                "知识"
-            };
-            lines.push(format!(
-                "| {} | `{}` | {}·{} | {} | {} |",
-                idx + 1,
-                skill.skill.name,
-                category,
-                skill_type,
-                Self::safe_truncate(desc.trim(), 100),
-                skill.usage_count
-            ));
-        }
-        lines.push(format!("\n**共计 {} 个技能**", skills.len()));
-        lines.push(
-            "\n> 💡 类型说明：`内置`=系统硬编码技能，`知识`=Markdown 定义技能，`MCP`=外部 MCP \
-             服务桥接"
-                .to_string(),
-        );
-
-        Ok(skills::executor::SkillExecutionResult {
-            task_id: "skill_inventory".to_string(),
-            success: true,
-            output: lines.join("\n"),
-            structured_output: None,
-            execution_time_ms: 0,
-        })
-    }
-
-    /// 🆕 Query schedule inventory — merges Workflow cron triggers + Gateway
-    /// cron jobs
-    async fn query_schedule_inventory(
-        &self,
-    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
-        use crate::workflow::TriggerType;
-        let mut lines = vec!["# 本机定时任务清单\n".to_string()];
-        let mut total = 0;
-
-        // ── Source A: Workflow Cron Triggers ──
-        lines.push("## Workflow 定时触发器\n".to_string());
-        if let Some(ref registry) = self.workflow_registry {
-            let workflows = registry.list_all();
-            let mut has_cron = false;
-            let mut wf_idx = 1;
-            for def in workflows {
-                for trigger in &def.triggers {
-                    if let TriggerType::Cron { schedule, timezone } = &trigger.trigger_type {
-                        has_cron = true;
-                        total += 1;
-                        lines.push(format!(
-                            "{}. **{}** | 规则: `{}` | 时区: {} | 描述: {}",
-                            wf_idx,
-                            def.name,
-                            schedule,
-                            timezone.as_deref().unwrap_or("UTC"),
-                            def.description
-                        ));
-                        wf_idx += 1;
-                    }
-                }
-            }
-            if !has_cron {
-                lines.push("（无 Workflow 定时触发器）\n".to_string());
-            }
-        } else {
-            lines.push("（Workflow 注册表未配置）\n".to_string());
-        }
-
-        // ── Source B: Gateway Frontend Cron Jobs ──
-        lines.push("\n## 控制栏定时任务\n".to_string());
-        if let Some(ref provider) = self.system_info_provider {
-            match provider.list_gateway_cron_jobs().await {
-                Ok(jobs) if !jobs.is_empty() => {
-                    let mut job_idx = 1;
-                    for job in jobs {
-                        total += 1;
-                        let status = if job.enabled {
-                            "🟢 启用"
-                        } else {
-                            "🔴 停用"
-                        };
-                        let last_run = job
-                            .last_run_at
-                            .as_deref()
-                            .map(|t| format!(" | 上次运行: {}", t))
-                            .unwrap_or_default();
-                        lines.push(format!(
-                            "{}. {} **{}** | 类型: `{}` | 规则: `{}` | 时区: {} | 已运行: {} 次{} \
-                             | {}",
-                            job_idx,
-                            status,
-                            job.name,
-                            job.schedule_type,
-                            job.schedule_expr,
-                            job.timezone,
-                            job.run_count,
-                            last_run,
-                            job.description
-                        ));
-                        job_idx += 1;
-                    }
-                }
-                Ok(_) => {
-                    lines.push("（无控制栏定时任务）\n".to_string());
-                }
-                Err(e) => {
-                    lines.push(format!("（查询控制栏定时任务失败: {}）\n", e));
-                }
-            }
-        } else {
-            lines.push("（系统信息提供者未配置，无法查询控制栏定时任务）\n".to_string());
-        }
-
-        if total == 0 {
-            lines.push("\n**当前无任何定时任务配置**".to_string());
-        } else {
-            lines.push(format!("\n**共计 {} 个定时任务**", total));
-        }
-
-        Ok(skills::executor::SkillExecutionResult {
-            task_id: "schedule_inventory".to_string(),
-            success: true,
-            output: lines.join("\n"),
-            structured_output: None,
-            execution_time_ms: 0,
-        })
-    }
-
-    /// 🆕 Query agent inventory — lists all agents and their states
-    async fn query_agent_inventory(
-        &self,
-    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
-        let mut lines = vec![
-            "# 系统中 Agent 状态清单\n".to_string(),
-            "| 序号 | Agent ID | 状态 | 注册时间 | 总任务 | 成功 | 失败 |".to_string(),
-            "|------|----------|------|----------|--------|------|------|".to_string(),
-        ];
-
-        if let Some(ref provider) = self.system_info_provider {
-            match provider.list_agents().await {
-                Ok(agents) if !agents.is_empty() => {
-                    for (idx, agent) in agents.iter().enumerate() {
-                        let registered = agent.registered_at.as_deref().unwrap_or("未知");
-                        lines.push(format!(
-                            "| {} | `{}` | {} | {} | {} | {} | {} |",
-                            idx + 1,
-                            agent.agent_id,
-                            agent.state,
-                            registered,
-                            agent.total_tasks,
-                            agent.successful_tasks,
-                            agent.failed_tasks
-                        ));
-                    }
-                    lines.push(format!("\n**共计 {} 个 Agent**", agents.len()));
-                }
-                Ok(_) => {
-                    lines.push("\n**当前系统中无任何 Agent**".to_string());
-                }
-                Err(e) => {
-                    lines.push(format!("\n（查询 Agent 列表失败: {}）", e));
-                }
-            }
-        } else {
-            lines.push("\n（系统信息提供者未配置，无法查询 Agent 状态）".to_string());
-        }
-
-        Ok(skills::executor::SkillExecutionResult {
-            task_id: "agent_inventory".to_string(),
-            success: true,
-            output: lines.join("\n"),
-            structured_output: None,
-            execution_time_ms: 0,
-        })
-    }
-
-    /// 🆕 Query workflow inventory — lists all registered workflows
-    async fn query_workflow_inventory(
-        &self,
-    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
-        let mut lines = vec![
-            "# 本机 Workflow 清单\n".to_string(),
-            "| 序号 | ID | 名称 | 版本 | 步骤数 | 触发器 | 标签 |".to_string(),
-            "|------|----|------|------|--------|--------|------|".to_string(),
-        ];
-
-        if let Some(ref registry) = self.workflow_registry {
-            let workflows = registry.list_all();
-            for (idx, wf) in workflows.iter().enumerate() {
-                let trigger_count = wf.triggers.len();
-                let step_count = wf.steps.len();
-                let tags = if wf.tags.is_empty() {
-                    "-".to_string()
-                } else {
-                    wf.tags.join(", ")
-                };
-                lines.push(format!(
-                    "| {} | `{}` | {} | {} | {} | {} | {} |",
-                    idx + 1,
-                    wf.id,
-                    wf.name,
-                    wf.version,
-                    step_count,
-                    trigger_count,
-                    tags
-                ));
-            }
-            if workflows.is_empty() {
-                lines.push("\n**当前无任何 Workflow 配置**".to_string());
-            } else {
-                lines.push(format!("\n**共计 {} 个 Workflow**", workflows.len()));
-            }
-        } else {
-            lines.push("\n（Workflow 注册表未配置）".to_string());
-        }
-
-        Ok(skills::executor::SkillExecutionResult {
-            task_id: "workflow_inventory".to_string(),
-            success: true,
-            output: lines.join("\n"),
-            structured_output: None,
-            execution_time_ms: 0,
-        })
-    }
-
-    /// 🆕 Query MCP inventory — lists connected MCP servers and their tools
-    async fn query_mcp_inventory(
-        &self,
-    ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
-        let mut lines = vec!["# MCP 服务连接清单\n".to_string()];
-
-        if let Some(ref mcp) = self.mcp_manager {
-            let clients = mcp.list_clients().await;
-            let servers = mcp.list_servers().await;
-
-            if !clients.is_empty() {
-                lines.push("## 已连接的 MCP Clients\n".to_string());
-                for (idx, name) in clients.iter().enumerate() {
-                    let tool_count = match mcp.get_client(name).await {
-                        Some(client) => {
-                            if client.is_initialized() {
-                                match client.list_tools(None).await {
-                                    Ok(result) => format!("{} 个工具", result.tools.len()),
-                                    Err(_) => "无法获取工具列表".to_string(),
-                                }
-                            } else {
-                                "未初始化".to_string()
-                            }
-                        }
-                        None => "无法访问".to_string(),
-                    };
-                    lines.push(format!(
-                        "{}. **{}** | 状态: {} | {}",
-                        idx + 1,
-                        name,
-                        if mcp
-                            .get_client(name)
-                            .await
-                            .map(|c| c.is_initialized())
-                            .unwrap_or(false)
-                        {
-                            "🟢 已初始化"
-                        } else {
-                            "🟡 未初始化"
-                        },
-                        tool_count
-                    ));
-                }
-            } else {
-                lines.push("（无已连接的 MCP Clients）\n".to_string());
-            }
-
-            if !servers.is_empty() {
-                lines.push("\n## 已注册的 MCP Servers\n".to_string());
-                for (idx, name) in servers.iter().enumerate() {
-                    lines.push(format!("{}. **{}**", idx + 1, name));
-                }
-                lines.push(format!("\n**共计 {} 个 Server**", servers.len()));
-            }
-
-            if clients.is_empty() && servers.is_empty() {
-                lines.push("**当前未连接任何 MCP 服务**".to_string());
-            }
-        } else {
-            lines.push("（MCP 管理器未配置）".to_string());
-        }
-
-        Ok(skills::executor::SkillExecutionResult {
-            task_id: "mcp_inventory".to_string(),
-            success: true,
-            output: lines.join("\n"),
-            structured_output: None,
-            execution_time_ms: 0,
-        })
-    }
-
     async fn handle_skill_task(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {
         let skill_name = task
             .parameters
@@ -4163,11 +7388,10 @@ impl Agent {
             .map_err(|e| AgentError::Execution(format!("Failed to read file: {}", e)))?;
 
         let output = if task.input.is_empty() {
-            let display_content: String = content.chars().take(100).collect();
             format!(
                 "File content ({} bytes): {}",
                 content.len(),
-                display_content
+                &content[..content.len().min(100)]
             )
         } else {
             let llm = self
@@ -4361,12 +7585,90 @@ impl Agent {
         &self,
         task: Task,
     ) -> Result<(String, Vec<Artifact>), AgentError> {
+        let message_text = serde_json::from_str::<serde_json::Value>(&task.input)
+            .ok()
+            .and_then(|json| {
+                json.get("message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| task.input.clone());
+
         info!(
-            "🧠 Unified ReAct planning for task {} (routed to execute_unified_react)",
+            "🧠 Unified ReAct planning for task {} (legacy P2 Planning removed)",
             task.id
         );
-        // 🆕 All planning tasks now go through the unified ReAct executor
-        self.execute_unified_react(task).await
+
+        let lower = message_text.to_lowercase();
+        let has_crypto = [
+            "btc",
+            "bitcoin",
+            "比特币",
+            "eth",
+            "ethereum",
+            "以太坊",
+            "sol",
+            "xrp",
+            "doge",
+            "加密货币",
+            "crypto",
+            "数字货币",
+        ]
+        .iter()
+        .any(|s| lower.contains(s));
+
+        if has_crypto {
+            // Investment-analysis path: use the multi-round ReAct executor
+            let intent = crate::skill_matching::IntentAnalysisV2 {
+                direct_answer: false,
+                needs_skill: true,
+                needs_planning: true,
+                planning_strategy_hint: None,
+                intent: crate::intent::UserIntent::MultiStepPlanning,
+                entities: std::collections::HashMap::new(),
+                constraints: Vec::new(),
+                confidence: 1.0,
+                query_summary: message_text.clone(),
+                active_toolsets: vec![],
+            };
+            return self
+                .execute_with_react_planning(&task, &message_text, &intent)
+                .await;
+        }
+
+        // General path: delegate to LLM with native tool-calling (single-round
+        // autonomous skill selection). The LLM decides which tool to call based
+        // on injected tool descriptions.
+        // 🆕 FIX: Add _skip_planning marker to prevent recursive routing back to
+        // execute_with_planning via handle_llm_task_internal's is_complex check.
+        let mut task = task;
+        task.parameters
+            .insert("_skip_planning".to_string(), "true".to_string());
+        let intent = crate::skill_matching::IntentAnalysisV2 {
+            direct_answer: false,
+            needs_skill: true,
+            needs_planning: true,
+            planning_strategy_hint: None,
+            intent: crate::intent::UserIntent::MultiStepPlanning,
+            entities: std::collections::HashMap::new(),
+            constraints: Vec::new(),
+            confidence: 1.0,
+            query_summary: message_text.clone(),
+            active_toolsets: vec![],
+        };
+        let selection = crate::skill_matching::SkillSelection {
+            selected_skill: None,
+            selected_skill_name: None,
+            needs_planning: true,
+            confidence: 0.0,
+            scores: Vec::new(),
+            selection_reasoning: "Unified ReAct general planning".to_string(),
+            disclosure_level: crate::skills::registry::SkillDisclosureLevel::L0,
+        };
+        // 🆕 FIX: Use Box::pin to break the recursive async fn chain
+        // (execute_with_planning → handle_llm_task_v2 → handle_llm_task_internal
+        // → execute_with_planning).
+        Box::pin(self.handle_llm_task_v2(&task, &intent, &selection)).await
     }
 
     /// Create plan context from task
@@ -4428,7 +7730,6 @@ impl Agent {
     ///
     /// Stores the plan + execution trail as a reusable experience entry.
     /// Future similar queries can retrieve this experience via memory search.
-    #[allow(dead_code)]
     async fn solidify_experience(
         &self,
         goal: &str,
@@ -4483,7 +7784,6 @@ impl Agent {
     }
 
     /// 🆕 PHASE 2: Auto-distill skill from successful execution trail
-    #[allow(dead_code)]
     async fn maybe_distill_skill(
         &self,
         trail: &crate::planning::ToolTrail,
@@ -5970,15 +9270,22 @@ pub enum TaskComplexity {
 // ============================================================================
 
 fn format_known_skill_output(skill_id: &str, raw_output: &str) -> Option<String> {
+    if let Some(error) = format_structured_mcp_error(skill_id, raw_output) {
+        return Some(error);
+    }
+
     match skill_id {
+        "mcp:alpaca/get_all_positions" | "mcp:alpaca/get_open_position" => {
+            format_alpaca_positions(raw_output)
+        }
         "mcp:alpaca/get_crypto_latest_trade" => format_crypto_latest_trade(raw_output),
-        "mcp:alpaca/get_crypto_latest_quote" => format_crypto_latest_quote(raw_output),
-        "mcp:alpaca/get_crypto_snapshot"
-        | "mcp:alpaca/get_crypto_quote"
-        | "mcp:alpaca/get_crypto_bars" => format_crypto_snapshot(raw_output),
-        "mcp:alpaca/place_crypto_order" => format_alpaca_order(raw_output),
-        "mcp:alpaca/get_all_positions" => format_alpaca_positions(raw_output),
-        "mcp:alpaca/get_open_position" => format_alpaca_positions(raw_output),
+        "mcp:alpaca/get_crypto_latest_quote" | "mcp:alpaca/get_crypto_quotes" => {
+            format_crypto_quote(raw_output)
+        }
+        "mcp:alpaca/get_crypto_latest_orderbook" => format_crypto_orderbook(raw_output),
+        "mcp:alpaca/get_crypto_snapshot" | "mcp:alpaca/get_crypto_bars" => {
+            format_crypto_snapshot(raw_output)
+        }
         "mcp:alpaca/get_stock_snapshot"
         | "mcp:alpaca/get_stock_quote"
         | "mcp:alpaca/get_stock_bars" => format_crypto_snapshot(raw_output),
@@ -5986,153 +9293,191 @@ fn format_known_skill_output(skill_id: &str, raw_output: &str) -> Option<String>
     }
 }
 
-fn as_str_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(|v| v.as_str())
-}
-
-fn as_f64_field(value: &serde_json::Value, key: &str) -> Option<f64> {
-    value.get(key).and_then(|v| {
-        v.as_f64()
-            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
-    })
-}
-
-fn format_money(value: Option<f64>) -> String {
-    value
-        .map(|v| format!("${:.2}", v))
-        .unwrap_or_else(|| "-".to_string())
-}
-
-fn format_number(value: Option<f64>, decimals: usize) -> String {
-    value
-        .map(|v| format!("{:.*}", decimals, v))
-        .unwrap_or_else(|| "-".to_string())
-}
-
-fn format_percent(value: Option<f64>) -> String {
-    value
-        .map(|v| format!("{:+.2}%", v * 100.0))
-        .unwrap_or_else(|| "-".to_string())
-}
-
-fn format_alpaca_order(raw_output: &str) -> Option<String> {
+fn format_structured_mcp_error(skill_id: &str, raw_output: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw_output).ok()?;
-    let order = if let Some(arr) = v.as_array() {
-        arr.first()?
-    } else {
-        &v
-    };
+    if v.get("isError").and_then(|v| v.as_bool()).unwrap_or(false)
+        || v.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false)
+    {
+        let message = v
+            .get("content")
+            .and_then(|content| content.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| {
+                v.get("error")
+                    .and_then(|error| error.get("message").or(Some(error)))
+                    .and_then(|message| message.as_str())
+                    .map(|message| message.to_string())
+            })
+            .unwrap_or_else(|| raw_output.to_string());
+        return Some(format_mcp_call_error(skill_id, &message));
+    }
 
-    let symbol = as_str_field(order, "symbol").unwrap_or("-");
-    let side = match as_str_field(order, "side").unwrap_or("-") {
-        "buy" => "买入",
-        "sell" => "卖出",
-        other => other,
-    };
-    let order_type = as_str_field(order, "type")
-        .or_else(|| as_str_field(order, "order_type"))
-        .unwrap_or("-");
-    let status = as_str_field(order, "status").unwrap_or("-");
-    let notional = as_f64_field(order, "notional");
-    let filled_qty = as_f64_field(order, "filled_qty");
-    let filled_avg_price = as_f64_field(order, "filled_avg_price");
-    let submitted_at = as_str_field(order, "submitted_at").unwrap_or("-");
-    let filled_at = as_str_field(order, "filled_at").unwrap_or("-");
-    let id = as_str_field(order, "id").unwrap_or("-");
+    if let Some(error) = v.get("error") {
+        let message = error
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or_else(|| error.as_str().unwrap_or("unknown error"));
+        return Some(format_mcp_call_error(skill_id, message));
+    }
 
-    Some(format!(
-        "✅ 订单已提交{}\n• 订单ID：{}\n• 交易对：{}\n• 方向：{}\n• 类型：{}\n• 状态：{}\n• \
-         下单金额：{}\n• 成交数量：{} BTC\n• 成交均价：{}\n• 提交时间：{}\n• 成交时间：{}",
-        if status == "filled" { "并成交" } else { "" },
-        id,
-        symbol,
-        side,
-        order_type,
-        status,
-        format_money(notional),
-        format_number(filled_qty, 9),
-        format_money(filled_avg_price),
-        submitted_at,
-        filled_at
-    ))
+    None
+}
+
+fn format_mcp_call_error(skill_id: &str, message: &str) -> String {
+    let clean = message.trim();
+    if skill_id.starts_with("mcp:alpaca/") {
+        if clean.contains("ConnectError") || clean.contains("connection attempts failed") {
+            return "Alpaca MCP 调用失败：已找到 Alpaca 凭证和工具，但当前运行环境无法连接 Alpaca \
+                    API。请确认 BeeBotOS 进程所在环境允许访问 Alpaca \
+                    域名，或检查网络/代理配置后重试。"
+                .to_string();
+        }
+        return format!(
+            "Alpaca MCP 调用失败：{}",
+            if clean.is_empty() {
+                "unknown error"
+            } else {
+                clean
+            }
+        );
+    }
+
+    format!(
+        "MCP tool 调用失败：{}",
+        if clean.is_empty() {
+            "unknown error"
+        } else {
+            clean
+        }
+    )
 }
 
 fn format_alpaca_positions(raw_output: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw_output).ok()?;
-    let positions: Vec<&serde_json::Value> = if let Some(arr) = v.as_array() {
-        arr.iter().collect()
+    let positions = if let Some(arr) = v.as_array() {
+        arr
+    } else if let Some(arr) = v.get("positions").and_then(|p| p.as_array()) {
+        arr
+    } else if let Some(arr) = v.get("result").and_then(|p| p.as_array()) {
+        arr
     } else if v.is_object() {
-        vec![&v]
+        return is_alpaca_position(&v).then(|| format_single_position(&v));
     } else {
         return None;
     };
 
     if positions.is_empty() {
-        return Some("📌 当前无持仓。".to_string());
+        return Some("当前 Alpaca 账户没有持仓。".to_string());
     }
 
-    let mut blocks = Vec::new();
-    for pos in positions {
-        let symbol = as_str_field(pos, "symbol").unwrap_or("-");
-        let side = match as_str_field(pos, "side").unwrap_or("-") {
-            "long" => "多头",
-            "short" => "空头",
-            other => other,
-        };
-        let qty = as_f64_field(pos, "qty");
-        let available = as_f64_field(pos, "qty_available");
-        let avg_entry = as_f64_field(pos, "avg_entry_price");
-        let current = as_f64_field(pos, "current_price");
-        let market_value = as_f64_field(pos, "market_value");
-        let cost_basis = as_f64_field(pos, "cost_basis");
-        let pl = as_f64_field(pos, "unrealized_pl");
-        let plpc = as_f64_field(pos, "unrealized_plpc");
+    let mut lines = vec!["📌 Alpaca 当前持仓".to_string()];
+    for position in positions {
+        if !is_alpaca_position(position) {
+            continue;
+        }
+        let symbol = position
+            .get("symbol")
+            .and_then(|s| s.as_str())
+            .unwrap_or("UNKNOWN");
+        let qty = json_text(position, &["qty", "quantity"]).unwrap_or_else(|| "-".to_string());
+        let side = json_text(position, &["side"]).unwrap_or_default();
+        let market_value = json_text(position, &["market_value", "marketValue"]);
+        let avg_entry = json_text(position, &["avg_entry_price", "avgEntryPrice"]);
+        let current = json_text(position, &["current_price", "currentPrice"]);
+        let unrealized = json_text(position, &["unrealized_pl", "unrealizedPl"]);
+        let unrealized_pct = json_text(position, &["unrealized_plpc", "unrealizedPlpc"]);
 
-        blocks.push(format!(
-            "📌 当前持仓：{}\n• 方向：{}\n• 数量：{}\n• 可用数量：{}\n• 持仓市值：{}\n• \
-             成本：{}\n• 均价：{}\n• 当前价：{}\n• 未实现盈亏：{} ({})",
+        lines.push(format!(
+            "\n【{}】数量: {}{}",
             symbol,
-            side,
-            format_number(qty, 9),
-            format_number(available, 9),
-            format_money(market_value),
-            format_money(cost_basis),
-            format_money(avg_entry),
-            format_money(current),
-            format_money(pl),
-            format_percent(plpc)
+            qty,
+            if side.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", side)
+            }
         ));
+        if let Some(value) = market_value {
+            lines.push(format!("  市值: {} USD", value));
+        }
+        if let Some(value) = avg_entry {
+            lines.push(format!("  成本均价: {} USD", value));
+        }
+        if let Some(value) = current {
+            lines.push(format!("  当前价格: {} USD", value));
+        }
+        if let Some(value) = unrealized {
+            lines.push(format!("  未实现盈亏: {} USD", value));
+        }
+        if let Some(value) = unrealized_pct {
+            if let Ok(n) = value.parse::<f64>() {
+                lines.push(format!("  未实现盈亏率: {:+.2}%", n * 100.0));
+            } else {
+                lines.push(format!("  未实现盈亏率: {}", value));
+            }
+        }
     }
-
-    Some(blocks.join("\n\n"))
-}
-
-fn strip_successful_command_wrapper(raw_output: &str) -> Option<String> {
-    let trimmed = raw_output.trim();
-    let body = trimmed
-        .strip_prefix("Command executed successfully.")
-        .map(str::trim)
-        .unwrap_or(trimmed);
-
-    if !body.starts_with("✅ Exit code: 0") {
-        return None;
-    }
-
-    let stdout_marker = "STDOUT:";
-    let stdout_start = body.find(stdout_marker)? + stdout_marker.len();
-    let after_stdout = body[stdout_start..].trim_start_matches(['\r', '\n']);
-    let stdout = if let Some(stderr_pos) = after_stdout.find("\nSTDERR:") {
-        &after_stdout[..stderr_pos]
-    } else {
-        after_stdout
-    };
-
-    let stdout = stdout.trim();
-    if stdout.is_empty() {
+    if lines.len() == 1 {
         None
     } else {
-        Some(stdout.to_string())
+        Some(lines.join("\n"))
     }
+}
+
+fn format_single_position(position: &serde_json::Value) -> String {
+    let symbol = position
+        .get("symbol")
+        .and_then(|s| s.as_str())
+        .unwrap_or("UNKNOWN");
+    let qty = json_text(position, &["qty", "quantity"]).unwrap_or_else(|| "-".to_string());
+    let mut lines = vec![format!("📌 Alpaca 持仓：{} 数量 {}", symbol, qty)];
+    for (label, keys) in [
+        ("市值", ["market_value", "marketValue"]),
+        ("成本均价", ["avg_entry_price", "avgEntryPrice"]),
+        ("当前价格", ["current_price", "currentPrice"]),
+        ("未实现盈亏", ["unrealized_pl", "unrealizedPl"]),
+    ] {
+        if let Some(value) = json_text(position, &keys) {
+            lines.push(format!("{}: {} USD", label, value));
+        }
+    }
+    lines.join("\n")
+}
+
+fn is_alpaca_position(value: &serde_json::Value) -> bool {
+    value.is_object()
+        && value.get("symbol").and_then(|s| s.as_str()).is_some()
+        && (value.get("qty").is_some()
+            || value.get("quantity").is_some()
+            || value.get("market_value").is_some()
+            || value.get("marketValue").is_some()
+            || value.get("asset_class").is_some())
+}
+
+fn json_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(v) = value.get(key) {
+            if let Some(s) = v.as_str() {
+                return Some(s.to_string());
+            }
+            if let Some(n) = v.as_f64() {
+                return Some(
+                    format!("{:.6}", n)
+                        .trim_end_matches('0')
+                        .trim_end_matches('.')
+                        .to_string(),
+                );
+            }
+        }
+    }
+    None
 }
 
 fn format_crypto_latest_trade(raw_output: &str) -> Option<String> {
@@ -6172,61 +9517,87 @@ fn format_crypto_latest_trade(raw_output: &str) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-fn format_crypto_latest_quote(raw_output: &str) -> Option<String> {
+fn format_crypto_quote(raw_output: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw_output).ok()?;
     let quotes = v
         .get("quotes")
-        .and_then(|q| q.as_object())
+        .and_then(|s| s.as_object())
         .or_else(|| v.as_object())?;
-
-    let mut lines = vec!["📈 最新加密货币报价".to_string()];
+    let mut lines = vec!["📊 最新报价".to_string()];
     let mut any_data = false;
 
     for (symbol, data) in quotes {
-        if symbol == "quotes" || !data.is_object() {
+        if symbol == "quotes" {
             continue;
         }
-
-        let bid = data.get("bp").and_then(|v| v.as_f64());
-        let ask = data.get("ap").and_then(|v| v.as_f64());
-        let bid_size = data.get("bs").and_then(|v| v.as_f64());
-        let ask_size = data.get("as").and_then(|v| v.as_f64());
-        let timestamp = data
-            .get("t")
-            .and_then(|v| v.as_str())
-            .or_else(|| data.get("timestamp").and_then(|v| v.as_str()));
-
-        if bid.is_none() && ask.is_none() {
-            continue;
-        }
-
-        lines.push(format!("\n【{}】", symbol));
-        if let Some(bid) = bid {
-            lines.push(format!("  买一价: {:.2} USD", bid));
-        }
-        if let Some(ask) = ask {
-            lines.push(format!("  卖一价: {:.2} USD", ask));
-        }
+        let bid = data
+            .get("bp")
+            .or_else(|| data.get("bidPrice"))
+            .or_else(|| data.get("bid"))
+            .and_then(|v| v.as_f64());
+        let ask = data
+            .get("ap")
+            .or_else(|| data.get("askPrice"))
+            .or_else(|| data.get("ask"))
+            .and_then(|v| v.as_f64());
         if let (Some(bid), Some(ask)) = (bid, ask) {
-            lines.push(format!("  买卖价差: {:.2} USD", ask - bid));
+            any_data = true;
+            lines.push(format!("\n【{}】", symbol));
+            lines.push(format!("  买一 / 卖一: {:.2} / {:.2} USD", bid, ask));
+            lines.push(format!("  中间价: {:.2} USD", (bid + ask) / 2.0));
         }
-        if let Some(size) = bid_size {
-            lines.push(format!("  买一量: {:.6}", size));
+        if let Some(t) = data.get("t").and_then(|t| t.as_str()) {
+            lines.push(format!("  时间: {}", t));
         }
-        if let Some(size) = ask_size {
-            lines.push(format!("  卖一量: {:.6}", size));
-        }
-        if let Some(t) = timestamp {
-            lines.push(format!("  报价时间: {}", t));
-        }
-        any_data = true;
     }
 
-    if any_data {
-        Some(lines.join("\n"))
-    } else {
-        None
+    any_data.then(|| lines.join("\n"))
+}
+
+fn format_crypto_orderbook(raw_output: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw_output).ok()?;
+    let book = v
+        .get("orderbook")
+        .or_else(|| v.get("orderBook"))
+        .unwrap_or(&v);
+    let symbol = v
+        .get("symbol")
+        .and_then(|s| s.as_str())
+        .or_else(|| book.get("symbol").and_then(|s| s.as_str()))
+        .unwrap_or("BTC/USD");
+    let bids = book.get("bids").and_then(|b| b.as_array())?;
+    let asks = book.get("asks").and_then(|a| a.as_array())?;
+    let best_bid = bids.first().and_then(orderbook_level);
+    let best_ask = asks.first().and_then(orderbook_level);
+
+    let mut lines = vec![format!("📚 {} 订单簿", symbol)];
+    if let Some((price, size)) = best_bid {
+        lines.push(format!("买一: {:.2} USD，数量 {:.6}", price, size));
     }
+    if let Some((price, size)) = best_ask {
+        lines.push(format!("卖一: {:.2} USD，数量 {:.6}", price, size));
+    }
+    if let (Some((bid, _)), Some((ask, _))) = (best_bid, best_ask) {
+        lines.push(format!("中间价: {:.2} USD", (bid + ask) / 2.0));
+        lines.push(format!("价差: {:.2} USD", ask - bid));
+    }
+    if lines.len() == 1 {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn orderbook_level(value: &serde_json::Value) -> Option<(f64, f64)> {
+    let price = value
+        .get("p")
+        .or_else(|| value.get("price"))
+        .and_then(|v| v.as_f64())?;
+    let size = value
+        .get("s")
+        .or_else(|| value.get("size"))
+        .and_then(|v| v.as_f64())?;
+    Some((price, size))
 }
 
 fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
@@ -6236,7 +9607,7 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
         .get("snapshots")
         .and_then(|s| s.as_object())
         .or_else(|| v.as_object())?;
-    let mut all_blocks = Vec::new();
+    let mut lines = vec!["📈 市场行情快照".to_string()];
     let mut any_data = false;
 
     for (symbol, data) in snapshots {
@@ -6245,7 +9616,7 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
         if symbol == "snapshots" {
             continue;
         }
-        let mut lines = vec![format!("📈 {} 最新行情", symbol)];
+        lines.push(format!("\n【{}】", symbol));
         let mut symbol_has_data = false;
 
         // Helper: try multiple common price field names
@@ -6260,7 +9631,7 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
 
         if let Some(lt) = data.get("latestTrade") {
             if let Some(p) = get_price(lt, &["p", "price", "P"]) {
-                lines.push(format!("• 最新成交价: ${:.2}", p));
+                lines.push(format!("  最新成交价: {:.2} USD", p));
                 symbol_has_data = true;
             }
             if let Some(s) = lt
@@ -6268,7 +9639,7 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
                 .and_then(|s| s.as_f64())
                 .or_else(|| lt.get("size").and_then(|s| s.as_f64()))
             {
-                lines.push(format!("• 最新成交量: {:.6}", s));
+                lines.push(format!("  最新成交量: {:.6}", s));
                 symbol_has_data = true;
             }
         }
@@ -6279,68 +9650,64 @@ fn format_crypto_snapshot(raw_output: &str) -> Option<String> {
             let ask = get_price(q, &["ap", "askPrice", "ask"])
                 .or_else(|| q.get("a").and_then(|p| p.as_f64()));
             if let (Some(bid), Some(ask)) = (bid, ask) {
-                lines.push(format!("• 买一 / 卖一: ${:.2} / ${:.2}", bid, ask));
+                lines.push(format!("  买一 / 卖一: {:.2} / {:.2} USD", bid, ask));
                 symbol_has_data = true;
             }
         }
 
-        let mut day_change: Option<f64> = None;
         if let Some(db) = data.get("dailyBar") {
             let o = get_price(db, &["o", "open"]);
             let h = get_price(db, &["h", "high"]);
             let l = get_price(db, &["l", "low"]);
-            let curr_c = get_price(db, &["c", "close"]);
+            let c = get_price(db, &["c", "close"]);
             let vol = db
                 .get("v")
                 .and_then(|p| p.as_f64())
                 .or_else(|| db.get("volume").and_then(|p| p.as_f64()));
-            if let Some(o) = o {
-                lines.push(format!("• 今日开盘: ${:.2}", o));
-                symbol_has_data = true;
-            }
-            if let Some(h) = h {
-                lines.push(format!("• 今日最高: ${:.2}", h));
-                symbol_has_data = true;
-            }
-            if let Some(l) = l {
-                lines.push(format!("• 今日最低: ${:.2}", l));
+            if o.is_some() && h.is_some() && l.is_some() && c.is_some() {
+                lines.push(format!(
+                    "  日K线: 开 {:.2} / 高 {:.2} / 低 {:.2} / 收 {:.2}",
+                    o.unwrap(),
+                    h.unwrap(),
+                    l.unwrap(),
+                    c.unwrap()
+                ));
                 symbol_has_data = true;
             }
             if let Some(vol) = vol {
-                lines.push(format!("• 日成交量: {:.4}", vol));
+                lines.push(format!("  日成交量: {:.4}", vol));
                 symbol_has_data = true;
-            }
-            if let Some(pb) = data.get("prevDailyBar") {
-                let prev_c = get_price(pb, &["c", "close"]);
-                if let (Some(prev_c), Some(curr_c)) = (prev_c, curr_c) {
-                    day_change = Some(((curr_c - prev_c) / prev_c) * 100.0);
-                }
             }
         }
 
-        if let Some(change) = day_change {
-            let marker = if change < 0.0 { " 📉" } else { " 📈" };
-            lines.push(format!("• 日涨跌幅: {:+.2}%{}", change, marker));
-            symbol_has_data = true;
+        if let Some(pb) = data.get("prevDailyBar") {
+            let prev_c = get_price(pb, &["c", "close"]);
+            let curr_c = data
+                .get("dailyBar")
+                .and_then(|db| get_price(db, &["c", "close"]));
+            if let (Some(prev_c), Some(curr_c)) = (prev_c, curr_c) {
+                let change = ((curr_c - prev_c) / prev_c) * 100.0;
+                lines.push(format!("  较昨日收盘: {:+.2}%", change));
+                symbol_has_data = true;
+            }
         }
 
         if let Some(mb) = data.get("minuteBar") {
             if let Some(c) = get_price(mb, &["c", "close"]) {
-                lines.push(format!("• 最新分钟线收盘价: ${:.2}", c));
+                lines.push(format!("  最新分钟线收盘价: {:.2} USD", c));
                 symbol_has_data = true;
             }
         }
 
         if symbol_has_data {
             any_data = true;
-            all_blocks.push(lines.join("\n"));
         }
     }
 
     if !any_data {
         return None;
     }
-    Some(all_blocks.join("\n\n"))
+    Some(lines.join("\n"))
 }
 
 fn format_generic_json(raw_output: &str) -> Option<String> {
@@ -6400,6 +9767,156 @@ mod planning_integration_tests {
             .with_plan_executor(Arc::new(PlanExecutor::new()))
     }
 
+    fn test_loaded_skill(id: &str) -> LoadedSkill {
+        LoadedSkill {
+            id: id.to_string(),
+            name: "Test Skill".to_string(),
+            version: Version::new(1, 0, 0),
+            wasm_path: PathBuf::new(),
+            source_path: PathBuf::new(),
+            manifest: SkillManifest {
+                id: id.to_string(),
+                name: "Test Skill".to_string(),
+                version: Version::new(1, 0, 0),
+                description: "A test skill for context activation".to_string(),
+                author: "BeeBotOS".to_string(),
+                capabilities: vec!["testing".to_string()],
+                permissions: vec![],
+                entry_point: String::new(),
+                license: String::new(),
+                functions: vec![],
+                prompt_template: "Use this skill context for testing.".to_string(),
+                examples: String::new(),
+                when_to_use: String::new(),
+                when_not_to_use: None,
+                activation_examples: vec![],
+                activation_negative_examples: vec![],
+                dependencies: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn test_alpaca_position_formatter_handles_result_wrapper() {
+        let raw = r#"{"result":[{"symbol":"BTCUSD","asset_class":"crypto","qty":"0.001217063","side":"long","market_value":"99.03311","avg_entry_price":"80349","current_price":"81370.57","unrealized_pl":"1.243315","unrealized_plpc":"0.01271"}]}"#;
+        let formatted = format_alpaca_positions(raw).expect("formatted position");
+        assert!(formatted.contains("Alpaca 当前持仓"));
+        assert!(formatted.contains("BTCUSD"));
+        assert!(formatted.contains("数量: 0.001217063"));
+        assert!(!formatted.contains("UNKNOWN"));
+    }
+
+    #[test]
+    fn test_alpaca_error_formatter_does_not_render_unknown_position() {
+        let raw = r#"{"error":{"code":-32000,"message":"Error calling tool 'get_crypto_latest_quote': Request error (ConnectError): All connection attempts failed"}}"#;
+        let formatted = format_known_skill_output("mcp:alpaca/get_all_positions", raw)
+            .expect("formatted error");
+        assert!(formatted.contains("Alpaca MCP 调用失败"));
+        assert!(formatted.contains("无法连接 Alpaca API"));
+        assert!(!formatted.contains("UNKNOWN"));
+    }
+
+    #[test]
+    fn test_react_web_url_policy_blocks_private_targets() {
+        assert!(Agent::validate_public_web_url("file:///etc/passwd").is_err());
+        assert!(Agent::validate_public_web_url("http://localhost:8080").is_err());
+        assert!(Agent::validate_public_web_url("http://127.0.0.1:8080").is_err());
+        assert!(Agent::validate_public_web_url("http://10.0.0.1").is_err());
+        assert!(Agent::validate_public_web_url("https://example.com").is_ok());
+    }
+
+    #[test]
+    fn test_react_controlled_tools_are_exposed_only_when_enabled() {
+        std::env::remove_var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS");
+        let agent = create_test_agent();
+        let disabled_tools: std::collections::HashSet<String> = agent
+            .builtin_react_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(!disabled_tools.contains("write_file"));
+        assert!(!disabled_tools.contains("edit_file"));
+        assert!(!disabled_tools.contains("exec"));
+
+        std::env::set_var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS", "true");
+        let enabled_tools: std::collections::HashSet<String> = agent
+            .builtin_react_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(enabled_tools.contains("write_file"));
+        assert!(enabled_tools.contains("edit_file"));
+        assert!(enabled_tools.contains("exec"));
+        std::env::remove_var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS");
+    }
+
+    #[test]
+    fn test_react_duckduckgo_result_parser() {
+        let html = r#"
+            <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa">Example &amp; Result</a>
+        "#;
+        let results = Agent::parse_duckduckgo_results(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "Example & Result");
+        assert_eq!(results[0].1, "https://example.com/a");
+    }
+
+    #[test]
+    fn test_react_workspace_glob_and_grep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        std::fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub struct ToolAwareResponse;\n",
+        )
+        .expect("write");
+        std::env::set_var("BEEBOTOS_WORKSPACE", dir.path());
+        let agent = create_test_agent();
+
+        let glob = agent
+            .execute_workspace_glob("**/*.rs", ".", 20)
+            .expect("glob");
+        assert!(glob.contains("src/lib.rs"));
+
+        let grep = agent
+            .execute_workspace_grep("ToolAwareResponse", ".", Some("**/*.rs"), true, 20)
+            .expect("grep");
+        assert!(grep.contains("src/lib.rs:1:pub struct ToolAwareResponse;"));
+
+        let escaped = agent.resolve_workspace_path("../outside.txt");
+        assert!(escaped.is_err());
+        std::env::remove_var("BEEBOTOS_WORKSPACE");
+    }
+
+    #[tokio::test]
+    async fn test_react_activate_skill_persists_session_context() {
+        let registry = Arc::new(skills::SkillRegistry::new());
+        registry
+            .register_with_levels(
+                test_loaded_skill("test-skill"),
+                "test",
+                vec!["testing".to_string()],
+                Some("Test Skill: short".to_string()),
+                Some("Test Skill summary".to_string()),
+                Some("Full test skill context".to_string()),
+            )
+            .await;
+        let agent = create_test_agent().with_skill_registry(registry);
+
+        let result = agent
+            .activate_skill_context("session-1", "test-skill")
+            .await
+            .expect("activate");
+        assert!(result.contains("Activated skill"));
+
+        let active = agent
+            .active_skill_context_for_session("session-1")
+            .await
+            .expect("active context");
+        assert!(active.contains("Full test skill context"));
+        assert!(active.contains("`test-skill`"));
+    }
+
     // ============================================================================
     // Task Complexity Analysis Tests
     // ============================================================================
@@ -6412,7 +9929,6 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Hello".to_string(),
             parameters: HashMap::new(),
-            stream_tx: None,
         };
 
         assert_eq!(
@@ -6429,7 +9945,6 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "x".repeat(201), // > 200 chars
             parameters: HashMap::new(),
-            stream_tx: None,
         };
 
         assert_eq!(
@@ -6449,7 +9964,6 @@ mod planning_integration_tests {
             task_type: TaskType::SkillExecution,
             input: "Short".to_string(),
             parameters: params,
-            stream_tx: None,
         };
 
         assert_eq!(
@@ -6468,7 +9982,6 @@ mod planning_integration_tests {
             task_type: TaskType::PlanCreation,
             input: "Short".to_string(),
             parameters: HashMap::new(),
-            stream_tx: None,
         };
 
         assert_eq!(
@@ -6482,7 +9995,6 @@ mod planning_integration_tests {
             task_type: TaskType::PlanExecution,
             input: "".to_string(),
             parameters: HashMap::new(),
-            stream_tx: None,
         };
 
         assert_eq!(
@@ -6496,7 +10008,6 @@ mod planning_integration_tests {
             task_type: TaskType::PlanAdaptation,
             input: "Adapt".to_string(),
             parameters: HashMap::new(),
-            stream_tx: None,
         };
 
         assert_eq!(
@@ -6517,7 +10028,6 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "x".repeat(300), // Complex task
             parameters: HashMap::new(),
-            stream_tx: None,
         };
 
         // Should not use planning if not configured
@@ -6532,7 +10042,6 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "x".repeat(300), // Complex task
             parameters: HashMap::new(),
-            stream_tx: None,
         };
 
         // Should use planning for complex tasks
@@ -6550,7 +10059,6 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Short".to_string(), // Simple task
             parameters: params,
-            stream_tx: None,
         };
 
         // Should use planning if explicitly requested
@@ -6699,7 +10207,6 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Test".to_string(),
             parameters: params,
-            stream_tx: None,
         };
 
         assert_eq!(agent.select_plan_strategy(&task), PlanStrategy::ReAct);
@@ -6716,7 +10223,6 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Test".to_string(),
             parameters: params,
-            stream_tx: None,
         };
 
         assert_eq!(
@@ -6733,7 +10239,6 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Test".to_string(),
             parameters: HashMap::new(),
-            stream_tx: None,
         };
 
         assert_eq!(agent.select_plan_strategy(&task), PlanStrategy::Hybrid);

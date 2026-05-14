@@ -2,7 +2,9 @@
 
 use leptos::prelude::*;
 
-use crate::webchat::{ChatMessage, ChatSession, SideQuestion, TokenUsage, UsagePanel};
+use crate::webchat::{
+    ChatMessage, ChatSession, SideQuestion, TokenUsage, ToolCallEvent, UsagePanel,
+};
 
 /// WebChat 状态
 #[derive(Clone, Debug)]
@@ -21,6 +23,8 @@ pub struct WebchatState {
     pub is_streaming: RwSignal<bool>,
     /// 流式内容缓冲区
     pub streaming_content: RwSignal<String>,
+    /// 当前流式回复中的工具调用
+    pub streaming_tool_calls: RwSignal<Vec<ToolCallEvent>>,
     /// 用量统计
     pub usage: RwSignal<UsagePanel>,
     /// 侧边提问列表
@@ -41,6 +45,7 @@ impl WebchatState {
             is_sending: RwSignal::new(false),
             is_streaming: RwSignal::new(false),
             streaming_content: RwSignal::new(String::new()),
+            streaming_tool_calls: RwSignal::new(Vec::new()),
             usage: RwSignal::new(UsagePanel {
                 session_usage: TokenUsage::new("default"),
                 daily_usage: TokenUsage::new("default"),
@@ -92,10 +97,25 @@ impl WebchatState {
         self.streaming_content.set(String::new());
     }
 
+    /// 开始带工具调用的流式接收
+    pub fn start_streaming_with_tools(&self) {
+        if !self.is_streaming.get_untracked() {
+            self.start_streaming();
+        }
+    }
+
     /// 追加流式内容
     pub fn append_streaming_content(&self, chunk: impl Into<String>) {
         self.streaming_content.update(|content| {
             content.push_str(&chunk.into());
+        });
+    }
+
+    /// 记录一次工具调用
+    pub fn add_streaming_tool_call(&self, tool_call: ToolCallEvent) {
+        self.start_streaming_with_tools();
+        self.streaming_tool_calls.update(|calls| {
+            calls.push(tool_call);
         });
     }
 
@@ -105,18 +125,23 @@ impl WebchatState {
         // 将流式内容转为正式消息
         let content = self.streaming_content.get();
         if !content.is_empty() {
+            let tool_calls = self.streaming_tool_calls.get();
             let message = ChatMessage {
                 id: uuid::Uuid::new_v4().to_string(),
                 role: crate::webchat::MessageRole::Assistant,
                 content,
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 attachments: vec![],
-                metadata: Default::default(),
+                metadata: crate::webchat::MessageMetadata {
+                    tool_calls,
+                    ..Default::default()
+                },
                 token_usage: None,
             };
             self.add_message(message);
         }
         self.streaming_content.set(String::new());
+        self.streaming_tool_calls.set(Vec::new());
     }
 
     /// 设置错误
