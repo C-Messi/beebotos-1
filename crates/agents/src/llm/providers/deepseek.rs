@@ -24,6 +24,11 @@ pub struct DeepSeekConfig {
     pub timeout: std::time::Duration,
     /// Retry policy
     pub retry_policy: RetryPolicy,
+    /// Thinking mode: "enabled" or "disabled". Defaults to enabled per DeepSeek
+    /// API.
+    pub thinking: Option<String>,
+    /// Thinking effort in thinking mode: "high" or "max".
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for DeepSeekConfig {
@@ -31,9 +36,11 @@ impl Default for DeepSeekConfig {
         Self {
             base_url: "https://api.deepseek.com".to_string(),
             api_key: String::new(),
-            default_model: deepseek_models::DEEPSEEK_CHAT.to_string(),
+            default_model: deepseek_models::DEEPSEEK_V4_FLASH.to_string(),
             timeout: std::time::Duration::from_secs(60),
             retry_policy: RetryPolicy::default(),
+            thinking: Some("enabled".to_string()),
+            reasoning_effort: Some("high".to_string()),
         }
     }
 }
@@ -50,7 +57,9 @@ impl DeepSeekConfig {
             .unwrap_or_else(|_| "https://api.deepseek.com".to_string());
 
         let default_model = env::var("DEEPSEEK_DEFAULT_MODEL")
-            .unwrap_or_else(|_| deepseek_models::DEEPSEEK_CHAT.to_string());
+            .unwrap_or_else(|_| deepseek_models::DEEPSEEK_V4_FLASH.to_string());
+        let thinking = env::var("DEEPSEEK_THINKING").ok();
+        let reasoning_effort = env::var("DEEPSEEK_REASONING_EFFORT").ok();
 
         Ok(Self {
             base_url,
@@ -58,6 +67,8 @@ impl DeepSeekConfig {
             default_model,
             timeout: std::time::Duration::from_secs(60),
             retry_policy: RetryPolicy::default(),
+            thinking,
+            reasoning_effort,
         })
     }
 }
@@ -130,6 +141,41 @@ impl DeepSeekProvider {
         let config = DeepSeekConfig::from_env().map_err(|e| LLMError::InvalidRequest(e))?;
         Self::new(config)
     }
+
+    fn apply_thinking_config(&self, request: &mut LLMRequest) {
+        let thinking = self
+            .config
+            .thinking
+            .as_deref()
+            .unwrap_or("enabled")
+            .to_lowercase();
+
+        if matches!(thinking.as_str(), "enabled" | "disabled") {
+            request.config.extra.insert(
+                "thinking".to_string(),
+                serde_json::json!({ "type": thinking }),
+            );
+        }
+
+        if thinking == "enabled" {
+            request.config.temperature = None;
+            request.config.top_p = None;
+            request.config.presence_penalty = None;
+            request.config.frequency_penalty = None;
+
+            if let Some(effort) = self.config.reasoning_effort.as_deref() {
+                let normalized = match effort.to_lowercase().as_str() {
+                    "max" | "xhigh" => "max",
+                    "low" | "medium" | "high" => "high",
+                    _ => "high",
+                };
+                request.config.extra.insert(
+                    "reasoning_effort".to_string(),
+                    serde_json::json!(normalized),
+                );
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -142,9 +188,10 @@ impl LLMProvider for DeepSeekProvider {
         self.capabilities.clone()
     }
 
-    async fn complete(&self, request: LLMRequest) -> LLMResult<LLMResponse> {
+    async fn complete(&self, mut request: LLMRequest) -> LLMResult<LLMResponse> {
         debug!("Sending completion request to DeepSeek");
 
+        self.apply_thinking_config(&mut request);
         let body = self.request_builder.build_body(request);
         let response = self
             .http_client
@@ -175,6 +222,7 @@ impl LLMProvider for DeepSeekProvider {
 
         let mut request = request;
         request.config.stream = Some(true);
+        self.apply_thinking_config(&mut request);
 
         let body = self.request_builder.build_body(request);
         let response = self
@@ -241,9 +289,11 @@ impl LLMProvider for DeepSeekProvider {
     async fn list_models(&self) -> LLMResult<Vec<ModelInfo>> {
         Ok(vec![
             ModelInfo {
-                id: deepseek_models::DEEPSEEK_CHAT.to_string(),
-                name: "DeepSeek-V3".to_string(),
-                description: Some("General purpose chat model, 671B MoE".to_string()),
+                id: deepseek_models::DEEPSEEK_V4_FLASH.to_string(),
+                name: "DeepSeek V4 Flash".to_string(),
+                description: Some(
+                    "Latest cost-effective DeepSeek chat/reasoning model".to_string(),
+                ),
                 context_window: 64_000,
                 max_tokens: 8_192,
                 capabilities: ModelCapabilities {
@@ -254,14 +304,16 @@ impl LLMProvider for DeepSeekProvider {
                 pricing: Some((0.00027, 0.0011)),
             },
             ModelInfo {
-                id: deepseek_models::DEEPSEEK_REASONER.to_string(),
-                name: "DeepSeek-R1".to_string(),
-                description: Some("Reasoning model with CoT, excels at math/coding".to_string()),
+                id: deepseek_models::DEEPSEEK_V4_PRO.to_string(),
+                name: "DeepSeek V4 Pro".to_string(),
+                description: Some(
+                    "Latest higher-capability DeepSeek chat/reasoning model".to_string(),
+                ),
                 context_window: 64_000,
                 max_tokens: 8_192,
                 capabilities: ModelCapabilities {
                     vision: false,
-                    function_calling: false,
+                    function_calling: true,
                     json_mode: true,
                 },
                 pricing: Some((0.00055, 0.00219)),
@@ -274,8 +326,10 @@ use futures::StreamExt;
 
 /// DeepSeek model names
 pub mod deepseek_models {
-    pub const DEEPSEEK_CHAT: &str = "deepseek-chat";
-    pub const DEEPSEEK_REASONER: &str = "deepseek-reasoner";
-    pub const DEEPSEEK_V3: &str = "deepseek-chat";
-    pub const DEEPSEEK_R1: &str = "deepseek-reasoner";
+    pub const DEEPSEEK_V4_FLASH: &str = "deepseek-v4-flash";
+    pub const DEEPSEEK_V4_PRO: &str = "deepseek-v4-pro";
+    pub const DEEPSEEK_CHAT: &str = "deepseek-v4-flash";
+    pub const DEEPSEEK_REASONER: &str = "deepseek-v4-pro";
+    pub const DEEPSEEK_V3: &str = "deepseek-v4-flash";
+    pub const DEEPSEEK_R1: &str = "deepseek-v4-pro";
 }

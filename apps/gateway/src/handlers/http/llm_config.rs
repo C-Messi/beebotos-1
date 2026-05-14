@@ -35,6 +35,8 @@ pub struct ProviderConfigResponse {
     pub base_url: String,
     pub temperature: f32,
     pub context_window: Option<u32>,
+    pub thinking: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 /// Request to update LLM provider configuration
@@ -43,6 +45,8 @@ pub struct UpdateLlmConfigRequest {
     pub provider: String,
     pub model: String,
     pub temperature: f32,
+    pub thinking: Option<String>,
+    pub reasoning_effort: Option<String>,
     /// Whether to set this provider as the default. Defaults to true.
     pub set_default: Option<bool>,
 }
@@ -54,7 +58,12 @@ pub async fn get_llm_global_config(
 ) -> Result<Json<LlmGlobalConfigResponse>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let config = &state.config.models;
+    let loaded_config = if let Some(manager) = &state.config_manager {
+        manager.config().await.clone()
+    } else {
+        state.config.clone()
+    };
+    let config = &loaded_config.models;
 
     let providers = config
         .providers
@@ -66,6 +75,8 @@ pub async fn get_llm_global_config(
             base_url: provider.base_url.clone().unwrap_or_default(),
             temperature: provider.temperature,
             context_window: provider.context_window.map(|v| v as u32),
+            thinking: provider.thinking.clone(),
+            reasoning_effort: provider.reasoning_effort.clone(),
         })
         .collect();
 
@@ -114,6 +125,22 @@ pub async fn update_llm_global_config(
                     .parse()
                     .unwrap_or(req.temperature as f64);
                 table.insert("temperature".to_string(), toml::Value::Float(temp));
+                if let Some(thinking) = &req.thinking {
+                    table.insert(
+                        "thinking".to_string(),
+                        toml::Value::String(thinking.clone()),
+                    );
+                } else {
+                    table.remove("thinking");
+                }
+                if let Some(reasoning_effort) = &req.reasoning_effort {
+                    table.insert(
+                        "reasoning_effort".to_string(),
+                        toml::Value::String(reasoning_effort.clone()),
+                    );
+                } else {
+                    table.remove("reasoning_effort");
+                }
             } else {
                 return Err(GatewayError::internal(format!(
                     "Provider '{}' is not a TOML table",
@@ -155,15 +182,23 @@ pub async fn update_llm_global_config(
     let reload_result = if let Some(ref manager) = state.config_manager {
         match manager.reload().await {
             Ok(changed) => {
+                let current_config = manager.config().await.clone();
+                let llm_reload = state.llm_service.reload_config(current_config).await;
                 let msg = if changed {
                     "Config updated and hot-reloaded"
                 } else {
                     "Config updated (no changes detected on reload)"
                 };
-                serde_json::json!({
-                    "message": msg,
-                    "status": "ok"
-                })
+                match llm_reload {
+                    Ok(()) => serde_json::json!({
+                        "message": msg,
+                        "status": "ok"
+                    }),
+                    Err(e) => serde_json::json!({
+                        "message": format!("Config saved but LLM service reload failed: {}", e),
+                        "status": "partial"
+                    }),
+                }
             }
             Err(e) => serde_json::json!({
                 "message": format!("Config saved but hot-reload failed: {}", e),

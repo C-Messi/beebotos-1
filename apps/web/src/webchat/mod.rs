@@ -29,6 +29,66 @@ pub struct ChatMessage {
     pub token_usage: Option<TokenUsage>,
 }
 
+/// Agent tool call displayed inline while a reply is being generated.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ToolCallEvent {
+    pub id: String,
+    pub round: usize,
+    pub tool_name: String,
+    pub reasoning: String,
+    pub arguments: serde_json::Value,
+    pub status: String,
+    pub timestamp: String,
+}
+
+impl ToolCallEvent {
+    pub fn from_ws_event(value: &serde_json::Value) -> Self {
+        let round = value
+            .get("round")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default() as usize;
+        let tool_name = value
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let reasoning = value
+            .get("reasoning")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let arguments = value
+            .get("arguments")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let status = value
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("started")
+            .to_string();
+
+        Self {
+            id: format!("tool-{}-{}-{}", round, tool_name, uuid::Uuid::new_v4()),
+            round,
+            tool_name,
+            reasoning,
+            arguments,
+            status,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    pub fn argument_preview(&self) -> String {
+        match serde_json::to_string(&self.arguments) {
+            Ok(text) if text.chars().count() > 160 => {
+                format!("{}...", text.chars().take(160).collect::<String>())
+            }
+            Ok(text) => text,
+            Err(_) => String::new(),
+        }
+    }
+}
+
 /// 消息角色
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -51,6 +111,8 @@ pub struct MessageMetadata {
     pub is_error: bool,
     #[serde(default)]
     pub is_streaming: bool,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallEvent>,
     pub model: Option<String>,
     pub latency_ms: Option<u64>,
     #[serde(default)]

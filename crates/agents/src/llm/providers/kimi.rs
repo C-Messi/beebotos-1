@@ -248,16 +248,51 @@ impl KimiProvider {
         Self::new(config)
     }
 
-    /// 🆕 FIX: Check if web_search tool is present (incompatible with thinking
-    /// mode)
-    fn has_web_search_tool(tools: Option<&Vec<crate::llm::types::Tool>>) -> bool {
-        tools
-            .map(|tools| {
-                tools
-                    .iter()
-                    .any(|t| t.function.name == "$web_search" || t.function.name == "web_search")
-            })
-            .unwrap_or(false)
+    /// Determine the effective thinking mode for this request.
+    ///
+    /// Moonshot documents k2.6 as using fixed sampling parameters:
+    /// thinking mode requires temperature=1.0, while non-thinking mode requires
+    /// temperature=0.6. The configured thinking mode is preserved even when
+    /// tools are present.
+    fn effective_thinking(&self, _request: &LLMRequest) -> ThinkingMode {
+        self.config.thinking
+    }
+
+    fn apply_k2_6_constraints(&self, request: &mut LLMRequest) {
+        let effective_thinking = self.effective_thinking(request);
+
+        if request.config.model.contains("k2.6") {
+            request.config.temperature = Some(match effective_thinking {
+                ThinkingMode::Enabled => 1.0,
+                ThinkingMode::Disabled => 0.6,
+            });
+            if request.config.top_p.is_some() {
+                request.config.top_p = Some(0.95);
+            }
+            if request.config.presence_penalty.is_some() {
+                request.config.presence_penalty = Some(0.0);
+            }
+            if request.config.frequency_penalty.is_some() {
+                request.config.frequency_penalty = Some(0.0);
+            }
+        }
+
+        request.config.extra.insert(
+            "thinking".to_string(),
+            serde_json::json!({"type": effective_thinking.to_string()}),
+        );
+
+        // Constraint: tool_choice can only be "auto" or "none" for K2.6 with
+        // thinking enabled.
+        if request.config.model.contains("k2.6") && effective_thinking == ThinkingMode::Enabled {
+            if let Some(ref tool_choice) = request.config.tool_choice {
+                let is_valid = matches!(tool_choice, ToolChoice::Auto(_) | ToolChoice::None(_));
+                if !is_valid {
+                    debug!("Invalid tool_choice for Kimi k2.6 thinking mode, resetting to 'auto'");
+                    request.config.tool_choice = Some(ToolChoice::Auto("auto".to_string()));
+                }
+            }
+        }
     }
 }
 
@@ -274,41 +309,7 @@ impl LLMProvider for KimiProvider {
     async fn complete(&self, mut request: LLMRequest) -> LLMResult<LLMResponse> {
         debug!("Sending completion request to Kimi");
 
-        // 🆕 FIX: Kimi k2.6 only supports temperature=0.6
-        if request.config.model.contains("k2.6") {
-            request.config.temperature = Some(0.6);
-        }
-
-        // 🆕 FIX: Determine effective thinking mode
-        // Constraint 3: $web_search tool is incompatible with thinking mode on
-        // K2.6/K2.5
-        let effective_thinking = if request.config.model.contains("k2.6")
-            && Self::has_web_search_tool(request.config.tools.as_ref())
-        {
-            debug!("Web search tool detected, forcing thinking mode to disabled for Kimi k2.6");
-            ThinkingMode::Disabled
-        } else {
-            self.config.thinking
-        };
-
-        // 🆕 FIX: Explicitly set thinking parameter (default disabled for fast mode)
-        let thinking_json = serde_json::json!({"type": effective_thinking.to_string()});
-        request
-            .config
-            .extra
-            .insert("thinking".to_string(), thinking_json);
-
-        // 🆕 FIX: Constraint 1 - tool_choice can only be "auto" or "none" for K2.6 with
-        // thinking enabled
-        if request.config.model.contains("k2.6") {
-            if let Some(ref tool_choice) = request.config.tool_choice {
-                let is_valid = matches!(tool_choice, ToolChoice::Auto(_) | ToolChoice::None(_));
-                if !is_valid {
-                    debug!("Invalid tool_choice for Kimi k2.6, resetting to 'auto'");
-                    request.config.tool_choice = Some(ToolChoice::Auto("auto".to_string()));
-                }
-            }
-        }
+        self.apply_k2_6_constraints(&mut request);
 
         let body = self.request_builder.build_body(request);
         let response = self
@@ -341,42 +342,8 @@ impl LLMProvider for KimiProvider {
 
         let (tx, rx) = mpsc::channel(100);
 
-        // 🆕 FIX: Kimi k2.6 only supports temperature=0.6
-        if request.config.model.contains("k2.6") {
-            request.config.temperature = Some(0.6);
-        }
         request.config.stream = Some(true);
-
-        // 🆕 FIX: Determine effective thinking mode
-        // Constraint 3: $web_search tool is incompatible with thinking mode on
-        // K2.6/K2.5
-        let effective_thinking = if request.config.model.contains("k2.6")
-            && Self::has_web_search_tool(request.config.tools.as_ref())
-        {
-            debug!("Web search tool detected, forcing thinking mode to disabled for Kimi k2.6");
-            ThinkingMode::Disabled
-        } else {
-            self.config.thinking
-        };
-
-        // 🆕 FIX: Explicitly set thinking parameter (default disabled for fast mode)
-        let thinking_json = serde_json::json!({"type": effective_thinking.to_string()});
-        request
-            .config
-            .extra
-            .insert("thinking".to_string(), thinking_json);
-
-        // 🆕 FIX: Constraint 1 - tool_choice can only be "auto" or "none" for K2.6 with
-        // thinking enabled
-        if request.config.model.contains("k2.6") {
-            if let Some(ref tool_choice) = request.config.tool_choice {
-                let is_valid = matches!(tool_choice, ToolChoice::Auto(_) | ToolChoice::None(_));
-                if !is_valid {
-                    debug!("Invalid tool_choice for Kimi k2.6, resetting to 'auto'");
-                    request.config.tool_choice = Some(ToolChoice::Auto("auto".to_string()));
-                }
-            }
-        }
+        self.apply_k2_6_constraints(&mut request);
 
         let body = self.request_builder.build_body(request);
         let response = self

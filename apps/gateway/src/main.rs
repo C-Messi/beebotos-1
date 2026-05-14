@@ -7,6 +7,7 @@
 //! - Integration with kernel for Agent execution
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +31,16 @@ use tokio::sync::{mpsc, RwLock};
 use tower_http::compression::CompressionLayer;
 use tower_http::timeout::TimeoutLayer;
 use uuid;
+
+async fn ensure_tool_work_dir() -> PathBuf {
+    let dir = PathBuf::from("data/workspace");
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        warn!("Failed to create tool working directory {:?}: {}", dir, e);
+    } else {
+        info!("✅ Tool working directory ensured at {:?}", dir);
+    }
+    dir
+}
 
 // Business logic modules
 mod auth;
@@ -420,25 +431,26 @@ impl AppState {
             sandbox_level: SandboxLevel::Kernel,
             database_url: config.database.url.clone(),
         };
-        let llm_interface: Arc<dyn beebotos_agents::communication::LLMCallInterface> = Arc::new(
-            crate::services::agent_runtime_manager::GatewayLLMInterface::new(llm_service.clone()),
-        );
+        let react_trace_sink: Option<Arc<dyn beebotos_agents::ReActTraceSink>> =
+            ws_manager.as_ref().map(|ws| {
+                Arc::new(crate::services::react_trace_ws::WebSocketReActTraceSink::new(ws.clone()))
+                    as Arc<dyn beebotos_agents::ReActTraceSink>
+            });
+        let mut gateway_llm_interface =
+            crate::services::agent_runtime_manager::GatewayLLMInterface::new(llm_service.clone());
+        if let Some(ref sink) = react_trace_sink {
+            gateway_llm_interface = gateway_llm_interface.with_react_trace_sink(sink.clone());
+        }
+        let llm_interface: Arc<dyn beebotos_agents::communication::LLMCallInterface> =
+            Arc::new(gateway_llm_interface);
 
         // 🆕 Create direct LLMClient for native tool calling
         let llm_client = Arc::new(beebotos_agents::llm::LLMClient::new(
-            llm_service.failover_provider(),
+            llm_service.failover_provider().await,
         ));
 
         // 🆕 Ensure tool working directory exists
-        let tool_work_dir = std::path::PathBuf::from("/data/workspace");
-        if let Err(e) = tokio::fs::create_dir_all(&tool_work_dir).await {
-            warn!(
-                "Failed to create tool working directory {:?}: {}",
-                tool_work_dir, e
-            );
-        } else {
-            info!("✅ Tool working directory ensured at {:?}", tool_work_dir);
-        }
+        let tool_work_dir = ensure_tool_work_dir().await;
 
         // 🟢 P0 FIX: Initialize SkillRegistry **before** AgentRuntime so it can be
         // injected
@@ -567,6 +579,9 @@ impl AppState {
         )
         .with_llm_client(llm_client)
         .with_tool_work_dir(tool_work_dir);
+        if let Some(ref sink) = react_trace_sink {
+            gateway_runtime = gateway_runtime.with_react_trace_sink(sink.clone());
+        }
 
         // Attach system info provider after runtime is created so we can share
         // the runtime's own state manager for agent inventory queries.
@@ -589,17 +604,19 @@ impl AppState {
         info!("✅ AgentRuntime (trait-based) initialized with SkillRegistry and MCP");
 
         // Legacy: Agent runtime manager bridges gateway with beebotos_agents
-        let agent_runtime_manager = Arc::new(
-            AgentRuntimeManager::new_with_default_state_manager(
-                Some(kernel.clone()),
-                config.clone(),
-                llm_service.clone(),
-                memory_system.clone(),
-                Some(skill_registry.clone()),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to initialize AgentRuntimeManager: {}", e))?,
-        );
+        let mut agent_runtime_manager = AgentRuntimeManager::new_with_default_state_manager(
+            Some(kernel.clone()),
+            config.clone(),
+            llm_service.clone(),
+            memory_system.clone(),
+            Some(skill_registry.clone()),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize AgentRuntimeManager: {}", e))?;
+        if let Some(ref sink) = react_trace_sink {
+            agent_runtime_manager = agent_runtime_manager.with_react_trace_sink(sink.clone());
+        }
+        let agent_runtime_manager = Arc::new(agent_runtime_manager);
 
         // Legacy: AgentService now owns the kernel integration
         let agent_service = AgentService::new(
@@ -3004,6 +3021,7 @@ mod tests {
                             deployment: None,
                             context_window: Some(8192),
                             thinking: None,
+                            reasoning_effort: None,
                         },
                     );
                     map

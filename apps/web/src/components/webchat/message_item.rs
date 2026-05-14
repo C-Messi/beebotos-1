@@ -5,7 +5,7 @@
 
 use leptos::prelude::*;
 
-use crate::components::webchat::ContentRenderer;
+use crate::components::webchat::{ContentRenderer, ToolCallList};
 use crate::webchat::ChatMessage;
 
 /// 消息项组件
@@ -33,6 +33,7 @@ pub fn MessageItem(
                 }}
             </div>
             <div class="message-content-wrapper">
+                <ToolCallList tool_calls=message.metadata.tool_calls.clone() />
                 <ContentRenderer
                     content=message.content.clone()
                     attachments=message.attachments.clone()

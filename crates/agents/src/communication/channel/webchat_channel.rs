@@ -132,12 +132,45 @@ impl WebChatChannel {
         }
     }
 
+    pub async fn send_tool_call(&self, channel_id: &str, event: serde_json::Value) -> Result<()> {
+        let ws = self.ws_manager.read().await;
+        if let Some(ref manager) = *ws {
+            let payload = serde_json::json!({
+                "type": "chat_tool_call",
+                "session_id": channel_id,
+                "event": event,
+            });
+            manager
+                .broadcast_to_channel("webchat", payload)
+                .await
+                .map_err(|e| {
+                    AgentError::platform(format!("WebSocket tool call broadcast failed: {}", e))
+                })?;
+            debug!(
+                "WebChatChannel: tool call broadcasted to channel {}",
+                channel_id
+            );
+            Ok(())
+        } else {
+            warn!("WebChatChannel: WebSocket manager not set, cannot send tool call");
+            Err(AgentError::platform(
+                "WebSocket manager not attached to WebChatChannel",
+            ))
+        }
+    }
+
     /// Build the payload sent over WebSocket
     fn build_payload(&self, channel_id: &str, message: &Message) -> serde_json::Value {
         let role = match message.message_type {
             crate::communication::MessageType::Image => "assistant",
             _ => "assistant",
         };
+        let mut metadata = serde_json::Map::new();
+        if let Some(tool_calls_json) = message.metadata.get("tool_calls") {
+            if let Ok(tool_calls) = serde_json::from_str::<serde_json::Value>(tool_calls_json) {
+                metadata.insert("tool_calls".to_string(), tool_calls);
+            }
+        }
 
         serde_json::json!({
             "type": "chat_message",
@@ -148,7 +181,7 @@ impl WebChatChannel {
                 "content": message.content,
                 "timestamp": message.timestamp.to_rfc3339(),
                 "attachments": [],
-                "metadata": {},
+                "metadata": metadata,
                 "token_usage": null
             }
         })

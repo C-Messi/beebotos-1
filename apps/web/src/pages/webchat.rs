@@ -366,6 +366,7 @@ pub fn WebchatPage() -> impl IntoView {
                             messages=chat_state.current_messages.into()
                             is_streaming=chat_state.is_streaming.into()
                             streaming_content=chat_state.streaming_content.into()
+                            streaming_tool_calls=chat_state.streaming_tool_calls.into()
                         />
                     }}
                     <MessageInput

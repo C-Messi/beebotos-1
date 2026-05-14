@@ -463,13 +463,11 @@ mod tests {
             },
         ];
 
-        let tools = vec![
-            ToolDefinition {
-                name: "web_search".to_string(),
-                description: "搜索网页".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-        ];
+        let tools = vec![ToolDefinition {
+            name: "web_search".to_string(),
+            description: "搜索网页".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
 
         let prompt = PromptBuilder::new()
             .with_soul("You are a helpful assistant.")
@@ -504,7 +502,9 @@ mod tests {
             Some("weather_assistant".to_string())
         );
         assert_eq!(
-            UnifiedReActExecutor::extract_l3_request("请提供 mcp:alpaca/place_crypto_order 的完整文档"),
+            UnifiedReActExecutor::extract_l3_request(
+                "请提供 mcp:alpaca/place_crypto_order 的完整文档"
+            ),
             Some("mcp:alpaca/place_crypto_order".to_string())
         );
 
@@ -538,7 +538,10 @@ mod tests {
             parameters: std::collections::HashMap::new(),
             stream_tx: None,
         };
-        assert_eq!(crate::agent_impl::Agent::extract_user_input(&task), "Hello world");
+        assert_eq!(
+            crate::agent_impl::Agent::extract_user_input(&task),
+            "Hello world"
+        );
 
         // JSON input with message field
         let task = Task {
