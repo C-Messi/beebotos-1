@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{interval, Duration};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Expand tilde to home directory
 fn expand_tilde(path: &str) -> String {
@@ -428,7 +428,7 @@ impl Channel for IMessageChannel {
         {
             // Verify database access
             let db_path = expand_tilde(&self.config.db_path);
-            if !std::path::Path::new(db_path.as_ref()).exists() {
+            if !std::path::Path::new(&db_path).exists() {
                 return Err(AgentError::platform(format!(
                     "iMessage database not found at {}",
                     db_path
@@ -449,7 +449,7 @@ impl Channel for IMessageChannel {
         Ok(())
     }
 
-    async fn send(&self, _channel_id: &str, _message: &Message) -> Result<()> {
+    async fn send(&self, channel_id: &str, message: &Message) -> Result<()> {
         #[cfg(not(target_os = "macos"))]
         {
             return Err(AgentError::platform("iMessage is only available on macOS").into());
