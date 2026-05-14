@@ -16,7 +16,7 @@ pub use super::{
     CapoConfig, CapoEngine, DistillerConfig, EvolutionProposal, EvolutionSandbox,
     EvolutionSchedule, EvolutionScheduler, EvolutionTarget, SkillDistiller, SkillLifecycleManager,
 };
-pub use crate::planning::ToolTrail;
+pub use crate::planning::{ToolTrail, TrailStatus};
 
 #[cfg(test)]
 mod tests {

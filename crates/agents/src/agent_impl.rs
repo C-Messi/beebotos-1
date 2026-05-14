@@ -109,6 +109,56 @@ struct TextSkillObservation {
     success: bool,
 }
 
+fn extract_usd_notional(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let chars: Vec<char> = text.chars().collect();
+    for (idx, ch) in chars.iter().enumerate() {
+        if !ch.is_ascii_digit() {
+            continue;
+        }
+        let mut end = idx;
+        while end < chars.len() && (chars[end].is_ascii_digit() || chars[end] == '.') {
+            end += 1;
+        }
+        let value: String = chars[idx..end].iter().collect();
+        let tail: String = chars[end..chars.len().min(end + 12)].iter().collect();
+        let tail_lower = tail.to_ascii_lowercase();
+        let prefix_start = idx.saturating_sub(2);
+        let prefix: String = chars[prefix_start..idx].iter().collect();
+        if tail_lower.contains("usd")
+            || tail.contains("美元")
+            || tail.contains("美金")
+            || prefix.contains('$')
+            || lower.contains(&format!("${}", value))
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn is_pending_approval_adjustment(message_text: &str) -> bool {
+    let text = message_text.trim();
+    if text.is_empty() || text.len() > 80 {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    let has_amount = text.chars().any(|c| c.is_ascii_digit())
+        && (text.contains("美元")
+            || text.contains("美金")
+            || text.contains("usd")
+            || lower.contains("usd")
+            || text.contains('$'));
+    has_amount
+        && (text.contains("调整")
+            || text.contains("改")
+            || text.contains("金额")
+            || text.contains("换成")
+            || text.contains("设为")
+            || text.contains("改为")
+            || lower.contains("amount"))
+}
+
 impl Agent {
     fn runtime_context_prompt() -> String {
         let now = chrono::Local::now();
@@ -692,7 +742,7 @@ impl Agent {
         weather_data: &Option<String>,
     ) -> Result<(String, bool), AgentError> {
         let tool_name = tool_call.function.name.as_str();
-        let params = Self::parse_tool_arguments(&tool_call.function.arguments)?;
+        let mut params = Self::parse_tool_arguments(&tool_call.function.arguments)?;
 
         if Self::is_builtin_workspace_tool(tool_name) {
             return self
@@ -708,6 +758,12 @@ impl Agent {
             .ok_or_else(|| AgentError::SkillNotFound(tool_name.to_string()))?;
         let resolved_id = registered.skill.id.clone();
         let enriched_input = self.enriched_skill_input(input_text, weather_data);
+        Self::apply_react_skill_param_defaults(
+            &resolved_id,
+            &enriched_input,
+            Some(input_text),
+            &mut params,
+        );
         let params_are_empty = params.as_ref().map_or(true, |p| p.is_empty());
         let skill_input = if params_are_empty {
             enriched_input.as_str()
@@ -799,6 +855,88 @@ impl Agent {
             })
             .collect();
         Ok(Some(string_map))
+    }
+
+    fn apply_react_skill_param_defaults(
+        skill_id: &str,
+        input: &str,
+        user_request: Option<&str>,
+        params: &mut Option<HashMap<String, String>>,
+    ) {
+        let context = format!("{}\n{}", user_request.unwrap_or_default(), input);
+        let lower = context.to_ascii_lowercase();
+        let mentions_btc = lower.contains("btc") || lower.contains("bitcoin");
+        let mentions_eth = lower.contains("eth") || lower.contains("ethereum");
+        let default_crypto_symbol = if mentions_eth {
+            Some("ETH/USD")
+        } else if mentions_btc || skill_id.contains("crypto") || skill_id.contains("alpaca") {
+            Some("BTC/USD")
+        } else {
+            None
+        };
+
+        if matches!(
+            skill_id,
+            "mcp:alpaca/get_crypto_latest_quote" | "mcp:alpaca/get_crypto_snapshot"
+        ) {
+            if let Some(symbol) = default_crypto_symbol {
+                let params = params.get_or_insert_with(HashMap::new);
+                params
+                    .entry("symbols".to_string())
+                    .or_insert(symbol.to_string());
+                params.entry("loc".to_string()).or_insert("us".to_string());
+            }
+        }
+
+        if skill_id == "mcp:alpaca/place_crypto_order" {
+            let params = params.get_or_insert_with(HashMap::new);
+            if let Some(symbol) = default_crypto_symbol {
+                params
+                    .entry("symbol".to_string())
+                    .or_insert(symbol.to_string());
+            }
+            if lower.contains("卖") || lower.contains("sell") || lower.contains("做空") {
+                params
+                    .entry("side".to_string())
+                    .or_insert("sell".to_string());
+            } else if lower.contains("买") || lower.contains("buy") || lower.contains("做多") {
+                params
+                    .entry("side".to_string())
+                    .or_insert("buy".to_string());
+            }
+            if lower.contains("市场") || lower.contains("市价") || lower.contains("market") {
+                params
+                    .entry("type".to_string())
+                    .or_insert("market".to_string());
+            }
+            if !params.contains_key("notional") && !params.contains_key("qty") {
+                if let Some(notional) = extract_usd_notional(&context) {
+                    params.insert("notional".to_string(), notional);
+                }
+            }
+        }
+    }
+
+    fn apply_mcp_default_params(
+        skill_id: &str,
+        params: &mut serde_json::Map<String, serde_json::Value>,
+    ) {
+        match skill_id {
+            "mcp:alpaca/place_crypto_order" => {
+                params
+                    .entry("type".to_string())
+                    .or_insert_with(|| serde_json::Value::String("market".to_string()));
+                params
+                    .entry("time_in_force".to_string())
+                    .or_insert_with(|| serde_json::Value::String("gtc".to_string()));
+            }
+            "mcp:alpaca/get_crypto_latest_quote" | "mcp:alpaca/get_crypto_snapshot" => {
+                params
+                    .entry("loc".to_string())
+                    .or_insert_with(|| serde_json::Value::String("us".to_string()));
+            }
+            _ => {}
+        }
     }
 
     fn tool_arg<'a>(params: &'a Option<HashMap<String, String>>, key: &str) -> Option<&'a str> {
@@ -3376,11 +3514,40 @@ impl Agent {
         // pending operation. This is checked AFTER form submission so that
         // parameter values containing "确认" (e.g., "买入，确认") are handled
         // as form input first.
-        let confirmation_words = ["确认", "同意", "yes", "y", "ok", "好", "可以", "执行"];
-        let is_confirmation = message_text.trim().len() <= 20
-            && confirmation_words
-                .iter()
-                .any(|w| message_text.to_lowercase().contains(w));
+        if is_pending_approval_adjustment(&message_text) {
+            let mut approvals = self.pending_approvals.write().await;
+            if let Some((req_id, request)) = approvals
+                .iter_mut()
+                .max_by_key(|(_, request)| request.created_at)
+            {
+                request.original_input = format!(
+                    "{}\n用户补充/调整：{}",
+                    request.original_input,
+                    message_text.trim()
+                );
+                info!(
+                    "Plan C: User adjusted pending approval {} for skill '{}'",
+                    req_id, request.skill_id
+                );
+                let response = format!(
+                    "已更新待确认操作：{}\n\n新的补充信息：{}\n\n请回复「确认」或「同意」执行；\
+                     如需继续修改，请直接说明。",
+                    request.skill_id,
+                    message_text.trim()
+                );
+                return Ok((response, vec![]));
+            }
+        }
+
+        let confirmation_text = message_text.trim();
+        let confirmation_lower = confirmation_text.to_ascii_lowercase();
+        let is_confirmation = matches!(
+            confirmation_text,
+            "确认" | "同意" | "可以" | "执行" | "是" | "好" | "好的" | "确认执行"
+        ) || matches!(
+            confirmation_lower.as_str(),
+            "yes" | "y" | "ok" | "okay" | "confirm"
+        );
 
         if is_confirmation {
             let mut approvals = self.pending_approvals.write().await;
@@ -3404,8 +3571,37 @@ impl Agent {
                             // MCP parameter extractor can re-extract params from natural language.
                             self.skip_approval
                                 .store(true, std::sync::atomic::Ordering::SeqCst);
+                            let confirmed_params = request.params.as_object().map(|obj| {
+                                obj.iter()
+                                    .filter_map(|(k, v)| {
+                                        if let Some(s) = v.as_str() {
+                                            Some((k.clone(), s.to_string()))
+                                        } else if v.is_null() {
+                                            None
+                                        } else {
+                                            Some((k.clone(), v.to_string()))
+                                        }
+                                    })
+                                    .collect::<HashMap<_, _>>()
+                            });
+                            let confirmed_input = if !request.params.is_null()
+                                && request
+                                    .params
+                                    .as_object()
+                                    .map_or(false, |obj| !obj.is_empty())
+                            {
+                                request.params.to_string()
+                            } else if request.original_input.trim().is_empty() {
+                                request.params.to_string()
+                            } else {
+                                request.original_input.clone()
+                            };
                             let skill_result = self
-                                .execute_registered_skill(&skill, &request.original_input, None)
+                                .execute_registered_skill(
+                                    &skill,
+                                    &confirmed_input,
+                                    confirmed_params,
+                                )
                                 .await;
                             self.skip_approval
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -6098,6 +6294,13 @@ impl Agent {
                         } else {
                             enriched_input.as_str()
                         };
+                        let mut skill_params = skill_params;
+                        Self::apply_react_skill_param_defaults(
+                            &resolved_id,
+                            &enriched_input,
+                            Some(&input_text),
+                            &mut skill_params,
+                        );
                         let skill_result = self
                             .execute_registered_skill(&registered, skill_input, skill_params)
                             .await;
@@ -6466,10 +6669,14 @@ impl Agent {
     ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
         let start_time = std::time::Instant::now();
         let skill_id = registered_skill.skill.id.clone();
+        let parsed_mcp_skill =
+            crate::mcp::skill_bridge::parse_mcp_skill_id(&registered_skill.skill.id);
 
         // 🆕 OPTIMIZATION PHASE 1: Approval gate for destructive operations
         // 🆕 FIX (Plan C): Store pending approval for multi-step user confirmation
-        if !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst) {
+        if parsed_mcp_skill.is_none()
+            && !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst)
+        {
             if let Some(ref gate) = self.approval_gate {
                 let env = Self::approval_env();
                 let params_json = parameters
@@ -6524,8 +6731,7 @@ impl Agent {
                             task_id: skill_id,
                             success: false,
                             output: format!(
-                                "{} {}\n\n{}\n\n⚠️ \
-                                 这是一个高风险操作，需要您的确认后才能执行。\n\\
+                                "{} {}\n\n{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\\
                                  n请回复「确认」或「同意」来执行此操作。",
                                 risk_label, reason, description
                             ),
@@ -6543,9 +6749,7 @@ impl Agent {
 
         // ── MCP Skill Bridge: Two-Stage Execution (Parameter Resolution → Confirmation
         // & Execution) ──
-        if let Some((server_name, tool_name)) =
-            crate::mcp::skill_bridge::parse_mcp_skill_id(&registered_skill.skill.id)
-        {
+        if let Some((server_name, tool_name)) = parsed_mcp_skill {
             let mcp = self
                 .mcp_manager
                 .as_ref()
@@ -6589,9 +6793,11 @@ impl Agent {
 
             // Validate arguments; if incomplete, attempt LLM extraction
             let mut final_params = arguments.clone();
-            let needs_extraction = arguments.is_empty()
+            Self::apply_mcp_default_params(&skill_id, &mut final_params);
+            let needs_extraction = final_params.is_empty()
                 || tool_schema.as_ref().map_or(false, |schema| {
-                    crate::mcp::skill_bridge::validate_tool_arguments(schema, &arguments).is_err()
+                    crate::mcp::skill_bridge::validate_tool_arguments(schema, &final_params)
+                        .is_err()
                 });
 
             if needs_extraction {
@@ -6609,6 +6815,7 @@ impl Agent {
                         Ok(skills::ExtractedParams::Complete(params)) => {
                             info!("MCP parameter extraction succeeded for '{}'", skill_id);
                             final_params = params;
+                            Self::apply_mcp_default_params(&skill_id, &mut final_params);
                         }
                         Ok(skills::ExtractedParams::Partial { partial, missing }) => {
                             info!(
@@ -6757,10 +6964,21 @@ impl Agent {
                             }
                         }
                         crate::security::ApprovalResult::Rejected { reason } => {
+                            let request = gate.build_request(&skill_id, &params_json, input);
+                            let req_id = request.request_id.clone();
+                            {
+                                let mut pending = self.pending_approvals.write().await;
+                                pending.insert(req_id, request);
+                            }
+
                             return Ok(skills::executor::SkillExecutionResult {
                                 task_id: skill_id,
                                 success: false,
-                                output: format!("{}\n\n{}", preview, reason),
+                                output: format!(
+                                    "{}\n\n{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\\
+                                     n请回复「确认」或「同意」来执行此操作。",
+                                    preview, reason
+                                ),
                                 structured_output: None,
                                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                             });
@@ -6778,7 +6996,7 @@ impl Agent {
                                 task_id: skill_id,
                                 success: false,
                                 output: format!(
-                                    "{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\n\\
+                                    "{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\\
                                      n请回复「确认」或「同意」来执行此操作。",
                                     preview
                                 ),

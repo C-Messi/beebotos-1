@@ -113,9 +113,10 @@ impl SkillSelector {
             let cache = self.cache.read().await;
             if let Some((cached, timestamp)) = cache.get(&cache_key) {
                 if timestamp.elapsed() < self.cache_ttl {
+                    let display_key: String = cache_key.chars().take(50).collect();
                     tracing::info!(
                         "✅ Skill selection cache hit for: {} (took {:?})",
-                        &cache_key[..cache_key.len().min(50)],
+                        display_key,
                         select_start.elapsed()
                     );
                     return Ok(cached.clone());

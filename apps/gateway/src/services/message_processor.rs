@@ -824,6 +824,8 @@ impl MessageProcessor {
         let tool_calls = Arc::new(tokio::sync::Mutex::new(Vec::<serde_json::Value>::new()));
         let tool_calls_bg = Arc::clone(&tool_calls);
 
+        let (stream_count_tx, mut stream_count_rx) = tokio::sync::oneshot::channel::<usize>();
+
         // 🆕 STREAMING: Spawn a task to consume stream chunks and send to WebSocket
         if let Some(stream_rx) = stream_rx {
             let channel_id_stream = channel_id_bg.clone();
@@ -915,7 +917,10 @@ impl MessageProcessor {
                         );
                     }
                 }
+                let _ = stream_count_tx.send(chunk_count);
             });
+        } else {
+            let _ = stream_count_tx.send(0);
         }
 
         tokio::spawn(async move {
@@ -987,9 +992,27 @@ impl MessageProcessor {
                 }
             }
 
-            // Native ReAct/tool execution currently reports tool traces over WebSocket but
-            // does not emit final answer text through stream_tx. Always send the completed
-            // WebChat message so the UI does not need a manual refresh after tools finish.
+            let stream_chunk_count = if platform_bg == PlatformType::WebChat {
+                match tokio::time::timeout(std::time::Duration::from_secs(2), &mut stream_count_rx)
+                    .await
+                {
+                    Ok(Ok(count)) => count,
+                    Ok(Err(_)) => 0,
+                    Err(_) => {
+                        warn!(
+                            "[BG] Timed out waiting for WebChat stream completion for session {}",
+                            channel_id_bg
+                        );
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+
+            // 🆕 STREAMING: For non-WebChat platforms, send the full reply directly.
+            // For WebChat, stream chunks are preferred; if no chunks were produced
+            // (for example approval-confirmation fast paths), send the full reply.
             if platform_bg != PlatformType::WebChat {
                 if let Err(e) = processor
                     .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
@@ -1000,7 +1023,7 @@ impl MessageProcessor {
                         e
                     );
                 }
-            } else {
+            } else if completion_result.is_err() || stream_chunk_count == 0 {
                 let mut reply = message_bg.clone();
                 reply.id = Uuid::new_v4();
                 reply.content = llm_response.clone();
@@ -1013,19 +1036,16 @@ impl MessageProcessor {
                     }
                 }
 
-                match processor
+                if let Some(channel) = processor
                     .channel_registry
                     .get_channel_by_platform(PlatformType::WebChat)
                     .await
                 {
-                    Some(channel) => {
-                        if let Err(e) = channel.read().await.send(&channel_id_bg, &reply).await {
-                            warn!("[BG] Failed to send final WebChat reply: {}", e);
-                        }
+                    if let Err(e) = channel.read().await.send(&channel_id_bg, &reply).await {
+                        warn!("[BG] Failed to send final WebChat reply: {}", e);
                     }
-                    None => {
-                        warn!("[BG] Failed to send final WebChat reply: channel unavailable");
-                    }
+                } else {
+                    warn!("[BG] Failed to send final WebChat reply: channel unavailable");
                 }
             }
             // Mark as delivered for WebChat

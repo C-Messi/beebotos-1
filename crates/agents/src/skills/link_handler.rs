@@ -445,10 +445,11 @@ impl LinkHandler {
 
     /// Extract key points from content
     async fn extract_key_points(&self, content: &str) -> Result<Vec<String>> {
+        let display_content: String = content.chars().take(3000).collect();
         let prompt = format!(
             "Extract 3-5 key points from the following text. Return only the key points, one per \
              line, starting with a dash:\n\n{}\n\nKey points:",
-            &content[..content.len().min(3000)]
+            display_content
         );
 
         let request = LLMRequest {
