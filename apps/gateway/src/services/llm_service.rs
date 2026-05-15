@@ -21,6 +21,13 @@ use tracing::{debug, info, warn};
 use crate::config::{BeeBotOSConfig, ModelProviderConfig};
 use crate::error::GatewayError;
 
+#[derive(Debug, Clone, Default)]
+pub struct ChatTurnResponse {
+    pub content: String,
+    pub tool_calls: Vec<beebotos_agents::llm::ToolCall>,
+    pub reasoning_content: Option<String>,
+}
+
 /// Metrics for LLM service
 #[derive(Debug, Default)]
 pub struct LlmMetrics {
@@ -129,11 +136,11 @@ pub struct MetricsSummary {
 /// failover.
 pub struct LlmService {
     /// Configuration
-    config: BeeBotOSConfig,
+    config: tokio::sync::RwLock<BeeBotOSConfig>,
     /// Multimodal processor for handling images
     multimodal_processor: MultimodalProcessor,
     /// Failover provider for handling multiple providers
-    failover_provider: Arc<FailoverProvider>,
+    failover_provider: tokio::sync::RwLock<Arc<FailoverProvider>>,
     /// Metrics collection
     metrics: Arc<LlmMetrics>,
 }
@@ -148,16 +155,27 @@ impl LlmService {
         let failover_provider = Self::create_failover_provider(&config).await?;
 
         Ok(Self {
-            config,
+            config: tokio::sync::RwLock::new(config),
             multimodal_processor: MultimodalProcessor::new(),
-            failover_provider: Arc::new(failover_provider),
+            failover_provider: tokio::sync::RwLock::new(Arc::new(failover_provider)),
             metrics: Arc::new(LlmMetrics::default()),
         })
     }
 
     /// Get the internal failover provider for creating an LLMClient
-    pub fn failover_provider(&self) -> Arc<beebotos_agents::llm::FailoverProvider> {
-        self.failover_provider.clone()
+    pub async fn failover_provider(&self) -> Arc<beebotos_agents::llm::FailoverProvider> {
+        self.failover_provider.read().await.clone()
+    }
+
+    /// Hot-reload LLM providers from a new configuration.
+    pub async fn reload_config(&self, config: BeeBotOSConfig) -> Result<(), GatewayError> {
+        Self::validate_config(&config)?;
+        let failover_provider = Self::create_failover_provider(&config).await?;
+
+        *self.config.write().await = config;
+        *self.failover_provider.write().await = Arc::new(failover_provider);
+        info!("LLM service hot-reloaded with updated provider configuration");
+        Ok(())
     }
 
     /// Validate LLM configuration
@@ -399,6 +417,8 @@ impl LlmService {
                     default_model: Self::get_model(name, &provider_config),
                     timeout,
                     retry_policy: beebotos_agents::llm::traits::RetryPolicy::default(),
+                    thinking: provider_config.thinking.clone(),
+                    reasoning_effort: provider_config.reasoning_effort.clone(),
                 };
 
                 let provider = DeepSeekProvider::new(deepseek_config)
@@ -504,7 +524,7 @@ impl LlmService {
             "kimi" => "moonshot-v1-8k".to_string(),
             "openai" => "gpt-4o-mini".to_string(),
             "zhipu" => "glm-4".to_string(),
-            "deepseek" => "deepseek-chat".to_string(),
+            "deepseek" => "deepseek-v4-flash".to_string(),
             "ollama" => "llama2".to_string(),
             "anthropic" | "claude" => "claude-3-sonnet-20240229".to_string(),
             _ => "gpt-4o-mini".to_string(),
@@ -571,11 +591,13 @@ impl LlmService {
         model_override: Option<String>,
     ) -> Result<String, GatewayError> {
         let start_time = std::time::Instant::now();
+        let config = self.config.read().await.clone();
+        let failover_provider = self.failover_provider.read().await.clone();
 
         let mut request_config = RequestConfig {
-            model: model_override.unwrap_or_else(|| self.get_default_model()),
-            temperature: self.get_default_temperature(),
-            max_tokens: max_tokens_override.or(Some(self.config.models.max_tokens)),
+            model: model_override.unwrap_or_else(|| Self::get_default_model_from_config(&config)),
+            temperature: Self::get_default_temperature_from_config(&config),
+            max_tokens: max_tokens_override.or(Some(config.models.max_tokens)),
             stream: Some(false),
             ..Default::default()
         };
@@ -598,7 +620,7 @@ impl LlmService {
             config: request_config,
         };
 
-        let result = self.failover_provider.complete(request).await;
+        let result = failover_provider.complete(request).await;
         let latency_ms = start_time.elapsed().as_millis() as u64;
 
         match result {
@@ -668,6 +690,120 @@ impl LlmService {
         }
     }
 
+    /// Execute a single chat completion turn and preserve native tool calls.
+    pub async fn chat_turn(
+        &self,
+        messages: Vec<LLMMessage>,
+        max_tokens_override: Option<u32>,
+        tools: Option<Vec<beebotos_agents::llm::Tool>>,
+        tool_choice: Option<String>,
+        model_override: Option<String>,
+    ) -> Result<ChatTurnResponse, GatewayError> {
+        let start_time = std::time::Instant::now();
+
+        let config = self.config.read().await.clone();
+        let provider = config.models.default_provider.clone();
+        let default_model = Self::get_default_model_from_config(&config);
+        let default_temperature = Self::get_default_temperature_from_config(&config);
+        let failover_provider = self.failover_provider.read().await.clone();
+
+        let mut request_config = RequestConfig {
+            model: model_override.unwrap_or(default_model),
+            temperature: default_temperature,
+            max_tokens: max_tokens_override.or(Some(config.models.max_tokens)),
+            stream: Some(false),
+            ..Default::default()
+        };
+
+        if let Some(ref t) = tools {
+            request_config.tools = Some(t.clone());
+            let choice = tool_choice.as_deref().unwrap_or("auto");
+            request_config.tool_choice = match choice {
+                "required" => Some(beebotos_agents::llm::ToolChoice::Required(
+                    "required".to_string(),
+                )),
+                "none" => Some(beebotos_agents::llm::ToolChoice::None("none".to_string())),
+                _ => Some(beebotos_agents::llm::ToolChoice::Auto("auto".to_string())),
+            };
+        }
+
+        let request = beebotos_agents::llm::types::LLMRequest {
+            messages,
+            config: request_config,
+        };
+
+        debug!(
+            "LLM chat turn using provider={} model={}",
+            provider, request.config.model
+        );
+        let result = failover_provider.complete(request).await;
+        let latency_ms = start_time.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(response) => {
+                let (input_tokens, output_tokens) = response
+                    .usage
+                    .as_ref()
+                    .map_or((0, 0), |u| (u.prompt_tokens, u.completion_tokens));
+
+                self.metrics
+                    .record_success(latency_ms, input_tokens, output_tokens)
+                    .await;
+
+                if let Some(choice) = response.choices.first() {
+                    let finish_reason = choice.finish_reason.as_deref().unwrap_or("unknown");
+                    if let Some(ref tool_calls) = choice.message.tool_calls {
+                        if !tool_calls.is_empty() {
+                            for tc in tool_calls {
+                                info!(
+                                    "🔧 tool_call: name={}, args_len={}, finish_reason={}",
+                                    tc.function.name,
+                                    tc.function.arguments.len(),
+                                    finish_reason
+                                );
+                            }
+                            info!(
+                                "✅ Received LLM tool_calls ({} calls), latency={}ms, tokens={}/{}",
+                                tool_calls.len(),
+                                latency_ms,
+                                input_tokens,
+                                output_tokens
+                            );
+                            return Ok(ChatTurnResponse {
+                                content: choice.message.text_content(),
+                                tool_calls: tool_calls.clone(),
+                                reasoning_content: choice.message.reasoning_content.clone(),
+                            });
+                        }
+                    }
+
+                    let content = choice.message.text_content();
+                    info!(
+                        "✅ Received LLM response: length={}, latency={}ms, tokens={}/{}",
+                        content.len(),
+                        latency_ms,
+                        input_tokens,
+                        output_tokens
+                    );
+                    return Ok(ChatTurnResponse {
+                        content,
+                        tool_calls: Vec::new(),
+                        reasoning_content: choice.message.reasoning_content.clone(),
+                    });
+                }
+
+                Ok(ChatTurnResponse::default())
+            }
+            Err(e) => {
+                self.metrics.record_failure();
+                Err(GatewayError::Internal {
+                    message: format!("LLM request failed: {}", e),
+                    correlation_id: uuid::Uuid::new_v4().to_string(),
+                })
+            }
+        }
+    }
+
     /// Stream LLM response as text chunks
     ///
     /// Sets `stream: true` in the request config and forwards chunks from the
@@ -678,10 +814,13 @@ impl LlmService {
         max_tokens_override: Option<u32>,
         model_override: Option<String>,
     ) -> Result<tokio::sync::mpsc::Receiver<String>, GatewayError> {
+        let config = self.config.read().await.clone();
+        let failover_provider = self.failover_provider.read().await.clone();
+
         let request_config = RequestConfig {
-            model: model_override.unwrap_or_else(|| self.get_default_model()),
-            temperature: self.get_default_temperature(),
-            max_tokens: max_tokens_override.or(Some(self.config.models.max_tokens)),
+            model: model_override.unwrap_or_else(|| Self::get_default_model_from_config(&config)),
+            temperature: Self::get_default_temperature_from_config(&config),
+            max_tokens: max_tokens_override.or(Some(config.models.max_tokens)),
             stream: Some(true),
             ..Default::default()
         };
@@ -691,8 +830,7 @@ impl LlmService {
             config: request_config,
         };
 
-        let mut chunk_rx = self
-            .failover_provider
+        let mut chunk_rx = failover_provider
             .complete_stream(request)
             .await
             .map_err(|e| GatewayError::Internal {
@@ -737,6 +875,8 @@ impl LlmService {
         include_system_prompt: bool,
     ) -> Result<String, GatewayError> {
         let start_time = std::time::Instant::now();
+        let config = self.config.read().await.clone();
+        let failover_provider = self.failover_provider.read().await.clone();
 
         // Handle multimodal processing result
         let multimodal_content = multimodal_result.unwrap_or_else(|e| {
@@ -784,9 +924,9 @@ impl LlmService {
         };
 
         // Build messages (with or without system prompt)
-        let messages = if include_system_prompt && !self.config.models.system_prompt.is_empty() {
+        let messages = if include_system_prompt && !config.models.system_prompt.is_empty() {
             vec![
-                LLMMessage::system(&self.config.models.system_prompt),
+                LLMMessage::system(&config.models.system_prompt),
                 user_message,
             ]
         } else {
@@ -795,9 +935,9 @@ impl LlmService {
 
         // Build request config
         let request_config = RequestConfig {
-            model: self.get_default_model(),
-            temperature: self.get_default_temperature(),
-            max_tokens: Some(self.config.models.max_tokens),
+            model: Self::get_default_model_from_config(&config),
+            temperature: Self::get_default_temperature_from_config(&config),
+            max_tokens: Some(config.models.max_tokens),
             stream: Some(false),
             ..Default::default()
         };
@@ -808,7 +948,7 @@ impl LlmService {
         };
 
         // Execute request through failover provider
-        let result = self.failover_provider.complete(request).await;
+        let result = failover_provider.complete(request).await;
         let latency_ms = start_time.elapsed().as_millis() as u64;
 
         match result {
@@ -860,6 +1000,8 @@ impl LlmService {
         message: &ChannelMessage,
     ) -> Result<tokio::sync::mpsc::Receiver<String>, GatewayError> {
         let start_time = std::time::Instant::now();
+        let config = self.config.read().await.clone();
+        let failover_provider = self.failover_provider.read().await.clone();
 
         // Process multimodal content
         let multimodal_content = self
@@ -902,20 +1044,20 @@ impl LlmService {
         };
 
         // Build messages with system prompt
-        let messages = if self.config.models.system_prompt.is_empty() {
+        let messages = if config.models.system_prompt.is_empty() {
             vec![user_message]
         } else {
             vec![
-                LLMMessage::system(&self.config.models.system_prompt),
+                LLMMessage::system(&config.models.system_prompt),
                 user_message,
             ]
         };
 
         // Build streaming request config
         let request_config = RequestConfig {
-            model: self.get_default_model(),
-            temperature: self.get_default_temperature(),
-            max_tokens: Some(self.config.models.max_tokens),
+            model: Self::get_default_model_from_config(&config),
+            temperature: Self::get_default_temperature_from_config(&config),
+            max_tokens: Some(config.models.max_tokens),
             stream: Some(true),
             ..Default::default()
         };
@@ -926,8 +1068,7 @@ impl LlmService {
         };
 
         // Execute streaming request
-        let mut stream_rx = self
-            .failover_provider
+        let mut stream_rx = failover_provider
             .complete_stream(request)
             .await
             .map_err(|e| GatewayError::Internal {
@@ -999,6 +1140,9 @@ impl LlmService {
     /// Health check for LLM service
     pub async fn health_check(&self) -> Result<(), GatewayError> {
         self.failover_provider
+            .read()
+            .await
+            .clone()
             .health_check()
             .await
             .map_err(|e| GatewayError::Internal {
@@ -1009,13 +1153,18 @@ impl LlmService {
 
     /// Get provider status
     pub async fn get_provider_status(&self) -> Vec<(String, bool, u32)> {
-        self.failover_provider.get_provider_status().await
+        self.failover_provider
+            .read()
+            .await
+            .clone()
+            .get_provider_status()
+            .await
     }
 
     /// Get default model from config
-    fn get_default_model(&self) -> String {
-        let provider = &self.config.models.default_provider;
-        self.config
+    fn get_default_model_from_config(config: &BeeBotOSConfig) -> String {
+        let provider = &config.models.default_provider;
+        config
             .models
             .providers
             .get(provider)
@@ -1024,9 +1173,9 @@ impl LlmService {
     }
 
     /// Get default temperature from config
-    fn get_default_temperature(&self) -> Option<f32> {
-        let provider = &self.config.models.default_provider;
-        self.config
+    fn get_default_temperature_from_config(config: &BeeBotOSConfig) -> Option<f32> {
+        let provider = &config.models.default_provider;
+        config
             .models
             .providers
             .get(provider)
@@ -1056,6 +1205,7 @@ mod tests {
                 deployment: None,
                 context_window: None,
                 thinking: None,
+                reasoning_effort: None,
             },
         );
         config

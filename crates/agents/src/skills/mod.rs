@@ -22,6 +22,7 @@ pub mod loader;
 pub mod mcp_parameter_extractor;
 pub mod process_sandbox;
 pub mod rating;
+pub mod react_executor;
 pub mod registry;
 pub mod security;
 pub mod tool_set;
@@ -50,6 +51,7 @@ pub use mcp_parameter_extractor::{
     ExtractedParams, FieldSchema, McpParameterExtractor, PendingParameterForm,
 };
 pub use rating::{RatingSummary, SkillRating, SkillRatingStore};
+pub use react_executor::ReActExecutor;
 pub use registry::{RegisteredSkill, SkillDefinition, SkillRegistry, Version, VersionError};
 pub use security::{SandboxMode, SkillSecurityPolicy, SkillSecurityValidator, ValidationError};
 pub use tool_set::{

@@ -1170,6 +1170,8 @@ pub struct LlmProviderConfig {
     pub base_url: String,
     pub temperature: f32,
     pub context_window: Option<u32>,
+    pub thinking: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 /// Request to update LLM provider configuration
@@ -1178,6 +1180,8 @@ pub struct UpdateLlmConfigRequest {
     pub provider: String,
     pub model: String,
     pub temperature: f32,
+    pub thinking: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub set_default: Option<bool>,
 }
 

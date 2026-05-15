@@ -14,7 +14,7 @@ use web_sys::MessageEvent;
 use crate::api::{create_client, create_webchat_service};
 use crate::state::{use_auth_state, use_webchat_state};
 use crate::utils::get_user_id;
-use crate::webchat::ChatMessage;
+use crate::webchat::{ChatMessage, ToolCallEvent};
 
 fn merge_messages(
     chat_state: &crate::state::WebchatState,
@@ -173,6 +173,7 @@ pub fn use_websocket_chat() -> ReadSignal<WsConnectionStatus> {
                                         }
                                         chat_state_msg.is_sending.set(false);
                                         chat_state_msg.is_streaming.set(false);
+                                        chat_state_msg.streaming_tool_calls.set(Vec::new());
                                         let _ = web_sys::console::log_1(
                                             &format!("[websocket] message added: {}", msg_id)
                                                 .into(),
@@ -203,6 +204,19 @@ pub fn use_websocket_chat() -> ReadSignal<WsConnectionStatus> {
                                     }
                                     chat_state_msg.append_streaming_content(content);
                                 }
+                            }
+                        }
+                        Some("chat_tool_call") => {
+                            let session_id = json
+                                .get("session_id")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            if session_id != chat_state_msg.current_session_id.get_untracked() {
+                                return;
+                            }
+                            if let Some(event) = json.get("event") {
+                                chat_state_msg
+                                    .add_streaming_tool_call(ToolCallEvent::from_ws_event(event));
                             }
                         }
                         _ => {}

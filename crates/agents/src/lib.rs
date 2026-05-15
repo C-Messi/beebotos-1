@@ -85,6 +85,7 @@ pub mod system_info;
 pub mod planning;
 pub mod queue;
 pub mod rate_limit;
+pub mod react_trace;
 pub mod runtime;
 pub mod scheduling;
 pub mod security;
@@ -210,8 +211,17 @@ pub use planning::{
     TaskDecomposer,
     ToolExecutor,
 };
+pub use react_trace::{
+    clamp_react_max_tool_rounds, format_tool_error, format_unknown_tool_error, sanitize_preview,
+    ReActTraceEvent, ReActTracePhase, ReActTraceSink, DEFAULT_REACT_MAX_TOOL_ROUNDS,
+    MAX_REACT_TOOL_ROUNDS_LIMIT,
+};
 // 🟢 P1 FIX: Gateway AgentRuntime implementation
 pub use runtime::agent_runtime_impl::GatewayAgentRuntime;
+// 🆕 Foreign runtime executor for Python/Node.js support
+pub use runtime::foreign_executor::{
+    ForeignTaskExecutor, ForeignTaskExecutorBuilder,
+};
 // 🟢 P1 FIX: Re-export runtime types for object pool and batch processing
 pub use runtime::{
     AgentRuntime, AgentRuntimeBuilder, BatchExecutor, BatchResult, RuntimeConfig,

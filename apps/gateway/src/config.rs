@@ -389,9 +389,12 @@ pub struct ModelProviderConfig {
     pub deployment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<usize>,
-    /// Kimi thinking mode: "enabled" or "disabled" (default "disabled")
+    /// Provider thinking mode: "enabled" or "disabled"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// Provider reasoning effort for thinking-capable models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Channels configuration - flattened structure like beebot
@@ -943,6 +946,7 @@ mod tests {
                             deployment: None,
                             context_window: Some(8192),
                             thinking: None,
+                            reasoning_effort: None,
                         },
                     );
                     map

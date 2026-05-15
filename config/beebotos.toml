@@ -50,27 +50,41 @@ level = "info"
 otel_enabled = false
 otel_endpoint = "http://localhost:4317"
 
+[mcp]
+allowed_commands = []
+auto_init = true
+enforce_tls = true
+retry_count = 3
+timeout_ms = 60000
+
 [models]
-default_provider = "kimi"
+default_provider = "deepseek"
 fallback_chain = []
 max_tokens = 4096
 request_timeout = 180
 system_prompt = "You are a helpful assistant."
 
-[models.kimi]
-base_url = "https://api.moonshot.cn/v1"
-model = "kimi-k2.6"
-temperature = 0.6
-thinking = "disabled"
-
-[models.zhipu]
-base_url = "https://open.bigmodel.cn/api/paas/v4"
-model = "glm-4"
+[models.deepseek]
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-v4-pro"
+reasoning_effort = "high"
 temperature = 0.7
+thinking = "enabled"
 
 [models.gpt4]
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
+temperature = 0.7
+
+[models.kimi]
+base_url = "https://api.moonshot.cn/v1"
+model = "kimi-k2.6"
+temperature = 1.0
+thinking = "enabled"
+
+[models.zhipu]
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+model = "glm-4"
 temperature = 0.7
 
 [rate_limit]
@@ -138,13 +152,13 @@ mutual_tls = false
 # Alpaca Trading API MCP Server
 # Provides 60+ tools for stock trading, market data, and account management.
 # Requires ALPACA_API_KEY and ALPACA_SECRET_KEY from https://alpaca.markets/
- [[mcp.servers]]
- name = "alpaca"
- transport = "stdio"
- command = "uv"
- args = ["run", "--quiet", "python", "-m", "alpaca_mcp_server.cli"]
- working_dir = "/root/alpaca-mcp-server"
- env = { ALPACA_API_KEY = "PKJX2TXVDNC33FEM3TSRKRSP4S", ALPACA_SECRET_KEY = "9AyE34tuoTj1TSbZDpmfHmkrrSf7M16QUQBTEJm6M7mR" }
+[[mcp.servers]]
+name = "alpaca"
+transport = "stdio"
+command = "uv"
+args = ["run", "--quiet", "python", "-m", "alpaca_mcp_server.cli"]
+working_dir = "/root/alpaca-mcp-server"
+env = { ALPACA_API_KEY = "${ALPACA_API_KEY}", ALPACA_SECRET_KEY = "${ALPACA_SECRET_KEY}" }
 
 [mcp]
 auto_init = true

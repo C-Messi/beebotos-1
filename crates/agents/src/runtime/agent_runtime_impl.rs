@@ -61,6 +61,8 @@ pub struct GatewayAgentRuntime {
     llm_client: Option<Arc<crate::llm::LLMClient>>,
     /// 🆕 Tool working directory for sandboxed file operations
     tool_work_dir: std::path::PathBuf,
+    /// Optional sink for live ReAct/tool trace events.
+    react_trace_sink: Option<Arc<dyn crate::react_trace::ReActTraceSink>>,
 }
 
 /// Handle to an agent's task
@@ -154,7 +156,8 @@ impl GatewayAgentRuntime {
             mcp_manager: None,
             system_info_provider: None,
             llm_client: None,
-            tool_work_dir: std::path::PathBuf::from("/data/workspace"),
+            tool_work_dir: std::path::PathBuf::from("data/workspace"),
+            react_trace_sink: None,
         };
 
         Ok(runtime)
@@ -213,6 +216,15 @@ impl GatewayAgentRuntime {
     /// 🆕 Set tool working directory for sandboxed file operations
     pub fn with_tool_work_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.tool_work_dir = dir.into();
+        self
+    }
+
+    /// Attach a live ReAct/tool trace sink to spawned agents.
+    pub fn with_react_trace_sink(
+        mut self,
+        sink: Arc<dyn crate::react_trace::ReActTraceSink>,
+    ) -> Self {
+        self.react_trace_sink = Some(sink);
         self
     }
 
@@ -463,6 +475,9 @@ impl GatewayAgentRuntime {
             builder = builder.with_llm_client(client.clone());
         }
         builder = builder.with_tool_work_dir(self.tool_work_dir.clone());
+        if let Some(ref sink) = self.react_trace_sink {
+            builder = builder.with_react_trace_sink(sink.clone());
+        }
 
         let (task_id, task_sender) = builder
             .spawn()
@@ -707,7 +722,8 @@ impl GatewayAgentRuntime {
             mcp_manager: None,
             system_info_provider: None,
             llm_client: None,
-            tool_work_dir: std::path::PathBuf::from("/data/workspace"),
+            tool_work_dir: std::path::PathBuf::from("data/workspace"),
+            react_trace_sink: None,
         }
     }
 
@@ -1001,6 +1017,9 @@ impl AgentRuntime for GatewayAgentRuntime {
                 builder = builder.with_llm_client(client.clone());
             }
             builder = builder.with_tool_work_dir(self.tool_work_dir.clone());
+            if let Some(ref sink) = self.react_trace_sink {
+                builder = builder.with_react_trace_sink(sink.clone());
+            }
 
             let (task_id, task_sender) = builder.spawn().await.map_err(|e| {
                 error!("❌ builder.spawn() failed for agent {}: {}", agent_id, e);
@@ -1014,7 +1033,10 @@ impl AgentRuntime for GatewayAgentRuntime {
             }
         } else {
             // Local execution (for testing)
-            let _agent = Agent::new(agent_config.clone());
+            let mut _agent = Agent::new(agent_config.clone());
+            if let Some(ref sink) = self.react_trace_sink {
+                _agent = _agent.with_react_trace_sink(sink.clone());
+            }
             let (tx, _rx) = mpsc::unbounded_channel();
 
             AgentTaskHandle {

@@ -170,10 +170,23 @@ impl LLMCallInterface for LLMClientAdapter {
             .and_then(|c| c.get("max_tokens"))
             .and_then(|s| s.parse::<u32>().ok());
         let tool_choice = context.as_ref().and_then(|c| c.get("tool_choice")).cloned();
+        let max_tool_rounds = context
+            .as_ref()
+            .and_then(|c| c.get("max_tool_rounds"))
+            .and_then(|s| s.parse::<u32>().ok())
+            .map(crate::react_trace::clamp_react_max_tool_rounds)
+            .unwrap_or(crate::react_trace::DEFAULT_REACT_MAX_TOOL_ROUNDS)
+            as usize;
 
         let result = self
             .client
-            .chat_with_tools_react(&prompt, tool_handlers, 10, max_tokens, tool_choice)
+            .chat_with_tools_react(
+                &prompt,
+                tool_handlers,
+                max_tool_rounds,
+                max_tokens,
+                tool_choice,
+            )
             .await
             .map_err(|e| crate::error::AgentError::Execution(e.to_string()))?;
 

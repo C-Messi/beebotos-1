@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-
 /// MCP Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTool {

@@ -10,6 +10,7 @@ use beebotos_agents::communication::channel::ChannelEvent;
 use beebotos_agents::communication::{Message, MessageType, PlatformType};
 use beebotos_agents::deduplicator::MessageDeduplicator;
 use beebotos_agents::media::multimodal::MultimodalProcessor;
+use beebotos_agents::skills::unified_react_executor::STREAM_EVENT_PREFIX;
 use beebotos_agents::ChannelRegistry;
 use regex::Regex;
 use tracing::{debug, error, info, warn};
@@ -734,7 +735,7 @@ impl MessageProcessor {
             "platform": platform.to_string(),
             "channel_id": channel_id,
             "user_id": user_id,
-            "session_id": session.id,
+            "session_id": db_session_id,
             "db_session_id": db_session_id,
             "metadata": message.metadata,
             "memory_context": memory_context,
@@ -820,19 +821,55 @@ impl MessageProcessor {
         let message_bg = message.clone();
         let platform_bg = platform;
         let agent_runtime_bg = Arc::clone(&agent_runtime);
+        let tool_calls = Arc::new(tokio::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let tool_calls_bg = Arc::clone(&tool_calls);
 
-        let (stream_count_tx, mut stream_count_rx) =
-            tokio::sync::oneshot::channel::<usize>();
+        let (stream_count_tx, mut stream_count_rx) = tokio::sync::oneshot::channel::<usize>();
 
         // 🆕 STREAMING: Spawn a task to consume stream chunks and send to WebSocket
         if let Some(stream_rx) = stream_rx {
             let channel_id_stream = channel_id_bg.clone();
             let processor_stream = Arc::clone(&processor);
+            let tool_calls_stream = Arc::clone(&tool_calls);
             tokio::spawn(async move {
                 let mut rx = stream_rx;
                 let mut chunk_count = 0;
                 while let Some(chunk) = rx.recv().await {
                     chunk_count += 1;
+                    if let Some(event_json) = chunk.strip_prefix(STREAM_EVENT_PREFIX) {
+                        match serde_json::from_str::<serde_json::Value>(event_json) {
+                            Ok(event) => {
+                                tool_calls_stream.lock().await.push(event.clone());
+                                match processor_stream
+                                    .channel_registry
+                                    .get_channel_by_platform(PlatformType::WebChat)
+                                    .await
+                                {
+                                    Some(channel) => {
+                                        let guard = channel.read().await;
+                                        if let Some(webchat) = guard.as_any().downcast_ref::<
+                                            beebotos_agents::communication::channel::WebChatChannel,
+                                        >() {
+                                            let _ = webchat
+                                                .send_tool_call(&channel_id_stream, event)
+                                                .await;
+                                        }
+                                    }
+                                    None => {
+                                        warn!(
+                                            "Tool call event dropped: WebChat channel not \
+                                             available"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Invalid stream event payload dropped: {}", e);
+                            }
+                        }
+                        continue;
+                    }
+
                     match processor_stream
                         .channel_registry
                         .get_channel_by_platform(PlatformType::WebChat)
@@ -934,6 +971,7 @@ impl MessageProcessor {
                 .await;
 
             // 持久化 AI 回复
+            let tool_calls_snapshot = tool_calls_bg.lock().await.clone();
             let mut saved_message_id: Option<String> = None;
             if let Some(ref svc) = processor.webchat_service {
                 if let Ok(id) = svc
@@ -944,6 +982,7 @@ impl MessageProcessor {
                         Some(serde_json::json!({
                             "platform": platform_bg.to_string(),
                             "channel_id": channel_id_bg.clone(),
+                            "tool_calls": tool_calls_snapshot,
                         })),
                         None,
                     )
@@ -954,11 +993,8 @@ impl MessageProcessor {
             }
 
             let stream_chunk_count = if platform_bg == PlatformType::WebChat {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    &mut stream_count_rx,
-                )
-                .await
+                match tokio::time::timeout(std::time::Duration::from_secs(2), &mut stream_count_rx)
+                    .await
                 {
                     Ok(Ok(count)) => count,
                     Ok(Err(_)) => 0,
@@ -988,39 +1024,28 @@ impl MessageProcessor {
                     );
                 }
             } else if completion_result.is_err() || stream_chunk_count == 0 {
-                let mut sent_as_stream = false;
+                let mut reply = message_bg.clone();
+                reply.id = Uuid::new_v4();
+                reply.content = llm_response.clone();
+                reply.metadata.clear();
+                if !tool_calls_snapshot.is_empty() {
+                    if let Ok(tool_calls_json) = serde_json::to_string(&tool_calls_snapshot) {
+                        reply
+                            .metadata
+                            .insert("tool_calls".to_string(), tool_calls_json);
+                    }
+                }
+
                 if let Some(channel) = processor
                     .channel_registry
                     .get_channel_by_platform(PlatformType::WebChat)
                     .await
                 {
-                    let guard = channel.read().await;
-                    if let Some(webchat) = guard.as_any().downcast_ref::<
-                        beebotos_agents::communication::channel::WebChatChannel,
-                    >() {
-                        match webchat
-                            .send_stream_chunk(&channel_id_bg, &llm_response, false)
-                            .await
-                        {
-                            Ok(_) => {
-                                let _ = webchat
-                                    .send_stream_chunk(&channel_id_bg, "", true)
-                                    .await;
-                                sent_as_stream = true;
-                            }
-                            Err(e) => {
-                                warn!("[BG] Failed to send WebChat stream fallback: {}", e);
-                            }
-                        }
+                    if let Err(e) = channel.read().await.send(&channel_id_bg, &reply).await {
+                        warn!("[BG] Failed to send final WebChat reply: {}", e);
                     }
-                }
-                if !sent_as_stream {
-                    if let Err(e) = processor
-                        .send_reply(platform_bg, &channel_id_bg, &message_bg, &llm_response)
-                        .await
-                    {
-                        warn!("[BG] Failed to send fallback reply to WebChat: {}", e);
-                    }
+                } else {
+                    warn!("[BG] Failed to send final WebChat reply: channel unavailable");
                 }
             }
             // Mark as delivered for WebChat

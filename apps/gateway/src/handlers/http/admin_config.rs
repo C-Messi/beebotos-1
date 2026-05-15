@@ -21,8 +21,14 @@ pub async fn get_config(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["admin"])?;
 
-    // Serialize the current in-memory config
-    let config_json = serde_json::to_value(&state.config)
+    let loaded_config = if let Some(manager) = &state.config_manager {
+        manager.config().await.clone()
+    } else {
+        state.config.clone()
+    };
+
+    // Serialize the current effective config
+    let config_json = serde_json::to_value(&loaded_config)
         .map_err(|e| GatewayError::internal(format!("Failed to serialize config: {}", e)))?;
 
     Ok(Json(json!({
@@ -41,13 +47,25 @@ pub async fn reload_config(
 
     if let Some(ref manager) = state.config_manager {
         match manager.reload().await {
-            Ok(_) => Ok((
-                StatusCode::OK,
-                Json(json!({
-                    "message": "Configuration reloaded successfully",
-                    "status": "ok",
-                })),
-            )),
+            Ok(_) => {
+                let current_config = manager.config().await.clone();
+                match state.llm_service.reload_config(current_config).await {
+                    Ok(()) => Ok((
+                        StatusCode::OK,
+                        Json(json!({
+                            "message": "Configuration and LLM providers reloaded successfully",
+                            "status": "ok",
+                        })),
+                    )),
+                    Err(e) => Ok((
+                        StatusCode::OK,
+                        Json(json!({
+                            "message": format!("Configuration reloaded but LLM provider reload failed: {}", e),
+                            "status": "partial",
+                        })),
+                    )),
+                }
+            }
             Err(e) => Ok((
                 StatusCode::OK,
                 Json(json!({

@@ -1575,6 +1575,93 @@ body {
     border-color: var(--primary-color);
 }
 
+.tool-call-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.tool-call-badge {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--primary-color) 45%, var(--border-color));
+    border-left: 3px solid var(--primary-color);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--primary-color) 9%, var(--bg-glass-light));
+    color: var(--text-primary);
+    max-width: min(680px, 100%);
+}
+
+.tool-call-icon {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--primary-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 14px;
+    line-height: 1;
+}
+
+.tool-call-body {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.tool-call-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.tool-call-label {
+    color: var(--primary-color);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.tool-call-name {
+    font-size: 13px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.tool-call-round {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.tool-call-reason {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.tool-call-args {
+    display: block;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.4;
+    background: var(--bg-glass-light);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+}
+
 .streaming-indicator {
     display: flex;
     align-items: center;

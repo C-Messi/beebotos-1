@@ -6,6 +6,5 @@
 pub mod builder;
 pub mod cache;
 
-pub use builder::{PromptBuilder, PromptComponents, SkillLevelDesc, ToolDefinition};
-pub use builder::model_presets;
+pub use builder::{model_presets, PromptBuilder, PromptComponents, SkillLevelDesc, ToolDefinition};
 pub use cache::{PromptCache, PromptCacheConfig};

@@ -1714,6 +1714,7 @@ dependencies = [
  "base64 0.22.1",
  "beebotos-chain",
  "beebotos-core",
+ "beebotos-foreign-rt",
  "beebotos-gateway-lib",
  "beebotos-kernel",
  "beebotos-message-bus",
@@ -1986,6 +1987,32 @@ dependencies = [
  "sha3",
  "thiserror 1.0.69",
  "tiny-keccak",
+]
+
+[[package]]
+name = "beebotos-foreign-rt"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "beebotos-core",
+ "beebotos-kernel",
+ "chrono",
+ "futures",
+ "libc",
+ "mockall",
+ "nix 0.29.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "uuid",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]
@@ -7435,6 +7462,18 @@ dependencies = [
  "bitflags 2.11.1",
  "cfg-if",
  "cfg_aliases 0.1.1",
+ "libc",
+]
+
+[[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.11.1",
+ "cfg-if",
+ "cfg_aliases 0.2.1",
  "libc",
 ]
 

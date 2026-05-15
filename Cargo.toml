@@ -13,6 +13,7 @@ members = [
     "crates/gateway-lib",
     "crates/message-bus",
     "crates/update-client",
+    "crates/foreign-rt",
     # Applications
     "apps/gateway",
     "apps/web",
@@ -147,6 +148,7 @@ beebotos-p2p = { path = "crates/p2p" }
 beebotos-telemetry = { path = "crates/telemetry" }
 beebotos-gateway-lib = { path = "crates/gateway-lib" }
 beebotos-message-bus = { path = "crates/message-bus" }
+beebotos-foreign-rt = { path = "crates/foreign-rt" }
 
 [profile.release]
 opt-level = 3

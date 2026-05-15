@@ -20,6 +20,7 @@ pub mod identity_service;
 pub mod llm_service;
 pub mod message_processor;
 pub mod multichain_config;
+pub mod react_trace_ws;
 pub mod state_machine_service;
 pub mod task_monitor;
 pub mod wallet_service;
