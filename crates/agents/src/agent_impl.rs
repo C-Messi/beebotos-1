@@ -180,6 +180,7 @@ impl Agent {
     }
 
     fn workspace_dir(&self) -> PathBuf {
+        #[cfg(test)]
         if let Ok(path) = std::env::var("BEEBOTOS_WORKSPACE") {
             let path = PathBuf::from(path);
             if !path.as_os_str().is_empty() {
@@ -243,8 +244,8 @@ impl Agent {
 
     fn controlled_workspace_tools_enabled(&self) -> bool {
         std::env::var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-            .unwrap_or(false)
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+            .unwrap_or(true)
     }
 
     fn approval_env() -> HashMap<String, String> {
@@ -261,7 +262,7 @@ impl Agent {
     }
 
     fn builtin_workspace_tools(&self) -> Vec<communication::ToolDefinition> {
-        vec![
+        let mut tools = vec![
             communication::ToolDefinition {
                 name: "read_file".to_string(),
                 description: "Read a UTF-8 text file from the current workspace. Parameters: path \
@@ -324,7 +325,11 @@ impl Agent {
                     "required": ["pattern"]
                 }),
             },
-        ]
+        ];
+        if self.controlled_workspace_tools_enabled() {
+            tools.extend(self.controlled_workspace_tool_definitions());
+        }
+        tools
     }
 
     fn web_tools_enabled(&self) -> bool {
@@ -335,9 +340,6 @@ impl Agent {
 
     fn builtin_react_tools(&self) -> Vec<communication::ToolDefinition> {
         let mut tools = self.builtin_workspace_tools();
-        if self.controlled_workspace_tools_enabled() {
-            tools.extend(self.controlled_workspace_tool_definitions());
-        }
         tools.push(communication::ToolDefinition {
             name: "activate_skill".to_string(),
             description: "Activate a BeeBotOS skill as additional context for this conversation. \
@@ -679,6 +681,7 @@ impl Agent {
                     Some(dir) if !dir.trim().is_empty() => self.resolve_workspace_path(dir)?,
                     _ => self.workspace_dir(),
                 };
+                let workspace = self.workspace_dir();
                 let timeout_ms = get("timeout_ms")
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(30000);
@@ -686,6 +689,10 @@ impl Agent {
                 cmd.arg("-c").arg(command);
                 cmd.current_dir(&working_dir);
                 cmd.kill_on_drop(true);
+                cmd.env_clear();
+                cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+                cmd.env("HOME", &workspace);
+                cmd.env("BEEBOTOS_WORKSPACE", &workspace);
                 let output = tokio::time::timeout(
                     std::time::Duration::from_millis(timeout_ms),
                     cmd.output(),
@@ -731,6 +738,48 @@ impl Agent {
                     "Dangerous command pattern blocked: {}",
                     pattern
                 )));
+            }
+        }
+        let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
+        for fragment in command.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '|')) {
+            let unquoted = fragment.trim_matches(|c| {
+                matches!(
+                    c,
+                    '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+                )
+            });
+            if unquoted.is_empty() {
+                continue;
+            }
+            for path_part in unquoted
+                .split(|c| matches!(c, '=' | ':' | ','))
+                .filter(|part| !part.is_empty())
+            {
+                if path_part == ".."
+                    || path_part.starts_with("../")
+                    || path_part.ends_with("/..")
+                    || path_part.contains("/../")
+                {
+                    return Err(AgentError::Execution(
+                        "Command path traversal outside the workspace is blocked".to_string(),
+                    ));
+                }
+                if !path_part.starts_with('/') {
+                    continue;
+                }
+                let normalized = Self::normalize_path_without_fs(Path::new(path_part));
+                if !normalized.starts_with(&workspace) {
+                    return Err(AgentError::Execution(format!(
+                        "Absolute command path '{}' escapes workspace root '{}'",
+                        path_part,
+                        workspace.display()
+                    )));
+                }
+            }
+            if unquoted.contains("..") {
+                return Err(AgentError::Execution(
+                    "Command path traversal outside the workspace is blocked".to_string(),
+                ));
             }
         }
         Ok(())
@@ -3077,8 +3126,9 @@ impl Agent {
              Workspace\nWorking directory: {}\nAll workspace tools are restricted to this \
              root.\n\nThis is the BeeBotOS user workspace, normally ./data/workspace relative to \
              the repo. Treat it as your current working directory, not the repository root.\n\n## \
-             Tools\nExecutable tools include read_file, list_dir, glob, grep, web_fetch, \
-             web_search, and activate_skill. {}\n\n## Skills\n{}",
+             Tools\nExecutable tools include read_file, list_dir, glob, grep, write_file, \
+             edit_file, exec, web_fetch, web_search, and activate_skill when enabled by runtime \
+             policy. {}\n\n## Skills\n{}",
             self.config.name,
             self.config.description,
             runtime_context,
@@ -5160,7 +5210,8 @@ impl Agent {
             if self.controlled_workspace_tools_enabled() {
                 "Controlled tools are enabled: write_file(path, content), edit_file(path, \
                  old_text, new_text, replace_all?), and exec(command, working_dir?, timeout_ms?) \
-                 are available."
+                 are available. All file operations and command working directories are limited to \
+                 this workspace."
             } else {
                 "Controlled tools such as write_file, edit_file, and exec exist but are disabled \
                  unless runtime policy explicitly enables them."
@@ -9898,10 +9949,21 @@ mod planning_integration_tests {
     }
 
     #[test]
-    fn test_react_controlled_tools_are_exposed_only_when_enabled() {
+    fn test_react_controlled_tools_are_exposed_by_default_and_can_be_disabled() {
         std::env::remove_var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS");
         let agent = create_test_agent();
-        let disabled_tools: std::collections::HashSet<String> = agent
+        let default_tools: std::collections::HashSet<String> = agent
+            .builtin_react_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(default_tools.contains("write_file"));
+        assert!(default_tools.contains("edit_file"));
+        assert!(default_tools.contains("exec"));
+
+        std::env::set_var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS", "0");
+        let disabled_agent = create_test_agent();
+        let disabled_tools: std::collections::HashSet<String> = disabled_agent
             .builtin_react_tools()
             .into_iter()
             .map(|tool| tool.name)
@@ -9909,16 +9971,6 @@ mod planning_integration_tests {
         assert!(!disabled_tools.contains("write_file"));
         assert!(!disabled_tools.contains("edit_file"));
         assert!(!disabled_tools.contains("exec"));
-
-        std::env::set_var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS", "true");
-        let enabled_tools: std::collections::HashSet<String> = agent
-            .builtin_react_tools()
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect();
-        assert!(enabled_tools.contains("write_file"));
-        assert!(enabled_tools.contains("edit_file"));
-        assert!(enabled_tools.contains("exec"));
         std::env::remove_var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS");
     }
 
@@ -9957,6 +10009,21 @@ mod planning_integration_tests {
 
         let escaped = agent.resolve_workspace_path("../outside.txt");
         assert!(escaped.is_err());
+        std::env::remove_var("BEEBOTOS_WORKSPACE");
+    }
+
+    #[test]
+    fn test_react_workspace_exec_blocks_paths_outside_workspace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("BEEBOTOS_WORKSPACE", dir.path());
+        let agent = create_test_agent();
+
+        assert!(agent.validate_workspace_command("cat /etc/passwd").is_err());
+        assert!(agent.validate_workspace_command("cat ../outside.txt").is_err());
+
+        let inside = dir.path().join("ok.txt");
+        let command = format!("cat {}", inside.display());
+        assert!(agent.validate_workspace_command(&command).is_ok());
         std::env::remove_var("BEEBOTOS_WORKSPACE");
     }
 
