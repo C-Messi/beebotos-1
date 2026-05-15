@@ -39,7 +39,6 @@ pub mod script_task;
 pub mod wasm_path;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use tracing::{error, info, instrument, warn};
@@ -364,14 +363,24 @@ impl ForeignRuntimeManager for DefaultForeignRuntimeManager {
     }
 
     fn is_available(&self, runtime: ForeignRuntime) -> bool {
+        self.is_wasm_available(runtime) || self.is_process_available(runtime)
+    }
+}
+
+impl DefaultForeignRuntimeManager {
+    /// Check if WASM path is available for a runtime
+    pub fn is_wasm_available(&self, runtime: ForeignRuntime) -> bool {
         match runtime {
-            ForeignRuntime::Python => {
-                self.pyodide.is_some() || self.process_executor.as_ref().map_or(false, |e| e.is_available(ForeignRuntime::Python))
-            }
-            ForeignRuntime::NodeJs => {
-                self.quickjs.is_some() || self.process_executor.as_ref().map_or(false, |e| e.is_available(ForeignRuntime::NodeJs))
-            }
+            ForeignRuntime::Python => self.pyodide.is_some(),
+            ForeignRuntime::NodeJs => self.quickjs.is_some(),
         }
+    }
+
+    /// Check if process path is available for a runtime
+    pub fn is_process_available(&self, runtime: ForeignRuntime) -> bool {
+        self.process_executor
+            .as_ref()
+            .map_or(false, |e| e.is_available(runtime))
     }
 }
 
@@ -440,6 +449,7 @@ impl Default for ForeignRuntimeManagerBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
     use super::*;
 
     #[test]

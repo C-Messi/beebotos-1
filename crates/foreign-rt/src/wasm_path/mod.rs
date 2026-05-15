@@ -8,16 +8,15 @@ pub mod pyodide;
 pub mod quickjs;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use tracing::{debug, error, info, warn};
+use tracing::info;
 
-use crate::bridge::host_funcs::{HostContext, HostFunctionDispatcher};
+
 use crate::config::WasmPathConfig;
 use crate::error::{ForeignRtError, Result};
 use crate::metering::{ForeignGasReport, GasOracle, StandardGasOracle};
-use crate::pool::ObjectPool;
-use crate::script_task::{ForeignRuntime, LogEntry, LogLevel, ScriptArtifact, ScriptResult, ScriptTask};
+use crate::script_task::{ForeignRuntime, LogEntry, LogLevel, ScriptResult, ScriptTask};
 
 /// WASM runtime engine wrapper
 pub struct WasmRuntimeEngine {

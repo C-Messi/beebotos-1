@@ -8,9 +8,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use wasmtime::{Engine, Linker, Module, Store};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::p2::WasiCtxBuilder;
@@ -378,28 +378,86 @@ async fn call_custom_entrypoint(
 }
 
 /// Parse JSON output from stdout
+///
+/// Attempts to find and parse a JSON object or array from the output,
+/// handling cases where the output contains trailing/leading text.
+/// Uses proper brace counting that respects string literals.
 fn parse_json_output(stdout: &str) -> Result<serde_json::Value> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
         return Ok(serde_json::Value::Null);
     }
 
-    // Try to find JSON object/array in the output by matching braces
-    let json_start = trimmed.find(|c| c == '{' || c == '[');
-    let json_end = trimmed.rfind(|c| c == '}' || c == ']');
-
-    if let (Some(start), Some(end)) = (json_start, json_end) {
-        if start <= end {
-            let json_part = &trimmed[start..=end];
-            match serde_json::from_str(json_part) {
-                Ok(val) => return Ok(val),
-                Err(_) => {}
+    // Try to find JSON object/array using proper brace matching
+    let bytes = trimmed.as_bytes();
+    for i in 0..bytes.len() {
+        let c = bytes[i] as char;
+        if c == '{' || c == '[' {
+            if let Some(end) = find_json_end(trimmed, i) {
+                let json_part = &trimmed[i..=end];
+                if let Ok(val) = serde_json::from_str(json_part) {
+                    return Ok(val);
+                }
             }
         }
     }
 
     // Fallback: return as string
     Ok(serde_json::Value::String(trimmed.to_string()))
+}
+
+/// Find the end position of a JSON object/array starting at `start`
+/// using brace counting that respects string literals.
+fn find_json_end(s: &str, start: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if start >= bytes.len() {
+        return None;
+    }
+
+    let open = bytes[start] as char;
+    let close = match open {
+        '{' => '}',
+        '[' => ']',
+        _ => return None,
+    };
+
+    let mut depth = 1;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for i in (start + 1)..bytes.len() {
+        let c = bytes[i] as char;
+
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        if c == '\\' && in_string {
+            escape_next = true;
+            continue;
+        }
+
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+
+        if in_string {
+            continue;
+        }
+
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+    }
+
+    None
 }
 
 /// Parse stderr into log entries
@@ -439,6 +497,35 @@ mod tests {
         let out2 = "plain text";
         let val2 = parse_json_output(out2).unwrap();
         assert_eq!(val2, serde_json::Value::String("plain text".to_string()));
+    }
+
+    #[test]
+    fn test_parse_json_with_braces_in_string() {
+        let out = r#"{"key": "}", "nested": {"a": 1}}"#;
+        let val = parse_json_output(out).unwrap();
+        assert_eq!(val["key"], "}");
+        assert_eq!(val["nested"]["a"], 1);
+    }
+
+    #[test]
+    fn test_parse_json_array() {
+        let out = "prefix [1, 2, 3] suffix";
+        let val = parse_json_output(out).unwrap();
+        assert_eq!(val, serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn test_parse_json_nested() {
+        let out = r#"{"outer": {"inner": [1, 2, 3]}}"#;
+        let val = parse_json_output(out).unwrap();
+        assert_eq!(val["outer"]["inner"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn test_parse_json_empty() {
+        let out = "";
+        let val = parse_json_output(out).unwrap();
+        assert_eq!(val, serde_json::Value::Null);
     }
 
     #[test]

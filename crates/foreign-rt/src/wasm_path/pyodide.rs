@@ -4,7 +4,7 @@
 //! running inside wasmtime with full WASI support.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tracing::{debug, info, warn};
 
@@ -12,7 +12,7 @@ use crate::config::WasmPathConfig;
 use crate::error::{ForeignRtError, Result};
 use crate::script_task::{ForeignRuntime, ScriptResult, ScriptTask};
 use crate::wasm_path::executor::WasmScriptExecutor;
-use crate::wasm_path::{WasmExecutorUtils, WasmRuntimeEngine, WasmRuntimeExecutor};
+use crate::wasm_path::{WasmRuntimeEngine, WasmRuntimeExecutor};
 
 /// Pyodide WASM executor
 pub struct PyodideExecutor {
@@ -146,7 +146,7 @@ else:
 #[async_trait::async_trait]
 impl WasmRuntimeExecutor for PyodideExecutor {
     async fn execute(&self, task: &ScriptTask) -> Result<ScriptResult> {
-        let start = Instant::now();
+        let _start = Instant::now();
 
         if !self.is_available() {
             return Err(ForeignRtError::RuntimeNotAvailable(
@@ -204,6 +204,7 @@ impl WasmRuntimeExecutor for PyodideExecutor {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
     use super::*;
     use crate::script_task::ScriptSource;
 

@@ -1,7 +1,5 @@
 //! Error types for foreign runtime execution
 
-use std::path::PathBuf;
-
 use thiserror::Error;
 
 /// Foreign runtime error type

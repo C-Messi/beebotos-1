@@ -529,9 +529,8 @@ impl HostFunctionDispatcher {
 }
 
 /// Register host functions with a wasmtime linker
-#[cfg(feature = "wasmtime")]
 pub fn register_host_functions<T>(
-    linker: &mut wasmtime::Linker<T>,
+    _linker: &mut wasmtime::Linker<T>,
     _ctx: HostContext,
 ) -> crate::error::Result<()>
 where

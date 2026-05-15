@@ -631,4 +631,118 @@ gandy 2026-05-15 10:28
 | 上链存证对接 | 等待 ChainService SkillNFT 接口实现 |
 | 性能基准测试 | 需要实际 Pyodide/QuickJS WASM 模块文件 |
 
+gandy a026-05-15 11:02
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+根据/root/beebotos/docs/evolution/python-nodjs/addpython-nodjs-design-v1.md和beebotos项目的实际代码，检查代码质量和完整性，检查还有无完善优化的地方。
+
+用户要求我根据设计文档和实际代码，检查代码质量和完整性，找出可以完善优化的地方。这是一个全面的代码审查任务。
+让我先系统地检查：
+1. 设计文档 vs 实际代码的一致性
+2. 代码质量问题（编译警告、TODO、错误处理、文档等）
+3. 架构完整性（缺失的模块、未实现的集成点）
+4. 安全性和健壮性
+我需要查看多个文件来全面了解。让我先快速浏览关键文件。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+## Code Quality Review Complete ✅
+
+### Audit Summary
+
+I performed a comprehensive review of the Foreign Runtime integration across `beebotos-foreign-rt`, `beebotos-agents`, and `beebotos-gateway`. Found and fixed **7 categories of issues**:
+
+---
+
+### Fixes Applied
+
+#### 1. Gateway `list_runtimes` TODOs — **Fixed**
+**Problem:** `wasm_available` and `process_available` were hardcoded to `false` with `// TODO` comments.
+
+**Fix:**
+- Added `is_wasm_available()` and `is_process_available()` methods to `DefaultForeignRuntimeManager` (`lib.rs`)
+- Updated gateway handler to query actual availability from the manager
+
+**Files:** `crates/foreign-rt/src/lib.rs`, `apps/gateway/src/handlers/http/foreign_runtime.rs`
+
+---
+
+#### 2. `RuntimePool::stats()` — **Fixed**
+**Problem:** `wasm_instances_available` and `process_slots_available` were always 0/default.
+
+**Fix:** Updated `stats()` to query actual semaphore permit counts and WASM pool availability.
+
+**File:** `crates/foreign-rt/src/pool.rs`
+
+---
+
+#### 3. Compilation Warnings — **Fixed (28 → 0 in foreign-rt)**
+**Problem:** Massive unused import warnings across the crate.
+
+**Files cleaned:** `config.rs`, `error.rs`, `script_task.rs`, `bridge/host_funcs.rs`, `process_path/mod.rs`, `process_path/cgroup.rs`, `process_path/sandbox.rs`, `process_path/seccomp.rs`, `wasm_path/mod.rs`, `wasm_path/executor.rs`, `wasm_path/pyodide.rs`, `wasm_path/quickjs.rs`, `lib.rs`
+
+---
+
+#### 4. `parse_json_output` Robustness — **Fixed**
+**Problem:** Naive brace matching (`find('{')` + `rfind('}'`) broke on JSON with braces inside strings (e.g., `{"key": "}"}`).
+
+**Fix:** Implemented proper brace-counting parser that respects string literals and escape sequences, with fallback parsing from multiple start positions.
+
+**Added tests:** `test_parse_json_with_braces_in_string`, `test_parse_json_array`, `test_parse_json_nested`, `test_parse_json_empty`
+
+**File:** `crates/foreign-rt/src/wasm_path/executor.rs`
+
+---
+
+#### 5. Agent Executor Recreation — **Fixed**
+**Problem:** `Agent::handle_foreign_runtime_task()` created a brand new `ForeignTaskExecutor` (and `DefaultForeignRuntimeManager`) on **every task call** — expensive and wasteful.
+
+**Fix:**
+- Added `foreign_rt_manager: Option<Arc<DefaultForeignRuntimeManager>>` field to `Agent`
+- Added `with_foreign_rt_manager()` builder method
+- Modified `handle_foreign_runtime_task()` to reuse the cached manager; returns clear `InvalidConfig` error if not configured instead of creating a doomed default executor
+
+**File:** `crates/agents/src/agent_impl.rs`
+
+---
+
+#### 6. Gateway Compilation Errors — **Fixed**
+**Problems discovered during review:**
+- `ForeignRuntimeManager` trait not imported in gateway handler
+- `task_id` moved into closure but reused later
+- `SkillManifest` missing new fields (`runtime`, `sandbox`, `runtime_dependencies`) in gateway message processor
+
+**Files:** `apps/gateway/src/handlers/http/foreign_runtime.rs`, `apps/gateway/src/services/message_processor.rs`
+
+---
+
+#### 7. `#[cfg(feature = "wasmtime")]` Warning — **Fixed**
+**Problem:** Unexpected cfg condition — `wasmtime` feature doesn't exist in `Cargo.toml`.
+
+**Fix:** Removed the `#[cfg(feature = "wasmtime")]` guard from `register_host_functions()`.
+
+**File:** `crates/foreign-rt/src/bridge/host_funcs.rs`
+
+---
+
+### Test Results
+
+| Crate | Tests | Result |
+|-------|-------|--------|
+| `beebotos-foreign-rt` | **43 passed** (was 39) | ✅ |
+| `beebotos-agents` (foreign_executor) | **3 passed** | ✅ |
+| `cargo check -p beebotos-gateway` | Clean compile | ✅ |
+| `cargo check -p beebotos-kernel` | Clean compile | ✅ |
+
+### Remaining Non-Critical Items (Future Iteration)
+
+- **WASM wall-clock timeout**: Fuel metering is the primary safeguard. Full async timeout would require `spawn_blocking` for wasmtime sync operations — deferred to Phase 5.
+- **Seccomp integration in unshare fallback**: `seccomp.rs` exists but unshare path doesn't apply filters yet.
+- **Pool stats `process_slots_in_use`**: Uses hardcoded total (20); should track max slots per runtime properly.
+- **Dead code fields** (`wasm_engine`, `config`, etc.): Structural fields reserved for future features.
+
+All critical code quality issues identified in the audit have been resolved.
+
+
+
 

@@ -1,6 +1,5 @@
 //! Unified script execution request and result types
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 

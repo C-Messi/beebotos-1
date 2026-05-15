@@ -10,20 +10,20 @@ pub mod seccomp;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::{ProcessPathConfig, SecurityConfig};
 use crate::error::{ForeignRtError, Result};
 use crate::metering::{ForeignGasReport, GasOracle, StandardGasOracle};
-use crate::script_task::{ForeignRuntime, LogEntry, LogLevel, ScriptResult, ScriptTask};
+use crate::script_task::{ForeignRuntime, ScriptResult, ScriptTask};
 use crate::wasm_path::WasmExecutorUtils;
 
 use crate::process_path::cgroup::{CgroupController, CgroupHandle};
-use crate::process_path::sandbox::{ProcessSandboxConfig, SeccompProfile};
+use crate::process_path::sandbox::ProcessSandboxConfig;
 
 /// Check if nsjail binary is available
 fn nsjail_available() -> bool {
@@ -252,7 +252,7 @@ impl ProcessSandboxExecutor {
         let mut cgroup_handle: Option<CgroupHandle> = None;
         if let Some(ref controller) = self.cgroup {
             match controller.create_cgroup(&task.task_id).await {
-                Ok(mut handle) => {
+                Ok(handle) => {
                     let mem_bytes = task.sandbox.max_memory_mb as u64 * 1024 * 1024;
                     let _ = handle.set_memory_limit(mem_bytes).await;
                     let _ = handle.set_memory_high(mem_bytes * 9 / 10).await;
@@ -393,6 +393,7 @@ impl ProcessSandboxExecutor {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
     use super::*;
     use crate::script_task::{ScriptSource, SandboxRequirements};
 

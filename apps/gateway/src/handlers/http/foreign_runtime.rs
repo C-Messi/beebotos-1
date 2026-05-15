@@ -10,6 +10,8 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use beebotos_foreign_rt::ForeignRuntimeManager;
+
 use crate::error::GatewayError;
 use crate::AppState;
 
@@ -251,7 +253,7 @@ pub async fn execute_script(
     let result = manager.execute(task).await.map_err(|e| {
         GatewayError::Internal {
             message: format!("Foreign runtime execution failed: {}", e),
-            correlation_id: task_id,
+            correlation_id: task_id.clone(),
         }
     })?;
 
@@ -323,16 +325,16 @@ pub async fn list_runtimes(
         RuntimeInfoResponse {
             name: "python".to_string(),
             available: manager.is_available(beebotos_foreign_rt::ForeignRuntime::Python),
-            wasm_available: false, // TODO: query from manager
-            process_available: false, // TODO: query from manager
+            wasm_available: manager.is_wasm_available(beebotos_foreign_rt::ForeignRuntime::Python),
+            process_available: manager.is_process_available(beebotos_foreign_rt::ForeignRuntime::Python),
             default_max_memory_mb: 256,
             default_timeout_secs: 30,
         },
         RuntimeInfoResponse {
             name: "nodejs".to_string(),
             available: manager.is_available(beebotos_foreign_rt::ForeignRuntime::NodeJs),
-            wasm_available: false,
-            process_available: false,
+            wasm_available: manager.is_wasm_available(beebotos_foreign_rt::ForeignRuntime::NodeJs),
+            process_available: manager.is_process_available(beebotos_foreign_rt::ForeignRuntime::NodeJs),
             default_max_memory_mb: 256,
             default_timeout_secs: 30,
         },

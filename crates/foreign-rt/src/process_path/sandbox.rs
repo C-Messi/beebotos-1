@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+
 use crate::script_task::SandboxRequirements;
 
 /// Sandbox configuration for process execution
