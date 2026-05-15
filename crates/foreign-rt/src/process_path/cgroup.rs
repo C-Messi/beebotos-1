@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::{ForeignRtError, Result};
 

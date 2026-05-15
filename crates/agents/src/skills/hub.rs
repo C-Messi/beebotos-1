@@ -108,6 +108,7 @@ mod tests {
                 activation_examples: vec![],
                 activation_negative_examples: vec![],
                 dependencies: vec![],
+                ..Default::default()
             },
         }
     }

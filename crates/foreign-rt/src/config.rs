@@ -1,12 +1,8 @@
 //! Configuration for foreign runtime manager
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-
-use crate::script_task::ForeignRuntime;
 
 /// Foreign runtime manager configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

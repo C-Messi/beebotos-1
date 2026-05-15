@@ -270,7 +270,13 @@ impl RuntimePool {
 
     /// Get pool statistics
     pub fn stats(&self) -> RuntimePoolStats {
-        self.stats.lock().clone()
+        let mut stats = self.stats.lock().clone();
+        stats.wasm_instances_available = self.wasm_available(ForeignRuntime::Python)
+            + self.wasm_available(ForeignRuntime::NodeJs);
+        stats.process_slots_available = self.process_available(ForeignRuntime::Python)
+            + self.process_available(ForeignRuntime::NodeJs);
+        stats.process_slots_in_use = 20 - stats.process_slots_available; // 10 each for Python/NodeJs
+        stats
     }
 
     /// Record execution success

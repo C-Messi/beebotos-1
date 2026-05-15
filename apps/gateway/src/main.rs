@@ -223,6 +223,8 @@ pub struct AppState {
     pub mcp_manager: Option<Arc<beebotos_agents::mcp::MCPManager>>,
     /// Cron job service for scheduled task management
     pub cron_job_service: Option<Arc<crate::services::CronJobService>>,
+    /// Foreign runtime manager for Python/Node.js script execution
+    pub foreign_rt_manager: Option<Arc<beebotos_foreign_rt::DefaultForeignRuntimeManager>>,
 }
 
 impl AppState {
@@ -388,6 +390,21 @@ impl AppState {
             let svc = crate::services::webchat_service::WebchatService::new(db.clone());
             info!("✅ WebchatService initialized");
             Some(Arc::new(svc))
+        };
+
+        // Initialize Foreign Runtime Manager
+        let foreign_rt_manager = {
+            let config = beebotos_foreign_rt::ForeignRuntimeConfig::default();
+            match beebotos_foreign_rt::DefaultForeignRuntimeManager::new(config) {
+                Ok(manager) => {
+                    info!("✅ ForeignRuntimeManager initialized");
+                    Some(Arc::new(manager))
+                }
+                Err(e) => {
+                    warn!("⚠️ Failed to initialize ForeignRuntimeManager: {}", e);
+                    None
+                }
+            }
         };
 
         // Initialize CronJobService
@@ -952,6 +969,7 @@ impl AppState {
             agent_event_bus: Some(beebotos_agents::events::AgentEventBus::new()),
             mcp_manager,
             cron_job_service,
+            foreign_rt_manager,
         })
     }
 }
@@ -2421,6 +2439,19 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         .route(
             "/api/v1/skills/hub/health",
             get(handlers::http::skills::hub_health),
+        )
+        // Foreign Runtime API
+        .route(
+            "/api/v1/tasks/execute-script",
+            post(handlers::http::foreign_runtime::execute_script),
+        )
+        .route(
+            "/api/v1/runtimes",
+            get(handlers::http::foreign_runtime::list_runtimes),
+        )
+        .route(
+            "/api/v1/runtimes/health",
+            get(handlers::http::foreign_runtime::health_check),
         )
         // Workflow orchestration API
         .route(

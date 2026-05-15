@@ -13,6 +13,7 @@ pub mod chain_v2;
 pub mod channels;
 pub mod compositions;
 pub mod cron_jobs;
+pub mod foreign_runtime;
 pub mod llm_config;
 pub mod llm_metrics;
 pub mod mcp;

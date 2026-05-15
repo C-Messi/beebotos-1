@@ -39,7 +39,6 @@ pub mod script_task;
 pub mod wasm_path;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use tracing::{error, info, instrument, warn};
@@ -230,6 +229,19 @@ impl ForeignRuntimeManager for DefaultForeignRuntimeManager {
 
         info!(route = route.name(), "Selected execution route");
 
+        // Record execution start metric
+        let runtime_label = task.runtime.name();
+        let route_label = route.name();
+        metrics::counter!(
+            "beebotos_foreign_rt_executions_total",
+            "runtime" => runtime_label,
+            "path" => route_label,
+            "status" => "started"
+        )
+        .increment(1);
+
+        let exec_start = std::time::Instant::now();
+
         // Execute based on route
         let result = match route {
             ExecutionRoute::WasmPyodide => {
@@ -270,6 +282,45 @@ impl ForeignRuntimeManager for DefaultForeignRuntimeManager {
                 }
             }
         };
+
+        let exec_duration = exec_start.elapsed().as_secs_f64();
+        let status_label = match &result {
+            Ok(ref r) if r.success => "success",
+            Ok(_) => "failure",
+            Err(_) => "error",
+        };
+
+        // Record execution completion metrics
+        metrics::counter!(
+            "beebotos_foreign_rt_executions_total",
+            "runtime" => runtime_label,
+            "path" => route_label,
+            "status" => status_label
+        )
+        .increment(1);
+        metrics::histogram!(
+            "beebotos_foreign_rt_execution_duration_seconds",
+            "runtime" => runtime_label,
+            "path" => route_label
+        )
+        .record(exec_duration);
+
+        if let Ok(ref r) = result {
+            metrics::counter!(
+                "beebotos_foreign_rt_gas_used_total",
+                "runtime" => runtime_label,
+                "path" => route_label,
+                "resource" => "compute"
+            )
+            .increment(r.gas_report.compute_gas);
+            metrics::counter!(
+                "beebotos_foreign_rt_gas_used_total",
+                "runtime" => runtime_label,
+                "path" => route_label,
+                "resource" => "memory"
+            )
+            .increment(r.gas_report.memory_gas);
+        }
 
         // Update stats
         match &result {
@@ -312,14 +363,24 @@ impl ForeignRuntimeManager for DefaultForeignRuntimeManager {
     }
 
     fn is_available(&self, runtime: ForeignRuntime) -> bool {
+        self.is_wasm_available(runtime) || self.is_process_available(runtime)
+    }
+}
+
+impl DefaultForeignRuntimeManager {
+    /// Check if WASM path is available for a runtime
+    pub fn is_wasm_available(&self, runtime: ForeignRuntime) -> bool {
         match runtime {
-            ForeignRuntime::Python => {
-                self.pyodide.is_some() || self.process_executor.as_ref().map_or(false, |e| e.is_available(ForeignRuntime::Python))
-            }
-            ForeignRuntime::NodeJs => {
-                self.quickjs.is_some() || self.process_executor.as_ref().map_or(false, |e| e.is_available(ForeignRuntime::NodeJs))
-            }
+            ForeignRuntime::Python => self.pyodide.is_some(),
+            ForeignRuntime::NodeJs => self.quickjs.is_some(),
         }
+    }
+
+    /// Check if process path is available for a runtime
+    pub fn is_process_available(&self, runtime: ForeignRuntime) -> bool {
+        self.process_executor
+            .as_ref()
+            .map_or(false, |e| e.is_available(runtime))
     }
 }
 
@@ -388,6 +449,7 @@ impl Default for ForeignRuntimeManagerBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
     use super::*;
 
     #[test]

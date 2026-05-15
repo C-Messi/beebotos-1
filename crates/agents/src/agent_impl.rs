@@ -100,6 +100,8 @@ pub struct Agent {
     pub(crate) react_trace_sink: Option<Arc<dyn crate::react_trace::ReActTraceSink>>,
     // OpenClaw-style ReAct: session-scoped skill context activated by the LLM.
     pub(crate) active_skill_contexts: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    // 🆕 Foreign runtime manager for Python/Node.js execution
+    pub(crate) foreign_rt_manager: Option<Arc<beebotos_foreign_rt::DefaultForeignRuntimeManager>>,
 }
 
 struct TextSkillObservation {
@@ -1698,6 +1700,7 @@ impl Agent {
             llm_client: None,
             react_trace_sink: None,
             active_skill_contexts: Arc::new(RwLock::new(HashMap::new())),
+            foreign_rt_manager: None,
         }
     }
 
@@ -2252,6 +2255,15 @@ impl Agent {
         sink: Arc<dyn crate::react_trace::ReActTraceSink>,
     ) -> Self {
         self.react_trace_sink = Some(sink);
+        self
+    }
+
+    /// Set foreign runtime manager for Python/Node.js script execution
+    pub fn with_foreign_rt_manager(
+        mut self,
+        manager: Arc<beebotos_foreign_rt::DefaultForeignRuntimeManager>,
+    ) -> Self {
+        self.foreign_rt_manager = Some(manager);
         self
     }
 
@@ -7891,6 +7903,7 @@ impl Agent {
                             activation_examples: vec![],
                             activation_negative_examples: vec![],
                             dependencies: vec![],
+                            ..Default::default()
                         },
                     };
 
@@ -9279,11 +9292,15 @@ impl Agent {
         task: &crate::Task,
     ) -> crate::error::Result<(String, Vec<crate::Artifact>)> {
         use crate::runtime::executor::TaskExecutor;
-        use crate::runtime::foreign_executor::ForeignTaskExecutorBuilder;
+        use crate::runtime::foreign_executor::ForeignTaskExecutor;
 
-        let executor = ForeignTaskExecutorBuilder::new().build().map_err(|e| {
-            crate::error::AgentError::Execution(format!("Failed to build foreign executor: {}", e))
+        let manager = self.foreign_rt_manager.as_ref().ok_or_else(|| {
+            crate::error::AgentError::InvalidConfig(
+                "Foreign runtime manager not configured for this agent".to_string(),
+            )
         })?;
+
+        let executor = ForeignTaskExecutor::with_manager(manager.clone());
 
         let result = executor.execute(task.clone()).await.map_err(|e| {
             crate::error::AgentError::Execution(format!("Foreign runtime execution failed: {}", e))
@@ -9846,6 +9863,7 @@ mod planning_integration_tests {
                 activation_examples: vec![],
                 activation_negative_examples: vec![],
                 dependencies: vec![],
+                ..Default::default()
             },
         }
     }
