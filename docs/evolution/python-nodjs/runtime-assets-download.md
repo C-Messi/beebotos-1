@@ -538,3 +538,61 @@ wasmtime --dir /tmp::/tmp \
 依据：QuickJS-NG 文档说 GitHub release 提供预构建二进制；其 WASI command 模式产物是 `qjs-wasi.wasm`，用于标准 `main/_start` 执行；`paralin/go-quickjs-wasi` 也明确说明 command model wasm 会在 `_start()` 里跑完。来源：QuickJS-NG installation/release docs、QuickJS-NG WASI docs、paralin/go-quickjs-wasi README。
 
 
+&&&&&&&&&&&&&&&&&&&&&&&
+
+可以，但要分清楚两种“调用”。
+
+**1. tool 里的 `process_exec` / `bash_shell` 可以直接调用 `python3` 或 `node`**
+
+代码里 `ProcessExecTool` 的描述就是：
+
+```text
+Execute an external command ... e.g. python3 script.py, node script.js
+```
+
+它实际执行的是：
+
+```rust
+sh -c "<command>"
+```
+
+所以如果宿主环境的 `PATH` 里有 `python3` 或 `node`，tool 可以这样跑：
+
+```bash
+python3 script.py
+node script.js
+```
+
+但这走的是 **宿主机命令环境**，不是你新增的 foreign runtime rootfs / WASM 环境。
+
+**2. 新增的 Python/Node.js foreign runtime 不是自动接入 tool CLI 的**
+
+新增运行时现在主要通过这些入口使用：
+
+- Gateway API：`POST /api/v1/tasks/execute-script`
+- Agent TaskType：`ForeignPythonWasm`、`ForeignPythonProcess`、`ForeignNodeJsWasm`、`ForeignNodeJsProcess`
+
+也就是说，tool 的普通 CLI 命令不会自动改成走：
+
+```text
+/var/lib/beebotos/rootfs/python
+/var/lib/beebotos/rootfs/nodejs
+/opt/beebotos/wasm-modules/qjs.wasm
+/opt/beebotos/wasm-modules/pyodide.asm.wasm
+```
+
+除非你专门加一个新的 tool，比如 `foreign_runtime_exec`，让它调用 `DefaultForeignRuntimeManager` 或 Gateway 的 `/api/v1/tasks/execute-script`。
+
+还有一个当前代码层面的坑：Gateway 里现在初始化的是：
+
+```rust
+ForeignRuntimeConfig::default()
+```
+
+默认配置里 `pyodide_module_path`、`quickjs_module_path`、`python_rootfs`、`nodejs_rootfs` 都是 `None`。所以 foreign runtime manager 虽然初始化了，但 Python/Node.js runtime 默认不可用，必须把这些路径真正写进配置或 main 初始化逻辑里。
+
+简短结论：**tool CLI 可以跑宿主 `python3/node`；但不能自动使用新增的隔离 Python/Node.js 环境。要走新增环境，需要通过 foreign runtime API/Task，或新增一个专门的 tool 封装。**
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+
