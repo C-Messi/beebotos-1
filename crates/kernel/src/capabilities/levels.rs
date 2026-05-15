@@ -34,6 +34,16 @@ pub enum CapabilityLevel {
     L9ChainWriteHigh = 9,
     /// L10: System administration
     L10SystemAdmin = 10,
+    /// L11: Foreign Runtime Basic (WASM path execution)
+    L11ForeignRuntimeBasic = 11,
+    /// L12: Foreign Runtime Process (process sandbox execution)
+    L12ForeignRuntimeProcess = 12,
+    /// L13: Foreign Runtime Network (script network access)
+    L13ForeignRuntimeNetwork = 13,
+    /// L14: Foreign Runtime GPU (GPU access for scripts)
+    L14ForeignRuntimeGPU = 14,
+    /// L15: Foreign Runtime Privileged (elevated script privileges)
+    L15ForeignRuntimePrivileged = 15,
 }
 
 impl CapabilityLevel {
@@ -56,6 +66,11 @@ impl CapabilityLevel {
             8 => Some(Self::L8ChainWriteLow),
             9 => Some(Self::L9ChainWriteHigh),
             10 => Some(Self::L10SystemAdmin),
+            11 => Some(Self::L11ForeignRuntimeBasic),
+            12 => Some(Self::L12ForeignRuntimeProcess),
+            13 => Some(Self::L13ForeignRuntimeNetwork),
+            14 => Some(Self::L14ForeignRuntimeGPU),
+            15 => Some(Self::L15ForeignRuntimePrivileged),
             _ => None,
         }
     }
@@ -74,6 +89,11 @@ impl CapabilityLevel {
             Self::L8ChainWriteLow => "Chain Write Low",
             Self::L9ChainWriteHigh => "Chain Write High",
             Self::L10SystemAdmin => "System Admin",
+            Self::L11ForeignRuntimeBasic => "Foreign Runtime Basic",
+            Self::L12ForeignRuntimeProcess => "Foreign Runtime Process",
+            Self::L13ForeignRuntimeNetwork => "Foreign Runtime Network",
+            Self::L14ForeignRuntimeGPU => "Foreign Runtime GPU",
+            Self::L15ForeignRuntimePrivileged => "Foreign Runtime Privileged",
         }
     }
 
@@ -91,12 +111,17 @@ impl CapabilityLevel {
             Self::L8ChainWriteLow => "Execute low-value transactions (< 1 ETH)",
             Self::L9ChainWriteHigh => "Execute high-value transactions",
             Self::L10SystemAdmin => "Full system control",
+            Self::L11ForeignRuntimeBasic => "Execute scripts in WASM sandbox (Pyodide/QuickJS)",
+            Self::L12ForeignRuntimeProcess => "Execute scripts in process sandbox",
+            Self::L13ForeignRuntimeNetwork => "Allow scripts network access",
+            Self::L14ForeignRuntimeGPU => "Allow scripts GPU access",
+            Self::L15ForeignRuntimePrivileged => "Allow elevated script privileges",
         }
     }
 
     /// Check if level requires TEE
     pub fn requires_tee(&self) -> bool {
-        matches!(self, Self::L9ChainWriteHigh | Self::L10SystemAdmin)
+        matches!(self, Self::L9ChainWriteHigh | Self::L10SystemAdmin | Self::L15ForeignRuntimePrivileged)
     }
 
     /// Check if level requires multi-sig
@@ -118,6 +143,11 @@ impl CapabilityLevel {
             Self::L8ChainWriteLow => std::time::Duration::from_secs(180),
             Self::L9ChainWriteHigh => std::time::Duration::from_secs(300),
             Self::L10SystemAdmin => std::time::Duration::from_secs(600),
+            Self::L11ForeignRuntimeBasic => std::time::Duration::from_secs(120),
+            Self::L12ForeignRuntimeProcess => std::time::Duration::from_secs(300),
+            Self::L13ForeignRuntimeNetwork => std::time::Duration::from_secs(300),
+            Self::L14ForeignRuntimeGPU => std::time::Duration::from_secs(600),
+            Self::L15ForeignRuntimePrivileged => std::time::Duration::from_secs(600),
         }
     }
 
@@ -135,6 +165,11 @@ impl CapabilityLevel {
             Self::L8ChainWriteLow => 1_000_000_000_000_000_000, // 1 ETH
             Self::L9ChainWriteHigh => u64::MAX,
             Self::L10SystemAdmin => u64::MAX,
+            Self::L11ForeignRuntimeBasic => 0,
+            Self::L12ForeignRuntimeProcess => 0,
+            Self::L13ForeignRuntimeNetwork => 0,
+            Self::L14ForeignRuntimeGPU => 0,
+            Self::L15ForeignRuntimePrivileged => u64::MAX,
         }
     }
 
@@ -160,6 +195,26 @@ impl CapabilityLevel {
             Self::L10SystemAdmin => &[
                 0, 1, 2, 3, 10, 11, 12, 13, 14, 20, 21, 22, 23, 30, 31, 40, 41, 42, 43, 44, 45, 50,
                 51, 52,
+            ],
+            Self::L11ForeignRuntimeBasic => &[
+                0, 1, 2, 3, 10, 11, 12, 13, 14, 20, 21, 22, 23, 30, 31, 40, 41, 42, 43, 44, 45, 50,
+                51, 52, 60, 61, 62,
+            ],
+            Self::L12ForeignRuntimeProcess => &[
+                0, 1, 2, 3, 10, 11, 12, 13, 14, 20, 21, 22, 23, 30, 31, 40, 41, 42, 43, 44, 45, 50,
+                51, 52, 56, 57, 58, 59, 60, 61, 62,
+            ],
+            Self::L13ForeignRuntimeNetwork => &[
+                0, 1, 2, 3, 10, 11, 12, 13, 14, 20, 21, 22, 23, 30, 31, 40, 41, 42, 43, 44, 45, 50,
+                51, 52, 56, 57, 58, 59, 60, 61, 62,
+            ],
+            Self::L14ForeignRuntimeGPU => &[
+                0, 1, 2, 3, 10, 11, 12, 13, 14, 20, 21, 22, 23, 30, 31, 40, 41, 42, 43, 44, 45, 50,
+                51, 52, 56, 57, 58, 59, 60, 61, 62,
+            ],
+            Self::L15ForeignRuntimePrivileged => &[
+                0, 1, 2, 3, 10, 11, 12, 13, 14, 20, 21, 22, 23, 30, 31, 40, 41, 42, 43, 44, 45, 50,
+                51, 52, 56, 57, 58, 59, 60, 61, 62, 80, 81, 82, 83,
             ],
         }
     }

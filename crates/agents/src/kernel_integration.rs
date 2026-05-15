@@ -84,6 +84,11 @@ impl TaskCapabilityRequirements {
             TaskType::AppLifecycle => CapabilityLevel::L2FileWrite,
             // 🟢 P1 FIX: Workflow execution tasks
             TaskType::WorkflowExecution => CapabilityLevel::L2FileWrite,
+            // 🆕 Foreign runtime tasks
+            TaskType::ForeignPythonWasm => CapabilityLevel::L11ForeignRuntimeBasic,
+            TaskType::ForeignPythonProcess => CapabilityLevel::L12ForeignRuntimeProcess,
+            TaskType::ForeignNodeJsWasm => CapabilityLevel::L11ForeignRuntimeBasic,
+            TaskType::ForeignNodeJsProcess => CapabilityLevel::L12ForeignRuntimeProcess,
             TaskType::Custom(_) => CapabilityLevel::L3NetworkOut,
         }
     }
@@ -106,6 +111,11 @@ impl TaskCapabilityRequirements {
             TaskType::AppLifecycle => vec!["app:manage", "device:control"],
             // 🟢 P1 FIX: Workflow execution tasks
             TaskType::WorkflowExecution => vec!["workflow:execute", "skill:call"],
+            // 🆕 Foreign runtime tasks
+            TaskType::ForeignPythonWasm => vec!["foreign_rt:execute", "foreign_rt:wasm"],
+            TaskType::ForeignPythonProcess => vec!["foreign_rt:execute", "foreign_rt:process"],
+            TaskType::ForeignNodeJsWasm => vec!["foreign_rt:execute", "foreign_rt:wasm"],
+            TaskType::ForeignNodeJsProcess => vec!["foreign_rt:execute", "foreign_rt:process"],
             TaskType::Custom(_) => vec!["custom:execute"],
         }
     }

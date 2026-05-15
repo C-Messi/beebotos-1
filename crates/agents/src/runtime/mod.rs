@@ -25,6 +25,7 @@ pub mod agent;
 pub mod agent_runtime_impl;
 pub mod context;
 pub mod executor;
+pub mod foreign_executor;
 pub mod lifecycle;
 pub mod react_framework;
 pub mod scheduler;

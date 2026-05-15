@@ -1636,6 +1636,18 @@ impl Agent {
             .map_err(|e| AgentError::Execution(format!("Forced final answer failed: {}", e)))
     }
 
+    /// Extract user input text from a task.
+    /// If input is JSON with a "message" field, extracts the message.
+    /// Otherwise returns the raw input.
+    pub fn extract_user_input(task: &crate::Task) -> String {
+        match serde_json::from_str::<serde_json::Value>(&task.input) {
+            Ok(val) if val.get("message").is_some() => {
+                val["message"].as_str().unwrap_or(&task.input).to_string()
+            }
+            _ => task.input.clone(),
+        }
+    }
+
     pub fn new(config: AgentConfig) -> Self {
         Self {
             config,
@@ -4403,6 +4415,12 @@ impl Agent {
             TaskType::DeviceAutomation => self.handle_device_automation_task(&task).await,
             TaskType::AppLifecycle => self.handle_app_lifecycle_task(&task).await,
             TaskType::WorkflowExecution => self.handle_workflow_task(&task).await,
+            TaskType::ForeignPythonWasm |
+            TaskType::ForeignPythonProcess |
+            TaskType::ForeignNodeJsWasm |
+            TaskType::ForeignNodeJsProcess => {
+                self.handle_foreign_runtime_task(&task).await
+            }
             TaskType::Custom(type_name) => {
                 // 🆕 FIX: All custom planning tasks route through Unified ReAct.
                 if self.should_use_planning(&task).await {
@@ -9254,6 +9272,42 @@ impl Agent {
 
         Ok((result, artifacts))
     }
+
+    /// Handle foreign runtime tasks (Python/Node.js)
+    pub async fn handle_foreign_runtime_task(
+        &self,
+        task: &crate::Task,
+    ) -> crate::error::Result<(String, Vec<crate::Artifact>)> {
+        use crate::runtime::executor::TaskExecutor;
+        use crate::runtime::foreign_executor::ForeignTaskExecutorBuilder;
+
+        let executor = ForeignTaskExecutorBuilder::new().build().map_err(|e| {
+            crate::error::AgentError::Execution(format!("Failed to build foreign executor: {}", e))
+        })?;
+
+        let result = executor.execute(task.clone()).await.map_err(|e| {
+            crate::error::AgentError::Execution(format!("Foreign runtime execution failed: {}", e))
+        })?;
+
+        let output = if result.success {
+            result.output
+        } else {
+            format!("Error: {}", result.output)
+        };
+
+        let artifacts = result
+            .artifacts
+            .into_iter()
+            .map(|a| crate::Artifact {
+                id: a.id,
+                artifact_type: a.artifact_type,
+                content: a.content,
+                mime_type: a.mime_type,
+            })
+            .collect();
+
+        Ok((output, artifacts))
+    }
 }
 
 /// Task complexity level for determining execution strategy
@@ -9929,6 +9983,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Hello".to_string(),
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -9945,6 +10000,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "x".repeat(201), // > 200 chars
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -9964,6 +10020,7 @@ mod planning_integration_tests {
             task_type: TaskType::SkillExecution,
             input: "Short".to_string(),
             parameters: params,
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -9982,6 +10039,7 @@ mod planning_integration_tests {
             task_type: TaskType::PlanCreation,
             input: "Short".to_string(),
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -9995,6 +10053,7 @@ mod planning_integration_tests {
             task_type: TaskType::PlanExecution,
             input: "".to_string(),
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -10008,6 +10067,7 @@ mod planning_integration_tests {
             task_type: TaskType::PlanAdaptation,
             input: "Adapt".to_string(),
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -10028,6 +10088,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "x".repeat(300), // Complex task
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         // Should not use planning if not configured
@@ -10042,6 +10103,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "x".repeat(300), // Complex task
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         // Should use planning for complex tasks
@@ -10059,6 +10121,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Short".to_string(), // Simple task
             parameters: params,
+            stream_tx: None,
         };
 
         // Should use planning if explicitly requested
@@ -10207,6 +10270,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Test".to_string(),
             parameters: params,
+            stream_tx: None,
         };
 
         assert_eq!(agent.select_plan_strategy(&task), PlanStrategy::ReAct);
@@ -10223,6 +10287,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Test".to_string(),
             parameters: params,
+            stream_tx: None,
         };
 
         assert_eq!(
@@ -10239,6 +10304,7 @@ mod planning_integration_tests {
             task_type: TaskType::LlmChat,
             input: "Test".to_string(),
             parameters: HashMap::new(),
+            stream_tx: None,
         };
 
         assert_eq!(agent.select_plan_strategy(&task), PlanStrategy::Hybrid);

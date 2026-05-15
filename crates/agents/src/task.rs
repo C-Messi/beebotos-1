@@ -51,6 +51,18 @@ pub enum TaskType {
     /// 🟢 P1 FIX: Workflow execution task
     #[serde(rename = "workflow_execution")]
     WorkflowExecution,
+    /// 🆕 Foreign runtime execution - Python WASM
+    #[serde(rename = "foreign_python_wasm")]
+    ForeignPythonWasm,
+    /// 🆕 Foreign runtime execution - Python process
+    #[serde(rename = "foreign_python_process")]
+    ForeignPythonProcess,
+    /// 🆕 Foreign runtime execution - Node.js WASM
+    #[serde(rename = "foreign_nodejs_wasm")]
+    ForeignNodeJsWasm,
+    /// 🆕 Foreign runtime execution - Node.js process
+    #[serde(rename = "foreign_nodejs_process")]
+    ForeignNodeJsProcess,
     /// Custom task type (fallback for extensibility)
     #[serde(rename = "custom")]
     Custom(String),
@@ -72,6 +84,10 @@ impl TaskType {
             TaskType::DeviceAutomation => "device_automation",
             TaskType::AppLifecycle => "app_lifecycle",
             TaskType::WorkflowExecution => "workflow_execution",
+            TaskType::ForeignPythonWasm => "foreign_python_wasm",
+            TaskType::ForeignPythonProcess => "foreign_python_process",
+            TaskType::ForeignNodeJsWasm => "foreign_nodejs_wasm",
+            TaskType::ForeignNodeJsProcess => "foreign_nodejs_process",
             TaskType::Custom(s) => s.as_str(),
         }
     }
@@ -91,6 +107,10 @@ impl TaskType {
             "device_automation" => TaskType::DeviceAutomation,
             "app_lifecycle" => TaskType::AppLifecycle,
             "workflow_execution" => TaskType::WorkflowExecution,
+            "foreign_python_wasm" => TaskType::ForeignPythonWasm,
+            "foreign_python_process" => TaskType::ForeignPythonProcess,
+            "foreign_nodejs_wasm" => TaskType::ForeignNodeJsWasm,
+            "foreign_nodejs_process" => TaskType::ForeignNodeJsProcess,
             other => TaskType::Custom(other.to_string()),
         }
     }
@@ -119,6 +139,10 @@ impl std::str::FromStr for TaskType {
             "device_automation" => TaskType::DeviceAutomation,
             "app_lifecycle" => TaskType::AppLifecycle,
             "workflow_execution" => TaskType::WorkflowExecution,
+            "foreign_python_wasm" => TaskType::ForeignPythonWasm,
+            "foreign_python_process" => TaskType::ForeignPythonProcess,
+            "foreign_nodejs_wasm" => TaskType::ForeignNodeJsWasm,
+            "foreign_nodejs_process" => TaskType::ForeignNodeJsProcess,
             other => TaskType::Custom(other.to_string()),
         })
     }

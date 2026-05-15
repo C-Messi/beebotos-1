@@ -11,6 +11,7 @@ repository = "https://github.com/beebotos/beebotos"
 beebotos-core = { path = "../core" }
 beebotos-gateway-lib = { path = "../gateway-lib" }
 beebotos-kernel = { path = "../kernel", features = ["wasm"] }
+beebotos-foreign-rt = { path = "../foreign-rt" }
 
 # Note: WASM execution is provided by beebotos-kernel's wasm module
 # Do not add wasmtime directly - use kernel::wasm interfaces instead
