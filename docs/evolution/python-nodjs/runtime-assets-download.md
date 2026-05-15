@@ -481,3 +481,60 @@ make repl.c
 
 下一步建议走已有 WASI QuickJS 封装，或给 upstream QuickJS 做专门的 WASI patch，而不是继续硬怼这条单行 clang 命令。
 
+
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+可以直接拿 **QuickJS-NG release 里的 WASI command 产物**，这是目前最省事的路线。
+
+BeeBotOS 现在需要的是 command 模式：模块导出 `_start`，一次启动执行 `/tmp/script.js`。所以选：
+
+```text
+qjs-wasi.wasm
+```
+
+不要选：
+
+```text
+qjs-wasi-reactor.wasm
+```
+
+reactor 是给 host 反复调用 `qjs_init/qjs_eval` 这种嵌入模式用的，和当前 `QuickJsExecutor` 不匹配。
+
+**直接下载：**
+
+```bash
+mkdir -p /opt/beebotos/wasm-modules
+
+curl -L \
+  -o /opt/beebotos/wasm-modules/qjs.wasm \
+  https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-wasi.wasm
+```
+
+或者固定版本，比如当前 QuickJS-NG GitHub 页面显示 latest 是 `v0.14.0`：
+
+```bash
+curl -L \
+  -o /opt/beebotos/wasm-modules/qjs.wasm \
+  https://github.com/quickjs-ng/quickjs/releases/download/v0.14.0/qjs-wasi.wasm
+```
+
+下载后先本地验证：
+
+```bash
+echo 'console.log(JSON.stringify({ ok: true, runtime: "quickjs-wasi" }))' > /tmp/script.js
+
+wasmtime --dir /tmp::/tmp \
+  /opt/beebotos/wasm-modules/qjs.wasm \
+  -- /tmp/script.js
+```
+
+预期 stdout 类似：
+
+```json
+{"ok":true,"runtime":"quickjs-wasi"}
+```
+
+依据：QuickJS-NG 文档说 GitHub release 提供预构建二进制；其 WASI command 模式产物是 `qjs-wasi.wasm`，用于标准 `main/_start` 执行；`paralin/go-quickjs-wasi` 也明确说明 command model wasm 会在 `_start()` 里跑完。来源：QuickJS-NG installation/release docs、QuickJS-NG WASI docs、paralin/go-quickjs-wasi README。
+
+
