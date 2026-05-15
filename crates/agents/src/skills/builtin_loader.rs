@@ -249,6 +249,7 @@ fn build_loaded_skill(meta: &SkillMetadata, content: &str) -> LoadedSkill {
             activation_examples,
             activation_negative_examples,
             dependencies,
+            ..Default::default()
         },
     }
 }

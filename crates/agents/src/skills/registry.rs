@@ -44,6 +44,12 @@ impl<'de> serde::Deserialize<'de> for Version {
     }
 }
 
+impl Default for Version {
+    fn default() -> Self {
+        Self::new(1, 0, 0)
+    }
+}
+
 impl Version {
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
         Self {

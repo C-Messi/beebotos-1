@@ -51,8 +51,66 @@ pub struct FunctionDef {
     pub example: String,
 }
 
+/// Skill runtime type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillRuntime {
+    /// WASM-based skill (default)
+    #[serde(alias = "wasm")]
+    Wasm,
+    /// Python script skill
+    #[serde(alias = "python")]
+    Python,
+    /// Node.js script skill
+    #[serde(alias = "nodejs", alias = "node")]
+    NodeJs,
+}
+
+impl Default for SkillRuntime {
+    fn default() -> Self {
+        SkillRuntime::Wasm
+    }
+}
+
+impl std::fmt::Display for SkillRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SkillRuntime::Wasm => write!(f, "wasm"),
+            SkillRuntime::Python => write!(f, "python"),
+            SkillRuntime::NodeJs => write!(f, "nodejs"),
+        }
+    }
+}
+
+/// Sandbox requirements declared by a skill
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SkillSandboxRequirements {
+    /// Minimum memory required in MB
+    #[serde(default)]
+    pub min_memory_mb: usize,
+    /// Maximum memory allowed in MB
+    #[serde(default = "default_max_memory")]
+    pub max_memory_mb: usize,
+    /// Whether network access is required
+    #[serde(default)]
+    pub network_allowed: bool,
+    /// Allowed domains if network is enabled
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// Whether GPU access is required
+    #[serde(default)]
+    pub requires_gpu: bool,
+    /// Additional filesystem paths to mount
+    #[serde(default)]
+    pub filesystem_paths: Vec<String>,
+}
+
+fn default_max_memory() -> usize {
+    256
+}
+
 /// Skill manifest
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SkillManifest {
     pub id: String,
     pub name: String,
@@ -88,6 +146,15 @@ pub struct SkillManifest {
     /// 🆕 SKILL MATCHING V2: Skill dependencies
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// 🆕 FOREIGN RUNTIME: Runtime type for non-WASM skills
+    #[serde(default)]
+    pub runtime: SkillRuntime,
+    /// 🆕 FOREIGN RUNTIME: Sandbox requirements for script execution
+    #[serde(default)]
+    pub sandbox: SkillSandboxRequirements,
+    /// 🆕 FOREIGN RUNTIME: Runtime-specific dependencies
+    #[serde(default)]
+    pub runtime_dependencies: Vec<String>,
 }
 
 impl SkillLoader {
@@ -115,20 +182,37 @@ impl SkillLoader {
             let skill_path = path.join(skill_id);
             if skill_path.exists() {
                 let manifest = self.load_manifest(&skill_path).await?;
-                let wasm_path = skill_path.join("skill.wasm");
 
-                if !wasm_path.exists() {
-                    return Err(SkillLoadError::InvalidManifest(format!(
-                        "WASM file not found at {:?}",
+                // WASM skills require skill.wasm; foreign runtime skills require entry_point file
+                let wasm_path = skill_path.join("skill.wasm");
+                let entry_path = skill_path.join(&manifest.entry_point);
+
+                let artifact_path = match manifest.runtime {
+                    SkillRuntime::Wasm => {
+                        if !wasm_path.exists() {
+                            return Err(SkillLoadError::InvalidManifest(format!(
+                                "WASM file not found at {:?}",
+                                wasm_path
+                            )));
+                        }
                         wasm_path
-                    )));
-                }
+                    }
+                    SkillRuntime::Python | SkillRuntime::NodeJs => {
+                        if !entry_path.exists() {
+                            return Err(SkillLoadError::InvalidManifest(format!(
+                                "Entry point not found at {:?} for {:?} skill",
+                                entry_path, manifest.runtime
+                            )));
+                        }
+                        entry_path
+                    }
+                };
 
                 let skill = LoadedSkill {
                     id: skill_id.to_string(),
                     name: manifest.name.clone(),
                     version: manifest.version.clone(),
-                    wasm_path,
+                    wasm_path: artifact_path,
                     source_path: skill_path.to_path_buf(),
                     manifest,
                 };

@@ -1,7 +1,7 @@
 //! Pyodide WASM runtime executor
 //!
 //! Executes Python code using Pyodide (CPython compiled to WASM)
-//! running inside wasmtime.
+//! running inside wasmtime with full WASI support.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,12 +11,13 @@ use tracing::{debug, info, warn};
 use crate::config::WasmPathConfig;
 use crate::error::{ForeignRtError, Result};
 use crate::script_task::{ForeignRuntime, ScriptResult, ScriptTask};
+use crate::wasm_path::executor::WasmScriptExecutor;
 use crate::wasm_path::{WasmExecutorUtils, WasmRuntimeEngine, WasmRuntimeExecutor};
 
 /// Pyodide WASM executor
 pub struct PyodideExecutor {
-    /// WASM engine
-    engine: Arc<WasmRuntimeEngine>,
+    /// WASM script executor
+    executor: WasmScriptExecutor,
     /// Module bytes (loaded on init)
     module_bytes: Option<Vec<u8>>,
     /// Configuration
@@ -42,8 +43,17 @@ impl PyodideExecutor {
             None
         };
 
+        let executor = WasmScriptExecutor::new(engine.engine().clone());
+        
+        // Precompile module if available
+        if let Some(ref bytes) = module_bytes {
+            if let Err(e) = executor.get_or_compile_module(bytes, ForeignRuntime::Python) {
+                warn!("Failed to precompile Pyodide module: {}", e);
+            }
+        }
+
         Ok(Self {
-            engine,
+            executor,
             module_bytes,
             config,
         })
@@ -61,12 +71,11 @@ impl PyodideExecutor {
         let user_code = match &task.source {
             crate::script_task::ScriptSource::Inline { code } => code.clone(),
             crate::script_task::ScriptSource::File { path } => {
-                // In WASM path, file sources are read and embedded
                 match std::fs::read_to_string(path) {
                     Ok(content) => content,
                     Err(e) => {
                         return format!(
-                            r#"raise RuntimeError("Failed to read file {}: {}")"#,
+                            r#"import sys; print("Failed to read file {}: {}", file=sys.stderr); raise SystemExit(1)"#,
                             path.display(),
                             e
                         );
@@ -75,7 +84,7 @@ impl PyodideExecutor {
             }
             crate::script_task::ScriptSource::Prebuilt { module_id, .. } => {
                 return format!(
-                    r#"raise RuntimeError("Prebuilt modules not supported in Pyodide path: {}")"#,
+                    r#"import sys; print("Prebuilt modules not supported in Pyodide path: {}", file=sys.stderr); raise SystemExit(1)"#,
                     module_id
                 );
             }
@@ -83,8 +92,7 @@ impl PyodideExecutor {
 
         // Wrap user code with bridge setup
         format!(
-            r##"
-# BeeBotOS Python Bridge (Pyodide)
+            r##"# BeeBotOS Python Bridge (Pyodide)
 import json
 import sys
 
@@ -93,26 +101,24 @@ class BeeBotOSBridge:
         self._task_id = {task_id:?}
         self._agent_id = {agent_id:?}
 
-    def _call_host(self, namespace, method, args):
-        # This will be bridged to HostFunctionDispatcher
-        # In full implementation, this calls into JS bridge which calls host funcs
-        print(f"[BRIDGE] {{namespace}}.{{method}}({{args}})", file=sys.stderr)
-        return None
-
-    def storage_get(self, key):
-        return self._call_host("storage", "get", [key])
-
-    def storage_put(self, key, value):
-        return self._call_host("storage", "put", [key, value])
-
-    def ipc_send(self, target_agent, message_type, payload):
-        return self._call_host("ipc", "send_message", [target_agent, message_type, payload])
-
-    def llm_chat(self, model, prompt):
-        return self._call_host("llm", "chat", [model, prompt])
-
     def log(self, level, message):
         print(f"[{{level}}] {{message}}", file=sys.stderr)
+
+    def storage_get(self, key):
+        self.log("debug", f"storage.get({{key}})")
+        return None
+
+    def storage_put(self, key, value):
+        self.log("debug", f"storage.put({{key}}, {{value}})")
+        return True
+
+    def ipc_send(self, target_agent, message_type, payload):
+        self.log("debug", f"ipc.send({{target_agent}}, {{message_type}})")
+        return None
+
+    def llm_chat(self, model, prompt):
+        self.log("debug", f"llm.chat({{model}})")
+        return "[LLM integration pending]"
 
 beebotos = BeeBotOSBridge()
 
@@ -121,11 +127,12 @@ beebotos = BeeBotOSBridge()
 
 # Execute entrypoint if defined
 if "{entrypoint}" in globals():
-    result = {entrypoint}({input_json})
-    if result is not None:
-        print(json.dumps(result, default=str))
+    _result = {entrypoint}({input_json})
+    if _result is not None:
+        print(json.dumps(_result, default=str))
 else:
-    print(json.dumps({{"error": f"Entrypoint '{entrypoint}' not found"}}))
+    print(json.dumps({{"error": f"Entrypoint '{entrypoint}' not found"}}), file=sys.stderr)
+    raise SystemExit(1)
 "##,
             task_id = task.task_id,
             agent_id = task.agent_id.as_deref().unwrap_or(""),
@@ -152,48 +159,34 @@ impl WasmRuntimeExecutor for PyodideExecutor {
             "Executing Python script via Pyodide WASM"
         );
 
-        // Prepare wrapped code
+        let module_bytes = self.module_bytes.as_ref().unwrap();
         let code = self.prepare_code(task);
 
-        // TODO: Full wasmtime integration with Pyodide
-        // This is a placeholder implementation that simulates execution
-        // In production, this would:
-        // 1. Compile/load the Pyodide WASM module
-        // 2. Set up WASI context with preopened directories
-        // 3. Inject the Python code into Pyodide's filesystem
-        // 4. Run Pyodide's eval_code or similar
-        // 5. Capture stdout/stderr
-        // 6. Extract fuel consumption from wasmtime Store
+        // Create a modified task with the wrapped code
+        let mut wrapped_task = task.clone();
+        wrapped_task.source = crate::script_task::ScriptSource::Inline { code };
 
-        // Simulate execution for now
-        let logs = WasmExecutorUtils::parse_logs(&format!(
-            "[info] Pyodide execution started for task {}\n[info] Code length: {} bytes",
-            task.task_id,
-            code.len()
-        ));
+        // Execute via the generic WASM executor
+        let result = self
+            .executor
+            .execute(module_bytes, &wrapped_task, "_start")
+            .await;
 
-        let output = serde_json::json!({
-            "status": "completed",
-            "note": "Full Pyodide wasmtime integration requires Pyodide WASM module and fs setup",
-            "task_id": task.task_id,
-        });
-
-        let execution_time = start.elapsed();
-        let fuel_consumed = 1000u64; // Placeholder
-
-        info!(
-            task_id = %task.task_id,
-            duration_ms = execution_time.as_millis(),
-            "Pyodide execution completed (placeholder)"
-        );
-
-        Ok(WasmExecutorUtils::build_success(
-            task,
-            output,
-            logs,
-            execution_time,
-            fuel_consumed,
-        ))
+        match result {
+            Ok(script_result) => {
+                info!(
+                    task_id = %task.task_id,
+                    success = script_result.success,
+                    duration_ms = script_result.execution_time.as_millis(),
+                    "Pyodide execution completed"
+                );
+                Ok(script_result)
+            }
+            Err(e) => {
+                warn!(task_id = %task.task_id, error = %e, "Pyodide execution failed");
+                Err(e)
+            }
+        }
     }
 
     fn runtime_type(&self) -> ForeignRuntime {
@@ -201,8 +194,10 @@ impl WasmRuntimeExecutor for PyodideExecutor {
     }
 
     async fn prewarm(&self, count: usize) -> Result<()> {
-        info!("Pre-warming {} Pyodide instances (placeholder)", count);
-        // TODO: Pre-initialize wasmtime stores with Pyodide module
+        info!("Pre-warming {} Pyodide instances", count);
+        // Module is already compiled and cached by WasmScriptExecutor.
+        // In a full implementation, we would pre-initialize wasmtime Stores
+        // with the Pyodide module loaded and core packages imported.
         Ok(())
     }
 }

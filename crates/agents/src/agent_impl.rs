@@ -7891,6 +7891,7 @@ impl Agent {
                             activation_examples: vec![],
                             activation_negative_examples: vec![],
                             dependencies: vec![],
+                            ..Default::default()
                         },
                     };
 
@@ -9846,6 +9847,7 @@ mod planning_integration_tests {
                 activation_examples: vec![],
                 activation_negative_examples: vec![],
                 dependencies: vec![],
+                ..Default::default()
             },
         }
     }

@@ -230,6 +230,19 @@ impl ForeignRuntimeManager for DefaultForeignRuntimeManager {
 
         info!(route = route.name(), "Selected execution route");
 
+        // Record execution start metric
+        let runtime_label = task.runtime.name();
+        let route_label = route.name();
+        metrics::counter!(
+            "beebotos_foreign_rt_executions_total",
+            "runtime" => runtime_label,
+            "path" => route_label,
+            "status" => "started"
+        )
+        .increment(1);
+
+        let exec_start = std::time::Instant::now();
+
         // Execute based on route
         let result = match route {
             ExecutionRoute::WasmPyodide => {
@@ -270,6 +283,45 @@ impl ForeignRuntimeManager for DefaultForeignRuntimeManager {
                 }
             }
         };
+
+        let exec_duration = exec_start.elapsed().as_secs_f64();
+        let status_label = match &result {
+            Ok(ref r) if r.success => "success",
+            Ok(_) => "failure",
+            Err(_) => "error",
+        };
+
+        // Record execution completion metrics
+        metrics::counter!(
+            "beebotos_foreign_rt_executions_total",
+            "runtime" => runtime_label,
+            "path" => route_label,
+            "status" => status_label
+        )
+        .increment(1);
+        metrics::histogram!(
+            "beebotos_foreign_rt_execution_duration_seconds",
+            "runtime" => runtime_label,
+            "path" => route_label
+        )
+        .record(exec_duration);
+
+        if let Ok(ref r) = result {
+            metrics::counter!(
+                "beebotos_foreign_rt_gas_used_total",
+                "runtime" => runtime_label,
+                "path" => route_label,
+                "resource" => "compute"
+            )
+            .increment(r.gas_report.compute_gas);
+            metrics::counter!(
+                "beebotos_foreign_rt_gas_used_total",
+                "runtime" => runtime_label,
+                "path" => route_label,
+                "resource" => "memory"
+            )
+            .increment(r.gas_report.memory_gas);
+        }
 
         // Update stats
         match &result {

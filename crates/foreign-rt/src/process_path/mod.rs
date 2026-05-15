@@ -22,6 +22,14 @@ use crate::metering::{ForeignGasReport, GasOracle, StandardGasOracle};
 use crate::script_task::{ForeignRuntime, LogEntry, LogLevel, ScriptResult, ScriptTask};
 use crate::wasm_path::WasmExecutorUtils;
 
+use crate::process_path::cgroup::{CgroupController, CgroupHandle};
+use crate::process_path::sandbox::{ProcessSandboxConfig, SeccompProfile};
+
+/// Check if nsjail binary is available
+fn nsjail_available() -> bool {
+    which::which("nsjail").is_ok()
+}
+
 /// Process sandbox executor
 pub struct ProcessSandboxExecutor {
     /// Configuration
@@ -30,15 +38,21 @@ pub struct ProcessSandboxExecutor {
     security: SecurityConfig,
     /// Gas oracle
     gas_oracle: Arc<dyn GasOracle>,
+    /// Cgroup controller
+    cgroup: Option<CgroupController>,
 }
 
 impl ProcessSandboxExecutor {
     /// Create a new process sandbox executor
     pub fn new(config: ProcessPathConfig, security: SecurityConfig) -> Self {
+        // Initialize cgroup controller
+        let cgroup = Some(CgroupController::new(&config.cgroup.parent_cgroup));
+
         Self {
             config,
             security,
             gas_oracle: Arc::new(StandardGasOracle::new()),
+            cgroup,
         }
     }
 
@@ -71,7 +85,7 @@ impl ProcessSandboxExecutor {
         &self,
         runtime: ForeignRuntime,
         script_path: &PathBuf,
-        _sandbox: &crate::script_task::SandboxRequirements,
+        sandbox: &crate::script_task::SandboxRequirements,
     ) -> Result<Command> {
         let rootfs = self.get_rootfs(runtime).ok_or_else(|| {
             ForeignRtError::RuntimeNotAvailable(format!(
@@ -80,12 +94,74 @@ impl ProcessSandboxExecutor {
             ))
         })?;
 
-        // For now, we use a simplified approach with direct command execution
-        // In production, this would use nsjail or similar to set up namespaces
         let interpreter = self.get_interpreter_path(runtime);
 
-        // Create a wrapper script that chroots or uses namespaces
-        // TODO: Full nsjail integration with config generation
+        if nsjail_available() {
+            self.build_nsjail_command(runtime, script_path, sandbox, rootfs, &interpreter)
+        } else {
+            self.build_unshare_command(runtime, script_path, sandbox, rootfs, &interpreter)
+        }
+    }
+
+    /// Build nsjail command
+    fn build_nsjail_command(
+        &self,
+        runtime: ForeignRuntime,
+        script_path: &PathBuf,
+        sandbox: &crate::script_task::SandboxRequirements,
+        rootfs: &PathBuf,
+        interpreter: &PathBuf,
+    ) -> Result<Command> {
+        let sandbox_config = ProcessSandboxConfig::from_requirements(
+            format!("{}-sandbox", runtime.name()),
+            sandbox,
+            rootfs.clone(),
+        );
+
+        let nsjail_config = sandbox_config.to_nsjail_config();
+        let config_path = std::env::temp_dir()
+            .join(format!("beebotos-nsjail-{}.cfg", uuid::Uuid::new_v4()));
+
+        // Write nsjail config to temp file
+        std::fs::write(&config_path, nsjail_config)
+            .map_err(|e| ForeignRtError::Io(format!("Failed to write nsjail config: {}", e)))?;
+
+        let mut cmd = Command::new("nsjail");
+        cmd.arg("--config")
+            .arg(&config_path)
+            .arg("--")
+            .arg(interpreter)
+            .arg(script_path);
+
+        cmd.env_clear();
+        cmd.env("BEE_RUNTIME", runtime.name());
+        cmd.env("BEE_TASK_ID", "unknown");
+        cmd.env("HOME", "/tmp");
+        cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin");
+
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        debug!(
+            runtime = runtime.name(),
+            rootfs = ?rootfs,
+            nsjail = true,
+            "Built nsjail sandboxed process command"
+        );
+
+        Ok(cmd)
+    }
+
+    /// Build unshare fallback command
+    fn build_unshare_command(
+        &self,
+        runtime: ForeignRuntime,
+        script_path: &PathBuf,
+        _sandbox: &crate::script_task::SandboxRequirements,
+        rootfs: &PathBuf,
+        interpreter: &PathBuf,
+    ) -> Result<Command> {
         let mut cmd = Command::new("unshare");
         cmd.arg("--fork")
             .arg("--pid")
@@ -97,12 +173,10 @@ impl ProcessSandboxExecutor {
         // Set up environment
         cmd.env_clear();
         cmd.env("BEE_RUNTIME", runtime.name());
-        cmd.env("BEE_TASK_ID", "unknown"); // Will be set per-task
+        cmd.env("BEE_TASK_ID", "unknown");
         cmd.env("HOME", "/tmp");
         cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin");
 
-        // Resource limits via ulimit (soft limits)
-        // TODO: Use cgroup v2 for proper resource control
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -110,7 +184,8 @@ impl ProcessSandboxExecutor {
         debug!(
             runtime = runtime.name(),
             rootfs = ?rootfs,
-            "Built sandboxed process command"
+            nsjail = false,
+            "Built unshare fallback process command"
         );
 
         Ok(cmd)
@@ -143,7 +218,7 @@ impl ProcessSandboxExecutor {
             .map_err(|e| ForeignRtError::Io(format!("Failed to create temp dir: {}", e)))?;
 
         let ext = runtime.extension();
-        let script_path = temp_dir.join(format!("{}.{}", task.task_id, ext));
+        let script_path = temp_dir.join(format!("{}.{}" , task.task_id, ext));
 
         tokio::fs::write(&script_path, code)
             .await
@@ -173,6 +248,24 @@ impl ProcessSandboxExecutor {
         // Prepare script file
         let script_path = self.prepare_script_file(task.runtime, task).await?;
 
+        // Create cgroup if available
+        let mut cgroup_handle: Option<CgroupHandle> = None;
+        if let Some(ref controller) = self.cgroup {
+            match controller.create_cgroup(&task.task_id).await {
+                Ok(mut handle) => {
+                    let mem_bytes = task.sandbox.max_memory_mb as u64 * 1024 * 1024;
+                    let _ = handle.set_memory_limit(mem_bytes).await;
+                    let _ = handle.set_memory_high(mem_bytes * 9 / 10).await;
+                    let _ = handle.set_cpu_weight(100).await;
+                    let _ = handle.set_pid_limit(task.sandbox.max_pids as u32).await;
+                    cgroup_handle = Some(handle);
+                }
+                Err(e) => {
+                    warn!("Failed to create cgroup: {}", e);
+                }
+            }
+        }
+
         // Build and spawn command
         let mut cmd = self.build_command(task.runtime, &script_path, &task.sandbox)?;
         cmd.env("BEE_TASK_ID", &task.task_id);
@@ -189,7 +282,16 @@ impl ProcessSandboxExecutor {
             ForeignRtError::ProcessSandbox(format!("Failed to spawn process: {}", e))
         })?;
 
-        // Write input to stdin if needed (for future stdin-based input)
+        // Add child to cgroup
+        if let Some(ref handle) = cgroup_handle {
+            if let Some(pid) = child.id() {
+                if let Err(e) = handle.add_process(pid).await {
+                    warn!("Failed to add process to cgroup: {}", e);
+                }
+            }
+        }
+
+        // Write input to stdin if needed
         if let Some(mut stdin) = child.stdin.take() {
             let input_json = serde_json::to_string(&task.input).unwrap_or_default();
             let _ = stdin.write_all(input_json.as_bytes()).await;
@@ -217,11 +319,27 @@ impl ProcessSandboxExecutor {
             let execution_time = start.elapsed();
             let logs = WasmExecutorUtils::parse_logs(&stderr);
 
+            // Read cgroup stats if available
+            let mut gas_report = ForeignGasReport::new();
+            if let Some(ref handle) = cgroup_handle {
+                if let Ok(mem_peak) = handle.read_memory_peak().await {
+                    gas_report.add_memory(mem_peak);
+                }
+                if let Ok(cpu_usec) = handle.read_cpu_usage_usec().await {
+                    gas_report.add_compute(cpu_usec);
+                }
+            } else {
+                // Fallback: estimate from execution time
+                gas_report.add_compute(execution_time.as_millis() as u64 * 100);
+            }
+
+            // Destroy cgroup
+            if let Some(mut handle) = cgroup_handle {
+                let _ = handle.destroy().await;
+            }
+
             if status.success() {
                 let output = WasmExecutorUtils::parse_output(&stdout)?;
-                let mut gas_report = ForeignGasReport::new();
-                // TODO: Read actual cgroup stats for CPU/memory usage
-                gas_report.add_compute(execution_time.as_millis() as u64 * 100);
 
                 info!(
                     task_id = %task.task_id,
@@ -253,6 +371,11 @@ impl ProcessSandboxExecutor {
 
             let execution_time = start.elapsed();
             let logs = WasmExecutorUtils::parse_logs(&stderr);
+
+            // Destroy cgroup and kill any remaining processes
+            if let Some(mut handle) = cgroup_handle {
+                let _ = handle.destroy().await;
+            }
 
             if result.is_err() {
                 Err(ForeignRtError::Timeout(timeout))

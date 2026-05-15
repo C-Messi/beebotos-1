@@ -194,6 +194,7 @@ impl McpSkillBridge {
             activation_examples: vec![format!("Call the {} tool", tool.name)],
             activation_negative_examples: vec![],
             dependencies: vec![],
+            ..Default::default()
         };
 
         LoadedSkill {

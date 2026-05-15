@@ -3,6 +3,7 @@
 //! This module handles execution of Python (via Pyodide) and Node.js
 //! (via QuickJS) within the wasmtime sandbox.
 
+pub mod executor;
 pub mod pyodide;
 pub mod quickjs;
 
