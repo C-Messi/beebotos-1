@@ -111,6 +111,226 @@ struct TextSkillObservation {
     success: bool,
 }
 
+fn configure_shell_command(cmd: &mut tokio::process::Command, command: &str) {
+    #[cfg(windows)]
+    {
+        let encoded_command = encode_powershell_command(command);
+        cmd.arg("-NoLogo")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-EncodedCommand")
+            .arg(encoded_command);
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.arg("-c").arg(command);
+    }
+}
+
+fn decode_command_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+
+    if bytes.starts_with(&[0xff, 0xfe]) {
+        return decode_utf16_le(&bytes[2..]);
+    }
+    if bytes.starts_with(&[0xfe, 0xff]) {
+        return decode_utf16_be(&bytes[2..]);
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+
+    let even_len = bytes.len() / 2 * 2;
+    if even_len >= 2 {
+        let nul_odd = bytes[..even_len]
+            .chunks_exact(2)
+            .filter(|chunk| chunk[1] == 0)
+            .count();
+        let pairs = even_len / 2;
+        if pairs > 0 && nul_odd * 100 / pairs >= 30 {
+            return decode_utf16_le(&bytes[..even_len]);
+        }
+    }
+
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+fn decode_utf16_le(bytes: &[u8]) -> String {
+    String::from_utf16_lossy(
+        &bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn decode_utf16_be(bytes: &[u8]) -> String {
+    String::from_utf16_lossy(
+        &bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn configure_command_environment(cmd: &mut tokio::process::Command, workspace: Option<&Path>) {
+    #[cfg(windows)]
+    {
+        cmd.env("PATH", process_path());
+        for key in [
+            "PATHEXT",
+            "SystemRoot",
+            "WINDIR",
+            "COMSPEC",
+            "TEMP",
+            "TMP",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "PROGRAMDATA",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramW6432",
+            "PSModulePath",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                cmd.env(key, value);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.env_clear();
+        cmd.env("PATH", process_path());
+    }
+
+    if let Some(workspace) = workspace {
+        cmd.env("HOME", workspace);
+        cmd.env("BEEBOTOS_WORKSPACE", workspace);
+    }
+}
+
+#[cfg(windows)]
+fn encode_powershell_command(command: &str) -> String {
+    let wrapper = format!(
+        r#"
+$utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+[Console]::InputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+{command}
+"#
+    );
+    let bytes: Vec<u8> = wrapper
+        .encode_utf16()
+        .flat_map(|code_unit| code_unit.to_le_bytes())
+        .collect();
+    encode_base64(&bytes)
+}
+
+#[cfg(windows)]
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(((bytes.len() + 2) / 3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+
+        encoded.push(TABLE[(b0 >> 2) as usize] as char);
+        encoded.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            encoded.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() > 2 {
+            encoded.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
+}
+
+fn process_path() -> String {
+    let current = std::env::var("PATH").unwrap_or_default();
+    #[cfg(windows)]
+    {
+        merge_windows_path(current)
+    }
+    #[cfg(not(windows))]
+    {
+        current
+    }
+}
+
+#[cfg(windows)]
+fn merge_windows_path(current: String) -> String {
+    let mut entries = Vec::new();
+    for key in [
+        r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        r"HKEY_CURRENT_USER\Environment",
+    ] {
+        if let Ok(output) = std::process::Command::new("reg")
+            .args(["query", key, "/v", "Path"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.starts_with("Path") {
+                        continue;
+                    }
+                    if let Some(value) = parse_reg_path_value(trimmed) {
+                        entries.extend(
+                            std::env::split_paths(&value).map(|p| p.to_string_lossy().to_string()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    entries.extend(std::env::split_paths(&current).map(|p| p.to_string_lossy().to_string()));
+
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::new();
+    for entry in entries {
+        if entry.trim().is_empty() {
+            continue;
+        }
+        let key = entry.trim_end_matches(['\\', '/']).to_ascii_lowercase();
+        if seen.insert(key) {
+            merged.push(entry);
+        }
+    }
+    std::env::join_paths(merged)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or(current)
+}
+
+#[cfg(windows)]
+fn parse_reg_path_value(line: &str) -> Option<String> {
+    let marker = if line.contains("REG_EXPAND_SZ") {
+        "REG_EXPAND_SZ"
+    } else if line.contains("REG_SZ") {
+        "REG_SZ"
+    } else {
+        return None;
+    };
+    let value = line.split_once(marker)?.1.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 fn extract_usd_notional(text: &str) -> Option<String> {
     let lower = text.to_ascii_lowercase();
     let chars: Vec<char> = text.chars().collect();
@@ -180,6 +400,7 @@ impl Agent {
     }
 
     fn workspace_dir(&self) -> PathBuf {
+        #[cfg(test)]
         if let Ok(path) = std::env::var("BEEBOTOS_WORKSPACE") {
             let path = PathBuf::from(path);
             if !path.as_os_str().is_empty() {
@@ -192,12 +413,7 @@ impl Agent {
             return root.join("data").join("workspace");
         }
 
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        manifest_dir
-            .ancestors()
-            .nth(2)
-            .map(|root| root.join("data").join("workspace"))
-            .unwrap_or(current)
+        current.join("data").join("workspace")
     }
 
     fn workspace_dir_display(&self) -> String {
@@ -243,8 +459,8 @@ impl Agent {
 
     fn controlled_workspace_tools_enabled(&self) -> bool {
         std::env::var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-            .unwrap_or(false)
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+            .unwrap_or(true)
     }
 
     fn approval_env() -> HashMap<String, String> {
@@ -261,7 +477,7 @@ impl Agent {
     }
 
     fn builtin_workspace_tools(&self) -> Vec<communication::ToolDefinition> {
-        vec![
+        let mut tools = vec![
             communication::ToolDefinition {
                 name: "read_file".to_string(),
                 description: "Read a UTF-8 text file from the current workspace. Parameters: path \
@@ -324,7 +540,11 @@ impl Agent {
                     "required": ["pattern"]
                 }),
             },
-        ]
+        ];
+        if self.controlled_workspace_tools_enabled() {
+            tools.extend(self.controlled_workspace_tool_definitions());
+        }
+        tools
     }
 
     fn web_tools_enabled(&self) -> bool {
@@ -335,9 +555,6 @@ impl Agent {
 
     fn builtin_react_tools(&self) -> Vec<communication::ToolDefinition> {
         let mut tools = self.builtin_workspace_tools();
-        if self.controlled_workspace_tools_enabled() {
-            tools.extend(self.controlled_workspace_tool_definitions());
-        }
         tools.push(communication::ToolDefinition {
             name: "activate_skill".to_string(),
             description: "Activate a BeeBotOS skill as additional context for this conversation. \
@@ -679,13 +896,19 @@ impl Agent {
                     Some(dir) if !dir.trim().is_empty() => self.resolve_workspace_path(dir)?,
                     _ => self.workspace_dir(),
                 };
+                let workspace = self.workspace_dir();
                 let timeout_ms = get("timeout_ms")
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(30000);
-                let mut cmd = tokio::process::Command::new("sh");
-                cmd.arg("-c").arg(command);
+                let mut cmd = tokio::process::Command::new(if cfg!(windows) {
+                    "powershell.exe"
+                } else {
+                    "sh"
+                });
+                configure_shell_command(&mut cmd, command);
                 cmd.current_dir(&working_dir);
                 cmd.kill_on_drop(true);
+                configure_command_environment(&mut cmd, Some(&workspace));
                 let output = tokio::time::timeout(
                     std::time::Duration::from_millis(timeout_ms),
                     cmd.output(),
@@ -698,8 +921,8 @@ impl Agent {
                     ))
                 })?
                 .map_err(|e| AgentError::Execution(format!("Failed to execute command: {}", e)))?;
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = decode_command_output(&output.stdout);
+                let stderr = decode_command_output(&output.stderr);
                 Ok(format!(
                     "Exit code: {}\nWorking directory: {}\n\nSTDOUT:\n{}\nSTDERR:\n{}",
                     output.status.code().unwrap_or(-1),
@@ -731,6 +954,48 @@ impl Agent {
                     "Dangerous command pattern blocked: {}",
                     pattern
                 )));
+            }
+        }
+        let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
+        for fragment in command.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '|')) {
+            let unquoted = fragment.trim_matches(|c| {
+                matches!(
+                    c,
+                    '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+                )
+            });
+            if unquoted.is_empty() {
+                continue;
+            }
+            for path_part in unquoted
+                .split(|c| matches!(c, '=' | ':' | ','))
+                .filter(|part| !part.is_empty())
+            {
+                if path_part == ".."
+                    || path_part.starts_with("../")
+                    || path_part.ends_with("/..")
+                    || path_part.contains("/../")
+                {
+                    return Err(AgentError::Execution(
+                        "Command path traversal outside the workspace is blocked".to_string(),
+                    ));
+                }
+                if !path_part.starts_with('/') {
+                    continue;
+                }
+                let normalized = Self::normalize_path_without_fs(Path::new(path_part));
+                if !normalized.starts_with(&workspace) {
+                    return Err(AgentError::Execution(format!(
+                        "Absolute command path '{}' escapes workspace root '{}'",
+                        path_part,
+                        workspace.display()
+                    )));
+                }
+            }
+            if unquoted.contains("..") {
+                return Err(AgentError::Execution(
+                    "Command path traversal outside the workspace is blocked".to_string(),
+                ));
             }
         }
         Ok(())
@@ -3077,8 +3342,9 @@ impl Agent {
              Workspace\nWorking directory: {}\nAll workspace tools are restricted to this \
              root.\n\nThis is the BeeBotOS user workspace, normally ./data/workspace relative to \
              the repo. Treat it as your current working directory, not the repository root.\n\n## \
-             Tools\nExecutable tools include read_file, list_dir, glob, grep, web_fetch, \
-             web_search, and activate_skill. {}\n\n## Skills\n{}",
+             Tools\nExecutable tools include read_file, list_dir, glob, grep, write_file, \
+             edit_file, exec, web_fetch, web_search, and activate_skill when enabled by runtime \
+             policy. {}\n\n## Skills\n{}",
             self.config.name,
             self.config.description,
             runtime_context,
@@ -4427,12 +4693,10 @@ impl Agent {
             TaskType::DeviceAutomation => self.handle_device_automation_task(&task).await,
             TaskType::AppLifecycle => self.handle_app_lifecycle_task(&task).await,
             TaskType::WorkflowExecution => self.handle_workflow_task(&task).await,
-            TaskType::ForeignPythonWasm |
-            TaskType::ForeignPythonProcess |
-            TaskType::ForeignNodeJsWasm |
-            TaskType::ForeignNodeJsProcess => {
-                self.handle_foreign_runtime_task(&task).await
-            }
+            TaskType::ForeignPythonWasm
+            | TaskType::ForeignPythonProcess
+            | TaskType::ForeignNodeJsWasm
+            | TaskType::ForeignNodeJsProcess => self.handle_foreign_runtime_task(&task).await,
             TaskType::Custom(type_name) => {
                 // 🆕 FIX: All custom planning tasks route through Unified ReAct.
                 if self.should_use_planning(&task).await {
@@ -5160,7 +5424,8 @@ impl Agent {
             if self.controlled_workspace_tools_enabled() {
                 "Controlled tools are enabled: write_file(path, content), edit_file(path, \
                  old_text, new_text, replace_all?), and exec(command, working_dir?, timeout_ms?) \
-                 are available."
+                 are available. All file operations and command working directories are limited to \
+                 this workspace."
             } else {
                 "Controlled tools such as write_file, edit_file, and exec exist but are disabled \
                  unless runtime policy explicitly enables them."
@@ -9898,10 +10163,21 @@ mod planning_integration_tests {
     }
 
     #[test]
-    fn test_react_controlled_tools_are_exposed_only_when_enabled() {
+    fn test_react_controlled_tools_are_exposed_by_default_and_can_be_disabled() {
         std::env::remove_var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS");
         let agent = create_test_agent();
-        let disabled_tools: std::collections::HashSet<String> = agent
+        let default_tools: std::collections::HashSet<String> = agent
+            .builtin_react_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(default_tools.contains("write_file"));
+        assert!(default_tools.contains("edit_file"));
+        assert!(default_tools.contains("exec"));
+
+        std::env::set_var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS", "0");
+        let disabled_agent = create_test_agent();
+        let disabled_tools: std::collections::HashSet<String> = disabled_agent
             .builtin_react_tools()
             .into_iter()
             .map(|tool| tool.name)
@@ -9909,16 +10185,6 @@ mod planning_integration_tests {
         assert!(!disabled_tools.contains("write_file"));
         assert!(!disabled_tools.contains("edit_file"));
         assert!(!disabled_tools.contains("exec"));
-
-        std::env::set_var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS", "true");
-        let enabled_tools: std::collections::HashSet<String> = agent
-            .builtin_react_tools()
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect();
-        assert!(enabled_tools.contains("write_file"));
-        assert!(enabled_tools.contains("edit_file"));
-        assert!(enabled_tools.contains("exec"));
         std::env::remove_var("BEEBOTOS_ENABLE_CONTROLLED_WORKSPACE_TOOLS");
     }
 
@@ -9957,6 +10223,23 @@ mod planning_integration_tests {
 
         let escaped = agent.resolve_workspace_path("../outside.txt");
         assert!(escaped.is_err());
+        std::env::remove_var("BEEBOTOS_WORKSPACE");
+    }
+
+    #[test]
+    fn test_react_workspace_exec_blocks_paths_outside_workspace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("BEEBOTOS_WORKSPACE", dir.path());
+        let agent = create_test_agent();
+
+        assert!(agent.validate_workspace_command("cat /etc/passwd").is_err());
+        assert!(agent
+            .validate_workspace_command("cat ../outside.txt")
+            .is_err());
+
+        let inside = dir.path().join("ok.txt");
+        let command = format!("cat {}", inside.display());
+        assert!(agent.validate_workspace_command(&command).is_ok());
         std::env::remove_var("BEEBOTOS_WORKSPACE");
     }
 

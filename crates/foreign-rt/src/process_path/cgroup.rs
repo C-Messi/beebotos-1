@@ -6,6 +6,16 @@ use tracing::{debug, info, warn};
 
 use crate::error::{ForeignRtError, Result};
 
+#[cfg(target_os = "linux")]
+fn kill_process(pid: i32) {
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_process(_pid: i32) {}
+
 /// Cgroup controller for managing process resource limits
 pub struct CgroupController {
     /// Base cgroup path
@@ -34,7 +44,14 @@ impl CgroupController {
 
     /// Check if cgroup v2 is available on this system
     fn check_cgroup_v2_available() -> bool {
-        std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
+        }
     }
 
     /// Check if cgroup v2 is available
@@ -51,11 +68,9 @@ impl CgroupController {
         let cgroup_path = self.base_path.join(format!("task-{}", task_id));
 
         // Create cgroup directory
-        tokio::fs::create_dir_all(&cgroup_path)
-            .await
-            .map_err(|e| ForeignRtError::ProcessSandbox(format!(
-                "Failed to create cgroup directory: {}", e
-            )))?;
+        tokio::fs::create_dir_all(&cgroup_path).await.map_err(|e| {
+            ForeignRtError::ProcessSandbox(format!("Failed to create cgroup directory: {}", e))
+        })?;
 
         debug!(path = ?cgroup_path, "Created cgroup");
 
@@ -101,9 +116,9 @@ impl CgroupHandle {
         let limit_path = self.path.join("memory.max");
         tokio::fs::write(&limit_path, bytes.to_string())
             .await
-            .map_err(|e| ForeignRtError::ProcessSandbox(format!(
-                "Failed to set memory limit: {}", e
-            )))?;
+            .map_err(|e| {
+                ForeignRtError::ProcessSandbox(format!("Failed to set memory limit: {}", e))
+            })?;
 
         debug!(bytes, "Set cgroup memory limit");
         Ok(())
@@ -118,9 +133,9 @@ impl CgroupHandle {
         let high_path = self.path.join("memory.high");
         tokio::fs::write(&high_path, bytes.to_string())
             .await
-            .map_err(|e| ForeignRtError::ProcessSandbox(format!(
-                "Failed to set memory high: {}", e
-            )))?;
+            .map_err(|e| {
+                ForeignRtError::ProcessSandbox(format!("Failed to set memory high: {}", e))
+            })?;
 
         debug!(bytes, "Set cgroup memory high");
         Ok(())
@@ -135,9 +150,9 @@ impl CgroupHandle {
         let weight_path = self.path.join("cpu.weight");
         tokio::fs::write(&weight_path, weight.to_string())
             .await
-            .map_err(|e| ForeignRtError::ProcessSandbox(format!(
-                "Failed to set CPU weight: {}", e
-            )))?;
+            .map_err(|e| {
+                ForeignRtError::ProcessSandbox(format!("Failed to set CPU weight: {}", e))
+            })?;
 
         debug!(weight, "Set cgroup CPU weight");
         Ok(())
@@ -152,9 +167,9 @@ impl CgroupHandle {
         let pids_path = self.path.join("pids.max");
         tokio::fs::write(&pids_path, max_pids.to_string())
             .await
-            .map_err(|e| ForeignRtError::ProcessSandbox(format!(
-                "Failed to set PID limit: {}", e
-            )))?;
+            .map_err(|e| {
+                ForeignRtError::ProcessSandbox(format!("Failed to set PID limit: {}", e))
+            })?;
 
         debug!(max_pids, "Set cgroup PID limit");
         Ok(())
@@ -169,9 +184,9 @@ impl CgroupHandle {
         let procs_path = self.path.join("cgroup.procs");
         tokio::fs::write(&procs_path, pid.to_string())
             .await
-            .map_err(|e| ForeignRtError::ProcessSandbox(format!(
-                "Failed to add process to cgroup: {}", e
-            )))?;
+            .map_err(|e| {
+                ForeignRtError::ProcessSandbox(format!("Failed to add process to cgroup: {}", e))
+            })?;
 
         debug!(pid, "Added process to cgroup");
         Ok(())
@@ -185,12 +200,9 @@ impl CgroupHandle {
 
         let peak_path = self.path.join("memory.peak");
         match tokio::fs::read_to_string(&peak_path).await {
-            Ok(content) => content
-                .trim()
-                .parse::<u64>()
-                .map_err(|e| ForeignRtError::ProcessSandbox(format!(
-                    "Failed to parse memory.peak: {}", e
-                ))),
+            Ok(content) => content.trim().parse::<u64>().map_err(|e| {
+                ForeignRtError::ProcessSandbox(format!("Failed to parse memory.peak: {}", e))
+            }),
             Err(_) => Ok(0),
         }
     }
@@ -208,11 +220,12 @@ impl CgroupHandle {
                     if line.starts_with("usage_usec ") {
                         let parts: Vec<&str> = line.split_whitespace().collect();
                         if parts.len() >= 2 {
-                            return parts[1]
-                                .parse::<u64>()
-                                .map_err(|e| ForeignRtError::ProcessSandbox(format!(
-                                    "Failed to parse cpu.stat: {}", e
-                                )));
+                            return parts[1].parse::<u64>().map_err(|e| {
+                                ForeignRtError::ProcessSandbox(format!(
+                                    "Failed to parse cpu.stat: {}",
+                                    e
+                                ))
+                            });
                         }
                     }
                 }
@@ -233,9 +246,7 @@ impl CgroupHandle {
         if let Ok(content) = tokio::fs::read_to_string(&procs_path).await {
             for line in content.lines() {
                 if let Ok(pid) = line.parse::<i32>() {
-                    unsafe {
-                        libc::kill(pid, libc::SIGKILL);
-                    }
+                    kill_process(pid);
                 }
             }
         }
@@ -263,9 +274,7 @@ impl Drop for CgroupHandle {
             if let Ok(content) = std::fs::read_to_string(&procs_path) {
                 for line in content.lines() {
                     if let Ok(pid) = line.parse::<i32>() {
-                        unsafe {
-                            libc::kill(pid, libc::SIGKILL);
-                        }
+                        kill_process(pid);
                     }
                 }
             }

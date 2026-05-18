@@ -25,6 +25,34 @@ fn store_session_id(id: &str) {
     let _ = LocalStorage::set("beebotos_webchat_session_id", id);
 }
 
+fn is_placeholder_assistant(message: &ChatMessage) -> bool {
+    message.role == MessageRole::Assistant && message.content.trim() == "🤖 正在思考，请稍候..."
+}
+
+fn latest_assistant(messages: &[ChatMessage]) -> Option<&ChatMessage> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::Assistant)
+}
+
+fn should_refresh_after_send(current: &[ChatMessage], fetched: &[ChatMessage]) -> bool {
+    let Some(fetched_latest) = latest_assistant(fetched) else {
+        return false;
+    };
+    if is_placeholder_assistant(fetched_latest) {
+        return false;
+    }
+
+    match latest_assistant(current) {
+        Some(current_latest) => {
+            current_latest.id != fetched_latest.id
+                || current_latest.content != fetched_latest.content
+        }
+        None => true,
+    }
+}
+
 /// WebChat 页面
 #[component]
 pub fn WebchatPage() -> impl IntoView {
@@ -210,15 +238,10 @@ pub fn WebchatPage() -> impl IntoView {
                                 return;
                             }
                             if let Ok(msgs) = service.get_messages(&session_id_poll).await {
-                                let existing: std::collections::HashSet<String> = chat_state_send
+                                let should_refresh = chat_state_send
                                     .current_messages
-                                    .with(|current| current.iter().map(|m| m.id.clone()).collect());
-                                let has_new_assistant = msgs.iter().any(|msg| {
-                                    msg.role == MessageRole::Assistant
-                                        && !existing.contains(&msg.id)
-                                        && msg.content != "🤖 正在思考，请稍候..."
-                                });
-                                if has_new_assistant {
+                                    .with(|current| should_refresh_after_send(current, &msgs));
+                                if should_refresh {
                                     chat_state_send.current_messages.set(msgs.clone());
                                     chat_state_send.message_cache.update(|cache| {
                                         cache.insert(session_id_poll.clone(), msgs);

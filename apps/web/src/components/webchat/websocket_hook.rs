@@ -14,7 +14,36 @@ use web_sys::MessageEvent;
 use crate::api::{create_client, create_webchat_service};
 use crate::state::{use_auth_state, use_webchat_state};
 use crate::utils::get_user_id;
-use crate::webchat::{ChatMessage, ToolCallEvent};
+use crate::webchat::{ChatMessage, MessageRole, ToolCallEvent};
+
+fn is_final_assistant(message: &ChatMessage) -> bool {
+    message.role == MessageRole::Assistant && message.content.trim() != "🤖 正在思考，请稍候..."
+}
+
+fn latest_final_assistant(messages: &[ChatMessage]) -> Option<&ChatMessage> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| is_final_assistant(message))
+}
+
+fn should_refresh_finished_stream(current: &[ChatMessage], fetched: &[ChatMessage]) -> bool {
+    if fetched.len() < current.len() {
+        return false;
+    }
+
+    let Some(fetched_latest) = latest_final_assistant(fetched) else {
+        return false;
+    };
+
+    match latest_final_assistant(current) {
+        Some(current_latest) => {
+            current_latest.id != fetched_latest.id
+                || current_latest.content != fetched_latest.content
+        }
+        None => true,
+    }
+}
 
 fn merge_messages(
     chat_state: &crate::state::WebchatState,
@@ -22,10 +51,10 @@ fn merge_messages(
     messages: Vec<ChatMessage>,
 ) {
     chat_state.current_messages.update(|current| {
-        let mut existing: std::collections::HashSet<String> =
-            current.iter().map(|m| m.id.clone()).collect();
         for message in messages {
-            if existing.insert(message.id.clone()) {
+            if let Some(existing) = current.iter_mut().find(|m| m.id == message.id) {
+                *existing = message;
+            } else {
                 current.push(message);
             }
         }
@@ -137,6 +166,7 @@ pub fn use_websocket_chat() -> ReadSignal<WsConnectionStatus> {
         let closed_by_cleanup = Arc::new(AtomicBool::new(false));
 
         let chat_state_msg = chat_state.clone();
+        let auth_state_msg = auth_state.clone();
         let onmessage = Closure::wrap(Box::new(move |e: MessageEvent| {
             if let Ok(text) = e.data().dyn_into::<js_sys::JsString>() {
                 let text_str = text.as_string().unwrap_or_default();
@@ -195,6 +225,41 @@ pub fn use_websocket_chat() -> ReadSignal<WsConnectionStatus> {
                             if json.get("finished").and_then(|v| v.as_bool()) == Some(true) {
                                 chat_state_msg.finish_streaming();
                                 chat_state_msg.is_sending.set(false);
+                                let chat_state_refresh = chat_state_msg.clone();
+                                let auth_state_refresh = auth_state_msg.clone();
+                                wasm_bindgen_futures::spawn_local(async move {
+                                    for _ in 0..5 {
+                                        gloo_timers::future::TimeoutFuture::new(500).await;
+                                        if let Some(session_id) =
+                                            chat_state_refresh.current_session_id.get()
+                                        {
+                                            let client = create_client();
+                                            client.set_auth_token(auth_state_refresh.get_token());
+                                            let service = create_webchat_service(client);
+                                            if let Ok(msgs) =
+                                                service.get_messages(&session_id).await
+                                            {
+                                                let should_refresh = chat_state_refresh
+                                                    .current_messages
+                                                    .with(|current| {
+                                                        should_refresh_finished_stream(
+                                                            current, &msgs,
+                                                        )
+                                                    });
+                                                if !should_refresh {
+                                                    continue;
+                                                }
+                                                chat_state_refresh
+                                                    .current_messages
+                                                    .set(msgs.clone());
+                                                chat_state_refresh.message_cache.update(|cache| {
+                                                    cache.insert(session_id.clone(), msgs);
+                                                });
+                                                return;
+                                            }
+                                        }
+                                    }
+                                });
                                 return;
                             }
                             if let Some(content) = json.get("content").and_then(|v| v.as_str()) {

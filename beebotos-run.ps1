@@ -14,6 +14,43 @@ $LogDir = Join-Path $DataDir "logs"
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+function Update-ProcessPathFromRegistry {
+    $paths = New-Object System.Collections.Generic.List[string]
+    foreach ($scope in @(
+        "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        "Registry::HKEY_CURRENT_USER\Environment"
+    )) {
+        try {
+            $value = (Get-ItemProperty -Path $scope -Name Path -ErrorAction SilentlyContinue).Path
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                foreach ($entry in ($value -split ';')) {
+                    $expanded = [Environment]::ExpandEnvironmentVariables($entry.Trim())
+                    if (-not [string]::IsNullOrWhiteSpace($expanded)) {
+                        $paths.Add($expanded)
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    foreach ($entry in (($env:Path -split ';') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $paths.Add([Environment]::ExpandEnvironmentVariables($entry.Trim()))
+    }
+
+    $seen = @{}
+    $merged = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in $paths) {
+        $key = $entry.TrimEnd('\').ToLowerInvariant()
+        if (-not $seen.ContainsKey($key)) {
+            $seen[$key] = $true
+            $merged.Add($entry)
+        }
+    }
+    $env:Path = ($merged -join ';')
+}
+
+Update-ProcessPathFromRegistry
+
 $Services = @(
     @{ Name = "gateway"; Binary = "beebotos-gateway.exe"; Port = 8000; Desc = "API Gateway" }
     @{ Name = "web";     Binary = "web-server.exe";       Port = 8090; Desc = "Web Frontend Server" }

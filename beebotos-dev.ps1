@@ -13,6 +13,42 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 Set-Location $ProjectRoot
 
+$HostIsWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+    [System.Runtime.InteropServices.OSPlatform]::Windows
+)
+
+function Get-PackageRustTarget {
+    if (-not [string]::IsNullOrWhiteSpace($env:BEEBOTOS_PACKAGE_TARGET)) {
+        return $env:BEEBOTOS_PACKAGE_TARGET
+    }
+    if (-not $HostIsWindows) {
+        return "x86_64-pc-windows-gnu"
+    }
+    return $null
+}
+
+function Get-TargetArgs($cargoTarget) {
+    if ([string]::IsNullOrWhiteSpace($cargoTarget)) { return @() }
+    return @("--target", $cargoTarget)
+}
+
+function Get-ReleaseDir($cargoTarget) {
+    if ([string]::IsNullOrWhiteSpace($cargoTarget)) {
+        return Join-Path $ProjectRoot "target\release"
+    }
+    return Join-Path $ProjectRoot "target\$cargoTarget\release"
+}
+
+function Get-BinaryPath($binaryName, $cargoTarget) {
+    $suffix = if ($HostIsWindows -or $cargoTarget -like "*windows*") { ".exe" } else { "" }
+    return Join-Path (Get-ReleaseDir $cargoTarget) "$binaryName$suffix"
+}
+
+function Invoke-CargoBuild($cargoArgs, $cargoTarget) {
+    $argsWithTarget = @($cargoArgs) + (Get-TargetArgs $cargoTarget)
+    & cargo @argsWithTarget
+}
+
 function Print-Header {
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host "  BeeBotOS Development Manager" -ForegroundColor Cyan
@@ -29,6 +65,7 @@ function Print-Warn($msg)    { Write-Host "[WARN] $msg" -ForegroundColor Yellow 
 $Services = @(
     @{
         Name = "gateway"
+        Package = "beebotos-gateway"
         BuildCmd = "cargo build --release -p beebotos-gateway"
         Binary = "target\release\beebotos-gateway.exe"
         Port = 8000
@@ -36,6 +73,7 @@ $Services = @(
     },
     @{
         Name = "web"
+        Package = "beebotos-web"
         BuildCmd = $null  # handled specially in Build-Service
         Binary = "target\release\web-server.exe"
         Port = 8090
@@ -43,6 +81,7 @@ $Services = @(
     },
     @{
         Name = "beehub"
+        Package = "beebotos-beehub"
         BuildCmd = "cargo build --release -p beebotos-beehub"
         Binary = "target\release\beehub.exe"
         Port = 8080
@@ -85,13 +124,16 @@ function Test-IsRunning($name) {
     return $false
 }
 
-function Build-Service($name) {
+function Build-Service($name, $cargoTarget = $null) {
     $svc = Get-Service $name
     if (-not $svc) { Print-Error "Unknown service: $name"; return $false }
 
     Write-Host "----------------------------------------" -ForegroundColor Cyan
     Write-Host "Building: $($svc.Desc) ($name)" -ForegroundColor Cyan
     Write-Host "----------------------------------------" -ForegroundColor Cyan
+    if (-not [string]::IsNullOrWhiteSpace($cargoTarget)) {
+        Print-Info "Cargo target: $cargoTarget"
+    }
 
     if (-not $svc.BuildCmd -and $name -ne "web") {
         Print-Warn "No build command for $name, skipping."
@@ -144,7 +186,7 @@ function Build-Service($name) {
         #     Print-Error "Build failed: web - wasm-pack build failed (exit $LASTEXITCODE)"
         #     return $false
         # }
-        cargo build -p beebotos-web --bin web-server --features server --release
+        Invoke-CargoBuild -cargoArgs @("build", "-p", "beebotos-web", "--bin", "web-server", "--features", "server", "--release") -cargoTarget $cargoTarget
         if ($LASTEXITCODE -ne 0) {
             Print-Error "Build failed: web - cargo build web-server failed (exit $LASTEXITCODE)"
             return $false
@@ -154,7 +196,11 @@ function Build-Service($name) {
     }
 
     try {
-        Invoke-Expression $svc.BuildCmd
+        if ($svc.Package) {
+            Invoke-CargoBuild -cargoArgs @("build", "--release", "-p", $svc.Package) -cargoTarget $cargoTarget
+        } else {
+            Invoke-Expression $svc.BuildCmd
+        }
         if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) {
             Print-Success "Build completed: $name"
             return $true
@@ -266,23 +312,59 @@ function Build-And-Start($name) {
     }
 }
 
+function Copy-RequiredFile($source, $destination) {
+    if (-not (Test-Path $source)) {
+        Print-Error "Required file not found: $source"
+        return $false
+    }
+    Copy-Item $source $destination
+    return $true
+}
+
 function Pack-Release($target = "all") {
     Write-Host "----------------------------------------" -ForegroundColor Cyan
     Write-Host "Packing release for target: $target" -ForegroundColor Cyan
     Write-Host "----------------------------------------" -ForegroundColor Cyan
 
+    $cargoTarget = Get-PackageRustTarget
+    $archiveTarget = if ([string]::IsNullOrWhiteSpace($cargoTarget)) { "native-windows" } else { $cargoTarget }
     $outDir = Join-Path $ProjectRoot "dist\beebotos"
-    $archive = Join-Path $ProjectRoot "dist\beebotos-x64-pc-windows-msvc.zip"
+    $archive = Join-Path $ProjectRoot "dist\beebotos-$archiveTarget.zip"
+
+    if (-not [string]::IsNullOrWhiteSpace($cargoTarget)) {
+        Print-Info "Packaging cargo target: $cargoTarget"
+        try {
+            $installedTargets = rustup target list --installed
+            if ($cargoTarget -notin $installedTargets) {
+                Print-Error "Rust target is not installed: $cargoTarget"
+                Print-Info "Install it with: rustup target add $cargoTarget"
+                exit 1
+            }
+        } catch {
+            Print-Warn "Could not verify installed rust targets: $($_.Exception.Message)"
+        }
+    } else {
+        Print-Info "Packaging native Windows target"
+    }
+
+    $buildList = if ($target -eq "all") { @("gateway", "web", "beehub") } else { @($target) }
+    foreach ($svcName in $buildList) {
+        if ($svcName -eq "cli") { continue }
+        if (-not (Build-Service $svcName $cargoTarget)) {
+            Print-Error "Cannot pack because build failed: $svcName"
+            exit 1
+        }
+    }
 
     if (Test-Path $outDir) { Remove-Item -Recurse -Force $outDir }
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
     if ($target -eq "all" -or $target -eq "gateway") {
-        Copy-Item (Join-Path $ProjectRoot "target\release\beebotos-gateway.exe") $outDir
+        if (-not (Copy-RequiredFile (Get-BinaryPath "beebotos-gateway" $cargoTarget) $outDir)) { exit 1 }
         Copy-Item -Recurse (Join-Path $ProjectRoot "migrations_sqlite") $outDir
     }
     if ($target -eq "all" -or $target -eq "web") {
-        Copy-Item (Join-Path $ProjectRoot "target\release\web-server.exe") $outDir
+        if (-not (Copy-RequiredFile (Get-BinaryPath "web-server" $cargoTarget) $outDir)) { exit 1 }
         $pkgSource = Join-Path $ProjectRoot "apps\web\dist"
         $pkgDest = $outDir
         if (-not (Test-Path $pkgSource)) {
@@ -296,7 +378,7 @@ function Pack-Release($target = "all") {
         }
     }
     if ($target -eq "all" -or $target -eq "beehub") {
-        $beehubPath = Join-Path $ProjectRoot "target\release\beehub.exe"
+        $beehubPath = Get-BinaryPath "beehub" $cargoTarget
         if (Test-Path $beehubPath) {
             Copy-Item $beehubPath $outDir
         } else {

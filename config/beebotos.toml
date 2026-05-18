@@ -66,7 +66,7 @@ system_prompt = "You are a helpful assistant."
 
 [models.deepseek]
 base_url = "https://api.deepseek.com/v1"
-model = "deepseek-v4-pro"
+model = "deepseek-v4-flash"
 reasoning_effort = "high"
 temperature = 0.7
 thinking = "enabled"
@@ -129,43 +129,3 @@ cert_path = "data/certs/server.crt"
 enabled = false
 key_path = "data/certs/server.key"
 mutual_tls = false
-
-# ── MCP (Model Context Protocol) ──
-# Connect to external MCP servers on startup.
-# Each server needs a unique name and a transport configuration.
-#
-# Example: stdio transport (local subprocess)
-# [[mcp.servers]]
-# name = "filesystem"
-# transport = "stdio"
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-#
-# Example: HTTP transport (remote server)
-# [[mcp.servers]]
-# name = "github"
-# transport = "http"
-# url = "https://api.github.com/mcp"
-# auth_token = "ghp_xxxxxxxxxxxx"
-# use_sse = true
-
-# Alpaca Trading API MCP Server
-# Provides 60+ tools for stock trading, market data, and account management.
-# Requires ALPACA_API_KEY and ALPACA_SECRET_KEY from https://alpaca.markets/
-[[mcp.servers]]
-name = "alpaca"
-transport = "stdio"
-command = "uv"
-args = ["run", "--quiet", "python", "-m", "alpaca_mcp_server.cli"]
-working_dir = "/root/alpaca-mcp-server"
-env = { ALPACA_API_KEY = "${ALPACA_API_KEY}", ALPACA_SECRET_KEY = "${ALPACA_SECRET_KEY}" }
-
-[mcp]
-auto_init = true
-timeout_ms = 60000  # 🆕 FIX: Increased from 30s to 60s — Alpaca API crypto data queries often exceed 30s during market hours
-retry_count = 3
-# Security: enforce HTTPS for HTTP transport URLs (reject http://)
-enforce_tls = true
-# Security: allowed commands for stdio transport (empty = allow all)
-# Examples: ["npx", "python", "/usr/local/bin/mcp-server"]
-allowed_commands = []
