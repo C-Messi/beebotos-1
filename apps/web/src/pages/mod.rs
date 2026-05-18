@@ -3,6 +3,7 @@
 //! 包含应用的所有页面组件
 
 pub mod agent_detail;
+pub mod ai_commerce;
 pub mod agents;
 pub mod browser;
 pub mod channels;
@@ -24,6 +25,7 @@ pub mod workflow_detail;
 pub mod workflows;
 
 pub use agent_detail::AgentDetail;
+pub use ai_commerce::AiCommercePage;
 pub use agents::AgentsPage;
 pub use browser::BrowserPage;
 pub use channels::ChannelsPage;
@@ -52,6 +54,7 @@ mod tests {
     fn test_page_exports() {
         // 验证页面组件正确导出
         let _ = Home;
+        let _ = AiCommercePage;
         let _ = AgentsPage;
         let _ = AgentDetail;
         let _ = DaoPage;
