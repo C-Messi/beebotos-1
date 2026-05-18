@@ -398,6 +398,10 @@ function Pack-Release($target = "all") {
         }
     }
 
+    if (Test-Path (Join-Path $ProjectRoot "skills")) {
+        Copy-Item -Recurse (Join-Path $ProjectRoot "skills") $outDir
+    }
+
     Copy-Item (Join-Path $ProjectRoot "beebotos-run.ps1") $outDir
 
     Compress-Archive -Path $outDir -DestinationPath $archive -Force

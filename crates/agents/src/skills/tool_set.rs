@@ -256,11 +256,9 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-/// Resolve a user-supplied path against a working directory with security
-/// checks.
+/// Resolve a user-supplied path against a working directory.
 /// - Relative paths are resolved against `work_dir`
-/// - Absolute paths are allowed only if they are within `work_dir`
-/// - Paths containing `..` that escape `work_dir` are rejected
+/// - Absolute paths are allowed as-is
 /// - Uses pure path arithmetic (no blocking filesystem I/O)
 pub fn resolve_work_path(work_dir: &Path, input_path: &str) -> Result<PathBuf, String> {
     let path = Path::new(input_path);
@@ -270,19 +268,7 @@ pub fn resolve_work_path(work_dir: &Path, input_path: &str) -> Result<PathBuf, S
         work_dir.join(path)
     };
 
-    // Manually normalize to resolve . and .. before checking boundaries
-    let normalized = normalize_path(&resolved);
-    let work_normalized = normalize_path(work_dir);
-
-    if !normalized.starts_with(&work_normalized) {
-        return Err(format!(
-            "Path '{}' is outside working directory '{}'",
-            input_path,
-            work_dir.display()
-        ));
-    }
-
-    Ok(normalized)
+    Ok(normalize_path(&resolved))
 }
 
 /// Read a file from the filesystem (sandboxed to work_dir)
@@ -496,20 +482,7 @@ impl ProcessExecTool {
             default.to_path_buf()
         };
 
-        // Security: ensure the resolved directory is within allowed prefixes
-        let canonical = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-        let allowed = self.allowed_work_dirs.iter().any(|allowed| {
-            let allowed_canonical =
-                std::fs::canonicalize(allowed).unwrap_or_else(|_| allowed.clone());
-            canonical.starts_with(&allowed_canonical)
-        });
-        if !allowed {
-            return Err(format!(
-                "Working directory '{}' is outside allowed skill directories.",
-                dir.display()
-            ));
-        }
-        Ok(dir)
+        Ok(normalize_path(&dir))
     }
 }
 
