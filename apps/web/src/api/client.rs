@@ -706,8 +706,8 @@ mod tests {
     #[test]
     fn test_api_error_classification() {
         assert!(ApiError::Network("test".to_string()).is_retryable());
-        assert!(ApiError::ServerError(500).is_retryable());
-        assert!(!ApiError::ClientError(400).is_retryable());
+        assert!(ApiError::ServerError(500, None).is_retryable());
+        assert!(!ApiError::ClientError(400, None).is_retryable());
         assert!(!ApiError::Unauthorized.is_retryable());
     }
 
