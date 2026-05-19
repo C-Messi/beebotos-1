@@ -52,6 +52,7 @@ use tokio::time::{interval, Duration};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::context::assembler::DEFAULT_CONTEXT_WINDOW;
 use crate::error::Result;
 
 /// Default token threshold percentage (80%)
@@ -60,8 +61,8 @@ pub const DEFAULT_TOKEN_THRESHOLD: f32 = 0.8;
 pub const DEFAULT_FLUSH_INTERVAL_SECS: u64 = 1800;
 /// Default minimum content importance score
 pub const DEFAULT_IMPORTANCE_THRESHOLD: f32 = 0.6;
-/// Maximum tokens in context window (default: 4K for most models)
-pub const DEFAULT_MAX_CONTEXT_TOKENS: usize = 4096;
+/// Maximum tokens in context window.
+pub const DEFAULT_MAX_CONTEXT_TOKENS: usize = DEFAULT_CONTEXT_WINDOW;
 
 /// Flush trigger types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
