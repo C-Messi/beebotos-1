@@ -248,6 +248,12 @@ impl KernelAgentConfig {
 pub struct KernelTaskRequest {
     /// Task to execute
     pub task: Task,
+    /// Per-request execution timeout in seconds.
+    ///
+    /// This lets the kernel worker stop the actual agent future before the
+    /// gateway-side caller gives up, so the single worker loop can continue
+    /// receiving later user messages.
+    pub timeout_secs: u64,
     /// Channel to send result back
     pub result_tx: oneshot::Sender<Result<TaskResult>>,
 }
@@ -382,7 +388,11 @@ impl AgentKernelTask {
     ///
     /// 🟢 P1 FIX: Capability verification before task execution
     async fn handle_task_request(&self, request: KernelTaskRequest) {
-        let KernelTaskRequest { task, result_tx } = request;
+        let KernelTaskRequest {
+            task,
+            timeout_secs,
+            result_tx,
+        } = request;
 
         info!(
             "Agent {} executing task {} in kernel sandbox",
@@ -410,11 +420,42 @@ impl AgentKernelTask {
         })
         .await;
 
-        // Execute task
-        let result = {
-            let mut agent = self.agent.write().await;
-            agent.execute_task(task).await
+        let task_id = task.id.clone();
+        let timeout_secs = if timeout_secs == 0 {
+            self.config.task_execution_timeout_secs
+        } else {
+            timeout_secs
         };
+
+        // Execute task with a real worker-side timeout. The gateway caller also
+        // has a timeout, but this is the one that keeps the serial kernel task
+        // loop from getting stuck behind an abandoned request.
+        let result =
+            match tokio::time::timeout(tokio::time::Duration::from_secs(timeout_secs), async {
+                let mut agent = self.agent.write().await;
+                agent.execute_task(task).await
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!(
+                        "Agent {} task {} timed out after {}s",
+                        self.config.agent_id, task_id, timeout_secs
+                    );
+
+                    // `Agent::execute_task` normally returns the in-memory agent to
+                    // Idle. If the future is cancelled by timeout, do that cleanup
+                    // here before accepting the next request.
+                    let mut agent = self.agent.write().await;
+                    agent.state = AgentState::Idle;
+
+                    Err(AgentError::Timeout(format!(
+                        "Task {} timed out after {}s",
+                        task_id, timeout_secs
+                    )))
+                }
+            };
 
         // Handle result
         let success = result.is_ok();
