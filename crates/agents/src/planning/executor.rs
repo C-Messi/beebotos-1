@@ -79,6 +79,8 @@ struct ExecutionState {
     failed_steps: HashMap<PlanId, HashSet<usize>>,
     /// Step results
     results: HashMap<String, serde_json::Value>,
+    /// Cancelled plans
+    cancelled_plans: HashSet<PlanId>,
 }
 
 /// Execution context for a single step
@@ -159,6 +161,8 @@ pub enum ExecutionEvent {
     },
     /// Plan completed
     PlanCompleted { plan_id: PlanId, success: bool },
+    /// Plan cancelled
+    PlanCancelled { plan_id: PlanId },
 }
 
 /// Action handler trait
@@ -571,6 +575,7 @@ impl PlanExecutor {
         {
             let mut state = self.state.write().await;
             state.active_plans.insert(plan.id.clone());
+            state.cancelled_plans.remove(&plan.id);
         }
 
         self.event_tx
@@ -580,11 +585,19 @@ impl PlanExecutor {
             .await
             .ok();
 
-        // Execute based on strategy
-        let result = match self.config.strategy {
-            ExecutionStrategy::Sequential => self.execute_sequential(plan).await,
-            ExecutionStrategy::Parallel => self.execute_parallel(plan).await,
-            ExecutionStrategy::Adaptive => self.execute_adaptive(plan).await,
+        // Execute based on strategy with a whole-plan deadline.
+        let plan_timeout = plan.timeout.unwrap_or(self.config.plan_timeout);
+        let result = match timeout(plan_timeout, async {
+            match self.config.strategy {
+                ExecutionStrategy::Sequential => self.execute_sequential(plan).await,
+                ExecutionStrategy::Parallel => self.execute_parallel(plan).await,
+                ExecutionStrategy::Adaptive => self.execute_adaptive(plan).await,
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(PlanningError::Timeout),
         };
 
         // Update plan status
@@ -599,6 +612,7 @@ impl PlanExecutor {
             state.active_plans.remove(&plan.id);
             state.completed_steps.remove(&plan.id);
             state.failed_steps.remove(&plan.id);
+            state.cancelled_plans.remove(&plan.id);
         }
 
         let duration = start_time.elapsed();
@@ -619,6 +633,7 @@ impl PlanExecutor {
     /// Execute steps sequentially
     async fn execute_sequential(&self, plan: &mut Plan) -> PlanningResult<ExecutionResult> {
         for i in 0..plan.steps.len() {
+            self.ensure_not_cancelled(&plan.id).await?;
             let result = self.execute_step(plan, i).await?;
 
             if !result.success && !self.config.continue_on_failure {
@@ -638,6 +653,7 @@ impl PlanExecutor {
         let _semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.max_concurrency));
 
         while completed.len() < plan.steps.len() {
+            self.ensure_not_cancelled(&plan.id).await?;
             // Find ready steps
             let ready: Vec<usize> = plan
                 .get_ready_steps(&completed.iter().cloned().collect::<Vec<_>>())
@@ -655,6 +671,7 @@ impl PlanExecutor {
             // Execute ready steps in parallel using sequential execution
             // (parallel execution requires 'static lifetime which is complex with &self)
             for step_idx in ready {
+                self.ensure_not_cancelled(&plan.id).await?;
                 let result = self.execute_step(plan, step_idx).await?;
                 if result.success {
                     completed.insert(step_idx);
@@ -676,6 +693,7 @@ impl PlanExecutor {
         let mut completed = HashSet::new();
 
         while completed.len() < plan.steps.len() {
+            self.ensure_not_cancelled(&plan.id).await?;
             let ready = plan.get_ready_steps(&completed.iter().copied().collect::<Vec<_>>());
 
             if ready.is_empty() {
@@ -686,6 +704,7 @@ impl PlanExecutor {
             if ready.len() == 1 || !self.config.enable_parallel {
                 // Sequential for single step
                 let idx = ready[0];
+                self.ensure_not_cancelled(&plan.id).await?;
                 let result = self.execute_step(plan, idx).await?;
 
                 if result.success {
@@ -701,6 +720,7 @@ impl PlanExecutor {
                 let mut results = Vec::new();
 
                 for idx in ready.clone() {
+                    self.ensure_not_cancelled(&plan.id).await?;
                     let result = self.execute_step(plan, idx).await;
                     results.push((idx, result));
                 }
@@ -755,14 +775,9 @@ impl PlanExecutor {
             .await
             .ok();
 
-        let context = ExecutionContext {
-            plan_id: plan.id.clone(),
-            step_index,
-            step_id: step.id.clone(),
-            previous_results,
-            attempt: 1,
-            timeout: self.config.step_timeout,
-        };
+        let plan_id = plan.id.clone();
+        let step_id = step.id.clone();
+        let actions = step.actions.clone();
 
         // Execute with timeout and retries
         let mut last_result = None;
@@ -770,10 +785,20 @@ impl PlanExecutor {
 
         while attempts < self.config.max_retries {
             attempts += 1;
+            self.ensure_not_cancelled(&plan_id).await?;
+
+            let context = ExecutionContext {
+                plan_id: plan_id.clone(),
+                step_index,
+                step_id: step_id.clone(),
+                previous_results: previous_results.clone(),
+                attempt: attempts,
+                timeout: self.config.step_timeout,
+            };
 
             let result = timeout(
                 self.config.step_timeout,
-                self.execute_step_actions(&step.actions, &context),
+                self.execute_step_actions(&actions, &context),
             )
             .await;
 
@@ -812,7 +837,19 @@ impl PlanExecutor {
                             "Step {} failed, retrying ({}/{})",
                             step_index, attempts, self.config.max_retries
                         );
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        self.event_tx
+                            .send(ExecutionEvent::StepFailed {
+                                plan_id: plan_id.clone(),
+                                step_index,
+                                error: exec_result
+                                    .error
+                                    .clone()
+                                    .unwrap_or_else(|| "Step failed".to_string()),
+                                will_retry: true,
+                            })
+                            .await
+                            .ok();
+                        self.sleep_before_retry(attempts).await;
                     }
                 }
                 Ok(Err(e)) => {
@@ -820,12 +857,35 @@ impl PlanExecutor {
                     if attempts >= self.config.max_retries {
                         break;
                     }
+                    self.event_tx
+                        .send(ExecutionEvent::StepFailed {
+                            plan_id: plan_id.clone(),
+                            step_index,
+                            error: e.to_string(),
+                            will_retry: true,
+                        })
+                        .await
+                        .ok();
+                    self.sleep_before_retry(attempts).await;
                 }
                 Err(_) => {
                     last_result = Some(ExecutionResult::failure("Step timeout"));
                     if attempts >= self.config.max_retries {
                         break;
                     }
+                    self.event_tx
+                        .send(ExecutionEvent::StepFailed {
+                            plan_id: plan_id.clone(),
+                            step_index,
+                            error: format!(
+                                "Step timed out after {} seconds",
+                                self.config.step_timeout.as_secs()
+                            ),
+                            will_retry: true,
+                        })
+                        .await
+                        .ok();
+                    self.sleep_before_retry(attempts).await;
                 }
             }
         }
@@ -912,13 +972,38 @@ impl PlanExecutor {
     pub async fn cancel(&self, plan_id: &PlanId) {
         let mut state = self.state.write().await;
         state.active_plans.remove(plan_id);
+        state.cancelled_plans.insert(plan_id.clone());
         info!("Cancelled plan execution: {}", plan_id);
+        self.event_tx
+            .send(ExecutionEvent::PlanCancelled {
+                plan_id: plan_id.clone(),
+            })
+            .await
+            .ok();
     }
 
     /// Check if plan is active
     pub async fn is_active(&self, plan_id: &PlanId) -> bool {
         let state = self.state.read().await;
         state.active_plans.contains(plan_id)
+    }
+
+    async fn ensure_not_cancelled(&self, plan_id: &PlanId) -> PlanningResult<()> {
+        let state = self.state.read().await;
+        if state.cancelled_plans.contains(plan_id) {
+            return Err(PlanningError::ExecutionFailed(format!(
+                "Plan {} was cancelled",
+                plan_id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn sleep_before_retry(&self, attempt: u32) {
+        let base_ms = 100u64;
+        let capped_attempt = attempt.min(6);
+        let delay_ms = base_ms.saturating_mul(1u64 << capped_attempt);
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
 }
 

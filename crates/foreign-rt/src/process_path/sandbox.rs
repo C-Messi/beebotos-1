@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-
 use crate::script_task::SandboxRequirements;
 
 /// Sandbox configuration for process execution
@@ -84,7 +83,11 @@ pub enum SeccompProfile {
 
 impl ProcessSandboxConfig {
     /// Create a restrictive sandbox config from requirements
-    pub fn from_requirements(id: impl Into<String>, requirements: &SandboxRequirements, rootfs: PathBuf) -> Self {
+    pub fn from_requirements(
+        id: impl Into<String>,
+        requirements: &SandboxRequirements,
+        rootfs: PathBuf,
+    ) -> Self {
         let mut bind_mounts = Vec::new();
 
         // Add workspace mappings
@@ -145,18 +148,15 @@ gidmap {{ inside_id: "{}" outside_id: "{}" count: 1 }}
         // Resource limits
         config.push_str(&format!(
             "rlimit_as {{ soft: {} hard: {} }}\n",
-            self.resource_limits.max_memory_bytes,
-            self.resource_limits.max_memory_bytes
+            self.resource_limits.max_memory_bytes, self.resource_limits.max_memory_bytes
         ));
         config.push_str(&format!(
             "rlimit_cpu {{ soft: {} hard: {} }}\n",
-            self.resource_limits.max_cpu_time_secs,
-            self.resource_limits.max_cpu_time_secs
+            self.resource_limits.max_cpu_time_secs, self.resource_limits.max_cpu_time_secs
         ));
         config.push_str(&format!(
             "rlimit_nofile {{ soft: {} hard: {} }}\n",
-            self.resource_limits.max_open_files,
-            self.resource_limits.max_open_files
+            self.resource_limits.max_open_files, self.resource_limits.max_open_files
         ));
 
         // Bind mounts
@@ -177,7 +177,10 @@ gidmap {{ inside_id: "{}" outside_id: "{}" count: 1 }}
 
         // Environment variables
         for (key, value) in &self.env_vars {
-            config.push_str(&format!("env {{ name: \"{}\" value: \"{}\" }}\n", key, value));
+            config.push_str(&format!(
+                "env {{ name: \"{}\" value: \"{}\" }}\n",
+                key, value
+            ));
         }
 
         // Network policy

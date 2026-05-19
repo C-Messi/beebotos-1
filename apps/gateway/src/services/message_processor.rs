@@ -1090,6 +1090,12 @@ impl MessageProcessor {
 
             completion_result
         });
+        let _ = beebotos_agents::session_cancellation::set_abort_handle(
+            &db_session_id_cleanup,
+            cancel_gen,
+            work_handle.abort_handle(),
+        )
+        .await;
 
         tokio::spawn(async move {
             match work_handle.await {
@@ -1119,11 +1125,8 @@ impl MessageProcessor {
             // Unregister cancellation token when background work completes or
             // is aborted. Only remove if the generation matches, preventing
             // race with newer tasks.
-            beebotos_agents::session_cancellation::unregister(
-                &db_session_id_cleanup,
-                cancel_gen,
-            )
-            .await;
+            beebotos_agents::session_cancellation::unregister(&db_session_id_cleanup, cancel_gen)
+                .await;
         });
 
         Ok(())

@@ -91,18 +91,28 @@ impl<T: Send> ObjectPool<T> {
 
             if let Some(mut instance) = available.pop_front() {
                 instance.mark_used();
-                debug!("Acquired instance from pool (use_count: {})", instance.use_count);
+                debug!(
+                    "Acquired instance from pool (use_count: {})",
+                    instance.use_count
+                );
                 return Ok(instance);
             }
         }
 
         // Create new instance if under max size
-        let total = self.total_created.load(std::sync::atomic::Ordering::Relaxed);
+        let total = self
+            .total_created
+            .load(std::sync::atomic::Ordering::Relaxed);
         if total < self.max_size {
             match (self.factory)() {
                 Ok(instance) => {
-                    self.total_created.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    info!("Created new pool instance ({}/{})", total + 1, self.max_size);
+                    self.total_created
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    info!(
+                        "Created new pool instance ({}/{})",
+                        total + 1,
+                        self.max_size
+                    );
                     Ok(PooledInstance::new(instance))
                 }
                 Err(e) => {
@@ -137,7 +147,8 @@ impl<T: Send> ObjectPool<T> {
 
     /// Get total created count
     pub fn total_created(&self) -> usize {
-        self.total_created.load(std::sync::atomic::Ordering::Relaxed)
+        self.total_created
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Pre-warm the pool with `count` instances
@@ -146,8 +157,11 @@ impl<T: Send> ObjectPool<T> {
         for i in 0..to_create {
             match (self.factory)() {
                 Ok(instance) => {
-                    self.total_created.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    self.available.lock().push_back(PooledInstance::new(instance));
+                    self.total_created
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.available
+                        .lock()
+                        .push_back(PooledInstance::new(instance));
                     debug!("Pre-warmed instance {}/{}", i + 1, to_create);
                 }
                 Err(e) => {
@@ -164,7 +178,8 @@ impl<T: Send> ObjectPool<T> {
     pub fn clear(&self) {
         let mut available = self.available.lock();
         available.clear();
-        self.total_created.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.total_created
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         info!("Pool cleared");
     }
 }
@@ -219,7 +234,9 @@ impl RuntimePool {
         let pool = self
             .wasm_pools
             .get(&runtime)
-            .ok_or_else(|| ForeignRtError::RuntimeNotAvailable(format!("No WASM pool for {}", runtime)))?
+            .ok_or_else(|| {
+                ForeignRtError::RuntimeNotAvailable(format!("No WASM pool for {}", runtime))
+            })?
             .clone();
 
         // Downcast to concrete pool type
@@ -239,7 +256,9 @@ impl RuntimePool {
         let pool = self
             .wasm_pools
             .get(&runtime)
-            .ok_or_else(|| ForeignRtError::RuntimeNotAvailable(format!("No WASM pool for {}", runtime)))?
+            .ok_or_else(|| {
+                ForeignRtError::RuntimeNotAvailable(format!("No WASM pool for {}", runtime))
+            })?
             .clone();
 
         let typed_pool = pool
@@ -255,10 +274,9 @@ impl RuntimePool {
         &self,
         runtime: ForeignRuntime,
     ) -> Result<tokio::sync::SemaphorePermit<'_>> {
-        let semaphore = self
-            .process_slots
-            .get(&runtime)
-            .ok_or_else(|| ForeignRtError::RuntimeNotAvailable(format!("No process slots for {}", runtime)))?;
+        let semaphore = self.process_slots.get(&runtime).ok_or_else(|| {
+            ForeignRtError::RuntimeNotAvailable(format!("No process slots for {}", runtime))
+        })?;
 
         semaphore
             .acquire()
@@ -388,8 +406,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
 
         // Acquire should drop expired instances and create new ones
-        // Since we have 0 available now (both expired), but total_created is 2 (at max_size)
-        // we need to clear the pool first to allow recreation
+        // Since we have 0 available now (both expired), but total_created is 2 (at
+        // max_size) we need to clear the pool first to allow recreation
         pool.clear();
         pool.prewarm(1).unwrap();
         let instance = pool.acquire().unwrap();
@@ -401,7 +419,10 @@ mod tests {
         let pool = RuntimePool::new(WasmPoolConfig::default());
 
         // Acquire slot
-        let permit = pool.acquire_process_slot(ForeignRuntime::Python).await.unwrap();
+        let permit = pool
+            .acquire_process_slot(ForeignRuntime::Python)
+            .await
+            .unwrap();
         assert_eq!(pool.process_available(ForeignRuntime::Python), 9);
         drop(permit);
 

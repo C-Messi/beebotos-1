@@ -3450,7 +3450,8 @@ impl Agent {
                         crate::react_trace::ReActTracePhase::ToolStarted,
                     )
                     .with_tool(tool_call.function.name.clone(), tool_call.id.clone())
-                    .with_arguments_preview(Self::tool_arguments_preview(tool_call)),
+                    .with_arguments_preview(Self::tool_arguments_preview(tool_call))
+                    .with_reasoning(turn.reasoning_content.as_deref().unwrap_or("")),
                 )
                 .await;
                 let output = match self
@@ -4198,6 +4199,10 @@ impl Agent {
                 max_rounds: crate::react_trace::clamp_react_max_tool_rounds(self.max_rounds)
                     as usize,
                 round_timeout_sec: 30,
+                tool_timeout_sec: 60,
+                max_parse_failures: 3,
+                max_duplicate_tool_calls: 2,
+                max_consecutive_tool_errors: 3,
                 enable_reflection: true,
                 require_structured_output: true,
                 cancel_rx,
@@ -6177,7 +6182,8 @@ impl Agent {
                             crate::react_trace::ReActTracePhase::ToolStarted,
                         )
                         .with_tool(tool_call.function.name.clone(), tool_call.id.clone())
-                        .with_arguments_preview(Self::tool_arguments_preview(tool_call)),
+                        .with_arguments_preview(Self::tool_arguments_preview(tool_call))
+                        .with_reasoning(turn.reasoning_content.as_deref().unwrap_or("")),
                     )
                     .await;
                     let output = match self

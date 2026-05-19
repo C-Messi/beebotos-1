@@ -323,7 +323,7 @@ impl GatewayError {
             Self::Timeout { upstream, .. } => format!("Request to {} timed out", upstream),
             Self::Config { .. } => "Configuration error".to_string(),
             Self::Upstream { message, .. } => format!("Upstream error: {}", message),
-            Self::Agent { message } => format!("Agent error: {}", message),
+            Self::Agent { message } => message.clone(),
             Self::State { message } => format!("State error: {}", message),
         }
     }

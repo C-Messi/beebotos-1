@@ -260,12 +260,18 @@ impl ExecutionRoute {
 
     /// Check if this is a WASM route
     pub fn is_wasm(&self) -> bool {
-        matches!(self, ExecutionRoute::WasmPyodide | ExecutionRoute::WasmQuickJS)
+        matches!(
+            self,
+            ExecutionRoute::WasmPyodide | ExecutionRoute::WasmQuickJS
+        )
     }
 
     /// Check if this is a process route
     pub fn is_process(&self) -> bool {
-        matches!(self, ExecutionRoute::ProcessPython | ExecutionRoute::ProcessNodeJs)
+        matches!(
+            self,
+            ExecutionRoute::ProcessPython | ExecutionRoute::ProcessNodeJs
+        )
     }
 }
 

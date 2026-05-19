@@ -121,7 +121,10 @@ impl CapabilityLevel {
 
     /// Check if level requires TEE
     pub fn requires_tee(&self) -> bool {
-        matches!(self, Self::L9ChainWriteHigh | Self::L10SystemAdmin | Self::L15ForeignRuntimePrivileged)
+        matches!(
+            self,
+            Self::L9ChainWriteHigh | Self::L10SystemAdmin | Self::L15ForeignRuntimePrivileged
+        )
     }
 
     /// Check if level requires multi-sig

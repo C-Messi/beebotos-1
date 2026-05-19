@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use tracing::info;
 
-
 use crate::config::WasmPathConfig;
 use crate::error::{ForeignRtError, Result};
 use crate::metering::{ForeignGasReport, GasOracle, StandardGasOracle};
@@ -63,8 +62,9 @@ impl WasmRuntimeEngine {
 
     /// Compile a WASM module
     pub fn compile(&self, bytes: &[u8]) -> Result<wasmtime::Module> {
-        wasmtime::Module::new(&self.engine, bytes)
-            .map_err(|e| ForeignRtError::CompilationFailed(format!("WASM compilation failed: {}", e)))
+        wasmtime::Module::new(&self.engine, bytes).map_err(|e| {
+            ForeignRtError::CompilationFailed(format!("WASM compilation failed: {}", e))
+        })
     }
 
     /// Get gas oracle
@@ -181,7 +181,10 @@ mod tests {
     fn test_parse_output_string() {
         let output = "Hello, World!";
         let parsed = WasmExecutorUtils::parse_output(output).unwrap();
-        assert_eq!(parsed, serde_json::Value::String("Hello, World!".to_string()));
+        assert_eq!(
+            parsed,
+            serde_json::Value::String("Hello, World!".to_string())
+        );
     }
 
     #[test]

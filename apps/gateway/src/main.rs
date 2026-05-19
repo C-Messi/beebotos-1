@@ -1532,69 +1532,103 @@ async fn main() -> anyhow::Result<()> {
                                 channel_id,
                                 message
                             } = &event {
-                                // Try Agent-aware processing first
-                                if let (Some(processor), Some(resolver)) = (
-                                    app_state_clone.message_processor.as_ref(),
-                                    app_state_clone.agent_resolver.as_ref()
-                                ) {
-                                    if let Err(e) = processor.handle_message_via_agent(
-                                        *platform,
-                                        channel_id,
-                                        message.clone(),
-                                        resolver.clone(),
-                                        app_state_clone.agent_runtime.clone(),
-                                        None, // regular messages don't need completion callback
-                                    ).await {
-                                        error!("❌ Agent message processing error: {}", e);
-                                    }
-                                } else {
-                                    // Fallback to direct LLM processing
-                                    warn!("⚠️  MessageProcessor or AgentResolver not available, falling back to direct LLM");
-                                    let llm_svc = &app_state_clone.llm_service;
-                                    let llm_response = if let Some(channel) = reg.get_channel_by_platform(*platform).await {
-                                        let channel_clone = channel.clone();
-                                        let download_fn = move |key: &str, msg_id: Option<&str>| {
-                                            let chan = channel_clone.clone();
-                                            let key = key.to_string();
-                                            let msg_id = msg_id.map(|s| s.to_string());
-                                            async move {
-                                                chan.read().await.download_image(&key, msg_id.as_deref()).await
-                                            }
-                                        };
-                                        llm_svc.process_message_with_images(message, Some(download_fn)).await
+                                let platform = *platform;
+                                let channel_id = channel_id.clone();
+                                let message = message.clone();
+                                let app_state_task = app_state_clone.clone();
+                                let reg = reg.clone();
+                                tokio::spawn(async move {
+                                    // Try Agent-aware processing first
+                                    if let (Some(processor), Some(resolver)) = (
+                                        app_state_task.message_processor.as_ref(),
+                                        app_state_task.agent_resolver.as_ref(),
+                                    ) {
+                                        if let Err(e) = processor
+                                            .handle_message_via_agent(
+                                                platform,
+                                                &channel_id,
+                                                message,
+                                                resolver.clone(),
+                                                app_state_task.agent_runtime.clone(),
+                                                None, // regular messages don't need completion callback
+                                            )
+                                            .await
+                                        {
+                                            error!("❌ Agent message processing error: {}", e);
+                                        }
                                     } else {
-                                        llm_svc.process_message(message).await
-                                    };
+                                        // Fallback to direct LLM processing
+                                        warn!("⚠️  MessageProcessor or AgentResolver not available, falling back to direct LLM");
+                                        let llm_svc = &app_state_task.llm_service;
+                                        let llm_response = if let Some(channel) =
+                                            reg.get_channel_by_platform(platform).await
+                                        {
+                                            let channel_clone = channel.clone();
+                                            let download_fn =
+                                                move |key: &str, msg_id: Option<&str>| {
+                                                    let chan = channel_clone.clone();
+                                                    let key = key.to_string();
+                                                    let msg_id = msg_id.map(|s| s.to_string());
+                                                    async move {
+                                                        chan.read()
+                                                            .await
+                                                            .download_image(
+                                                                &key,
+                                                                msg_id.as_deref(),
+                                                            )
+                                                            .await
+                                                    }
+                                                };
+                                            llm_svc
+                                                .process_message_with_images(
+                                                    &message,
+                                                    Some(download_fn),
+                                                )
+                                                .await
+                                        } else {
+                                            llm_svc.process_message(&message).await
+                                        };
 
-                                    match llm_response {
-                                        Ok(response) => {
-                                            info!("🤖 LLM response: {}", response);
+                                        match llm_response {
+                                            Ok(response) => {
+                                                info!("🤖 LLM response: {}", response);
 
-                                            let reply_message = beebotos_agents::communication::Message {
-                                                id: uuid::Uuid::new_v4(),
-                                                thread_id: message.thread_id,
-                                                platform: *platform,
-                                                message_type: beebotos_agents::communication::MessageType::Text,
-                                                content: response,
-                                                metadata: std::collections::HashMap::new(),
-                                                timestamp: chrono::Utc::now(),
-                                            };
+                                                let reply_message = beebotos_agents::communication::Message {
+                                                    id: uuid::Uuid::new_v4(),
+                                                    thread_id: message.thread_id,
+                                                    platform,
+                                                    message_type: beebotos_agents::communication::MessageType::Text,
+                                                    content: response,
+                                                    metadata: std::collections::HashMap::new(),
+                                                    timestamp: chrono::Utc::now(),
+                                                };
 
-                                            if let Some(channel) = reg.get_channel_by_platform(*platform).await {
-                                                if let Err(e) = channel.read().await.send(channel_id, &reply_message).await {
-                                                    error!("❌ Failed to send reply: {}", e);
+                                                if let Some(channel) =
+                                                    reg.get_channel_by_platform(platform).await
+                                                {
+                                                    if let Err(e) = channel
+                                                        .read()
+                                                        .await
+                                                        .send(&channel_id, &reply_message)
+                                                        .await
+                                                    {
+                                                        error!("❌ Failed to send reply: {}", e);
+                                                    } else {
+                                                        info!("✅ Reply sent to {:?} channel {}", platform, channel_id);
+                                                    }
                                                 } else {
-                                                    info!("✅ Reply sent to {:?} channel {}", platform, channel_id);
+                                                    error!(
+                                                        "❌ Channel for platform {:?} not found",
+                                                        platform
+                                                    );
                                                 }
-                                            } else {
-                                                error!("❌ Channel for platform {:?} not found", platform);
+                                            }
+                                            Err(e) => {
+                                                error!("❌ LLM processing error: {}", e);
                                             }
                                         }
-                                        Err(e) => {
-                                            error!("❌ LLM processing error: {}", e);
-                                        }
                                     }
-                                }
+                                });
                             }
                         } else {
                             warn!(

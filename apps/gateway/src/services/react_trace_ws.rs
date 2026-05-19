@@ -19,7 +19,7 @@ impl WebSocketReActTraceSink {
     }
 
     fn compatibility_tool_call(event: &ReActTraceEvent) -> Option<Value> {
-        if event.phase != ReActTracePhase::AssistantToolCall {
+        if event.phase != ReActTracePhase::ToolStarted {
             return None;
         }
 
@@ -38,7 +38,7 @@ impl WebSocketReActTraceSink {
         Some(json!({
             "round": event.round,
             "tool_name": event.tool_name.as_deref().unwrap_or("unknown"),
-            "reasoning": event.content_preview.as_deref().unwrap_or(""),
+            "reasoning": event.reasoning.as_deref().unwrap_or(""),
             "arguments": arguments,
             "status": "started",
         }))

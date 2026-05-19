@@ -144,8 +144,8 @@ impl WasmScriptExecutor {
     /// # Arguments
     /// * `module_bytes` - The WASM module bytes
     /// * `task` - The script task containing code, input, sandbox config
-    /// * `entrypoint` - The function to call (e.g., "_start" or "main").
-    ///   If "_start", uses WASI command convention.
+    /// * `entrypoint` - The function to call (e.g., "_start" or "main"). If
+    ///   "_start", uses WASI command convention.
     pub async fn execute(
         &self,
         module_bytes: &[u8],
@@ -163,10 +163,8 @@ impl WasmScriptExecutor {
         // 2. Prepare code input and arguments
         let code = match &task.source {
             crate::script_task::ScriptSource::Inline { code } => code.clone(),
-            crate::script_task::ScriptSource::File { path } => {
-                std::fs::read_to_string(path)
-                    .map_err(|e| ForeignRtError::Io(format!("Failed to read script file: {}", e)))?
-            }
+            crate::script_task::ScriptSource::File { path } => std::fs::read_to_string(path)
+                .map_err(|e| ForeignRtError::Io(format!("Failed to read script file: {}", e)))?,
             crate::script_task::ScriptSource::Prebuilt { module_id, .. } => {
                 return Err(ForeignRtError::InvalidConfig(format!(
                     "Prebuilt modules not supported in WASM path: {}",
@@ -248,22 +246,25 @@ impl WasmScriptExecutor {
 
         // 8. Create linker and add WASI preview1
         let mut linker = Linker::<ForeignPreview1State>::new(&self.engine);
-        wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |state| &mut state.wasi)
-            .map_err(|e| {
-                ForeignRtError::WasmRuntime(format!("Failed to add WASI to linker: {}", e))
-            })?;
+        wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |state| &mut state.wasi).map_err(
+            |e| ForeignRtError::WasmRuntime(format!("Failed to add WASI to linker: {}", e)),
+        )?;
 
         // 9. Instantiate module
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| ForeignRtError::WasmRuntime(format!("Failed to instantiate module: {}", e)))?;
+        let instance = linker.instantiate(&mut store, &module).map_err(|e| {
+            ForeignRtError::WasmRuntime(format!("Failed to instantiate module: {}", e))
+        })?;
 
         // 10. Call entrypoint
         let call_result = if entrypoint == "_start" {
             // WASI command entrypoint
-            if let Some(func) = instance.get_export(&mut store, "_start").and_then(|e| e.into_func()) {
-                func.call(&mut store, &[], &mut [])
-                    .map_err(|e| ForeignRtError::ExecutionFailed(format!("WASM _start failed: {}", e)))
+            if let Some(func) = instance
+                .get_export(&mut store, "_start")
+                .and_then(|e| e.into_func())
+            {
+                func.call(&mut store, &[], &mut []).map_err(|e| {
+                    ForeignRtError::ExecutionFailed(format!("WASM _start failed: {}", e))
+                })
             } else {
                 Err(ForeignRtError::ExecutionFailed(
                     "WASM module does not export _start".to_string(),
@@ -328,7 +329,11 @@ impl WasmScriptExecutor {
     }
 
     /// Get or compile a WASM module
-    pub(crate) fn get_or_compile_module(&self, bytes: &[u8], runtime: ForeignRuntime) -> Result<Module> {
+    pub(crate) fn get_or_compile_module(
+        &self,
+        bytes: &[u8],
+        runtime: ForeignRuntime,
+    ) -> Result<Module> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -345,7 +350,11 @@ impl WasmScriptExecutor {
             }
         }
 
-        debug!("Compiling WASM module: {} ({} bytes)", cache_key, bytes.len());
+        debug!(
+            "Compiling WASM module: {} ({} bytes)",
+            cache_key,
+            bytes.len()
+        );
         let module = Module::new(&self.engine, bytes).map_err(|e| {
             ForeignRtError::CompilationFailed(format!("WASM module compilation failed: {}", e))
         })?;

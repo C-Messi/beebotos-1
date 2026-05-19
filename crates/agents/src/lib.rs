@@ -220,9 +220,7 @@ pub use react_trace::{
 // 🟢 P1 FIX: Gateway AgentRuntime implementation
 pub use runtime::agent_runtime_impl::GatewayAgentRuntime;
 // 🆕 Foreign runtime executor for Python/Node.js support
-pub use runtime::foreign_executor::{
-    ForeignTaskExecutor, ForeignTaskExecutorBuilder,
-};
+pub use runtime::foreign_executor::{ForeignTaskExecutor, ForeignTaskExecutorBuilder};
 // 🟢 P1 FIX: Re-export runtime types for object pool and batch processing
 pub use runtime::{
     AgentRuntime, AgentRuntimeBuilder, BatchExecutor, BatchResult, RuntimeConfig,

@@ -108,5 +108,9 @@ pub async fn cancel(key: &str) -> bool {
 
 /// Get a receiver to watch for cancellation.
 pub async fn get_receiver(key: &str) -> Option<watch::Receiver<bool>> {
-    REGISTRY.read().await.get(key).map(|entry| entry.sender.subscribe())
+    REGISTRY
+        .read()
+        .await
+        .get(key)
+        .map(|entry| entry.sender.subscribe())
 }
