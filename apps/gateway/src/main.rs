@@ -223,6 +223,10 @@ pub struct AppState {
     pub mcp_manager: Option<Arc<beebotos_agents::mcp::MCPManager>>,
     /// Cron job service for scheduled task management
     pub cron_job_service: Option<Arc<crate::services::CronJobService>>,
+    /// Queue used by agent tools to register newly-created cron jobs after the
+    /// scheduler is initialized.
+    pub cron_registration_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::services::cron_job_service::CronJob>>,
     /// Foreign runtime manager for Python/Node.js script execution
     pub foreign_rt_manager: Option<Arc<beebotos_foreign_rt::DefaultForeignRuntimeManager>>,
 }
@@ -580,6 +584,9 @@ impl AppState {
             }
         }
 
+        let (cron_registration_tx, cron_registration_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::services::cron_job_service::CronJob>();
+
         let mut gateway_runtime = GatewayAgentRuntime::new(
             Some(kernel.clone()),
             Some(llm_interface),
@@ -609,6 +616,7 @@ impl AppState {
                     .clone()
                     .expect("CronJobService must be initialized before AgentRuntime"),
                 gateway_state_manager,
+                Some(cron_registration_tx),
             )));
 
         // Recover agents after MCP manager is configured so they have access to MCP
@@ -969,6 +977,7 @@ impl AppState {
             agent_event_bus: Some(beebotos_agents::events::AgentEventBus::new()),
             mcp_manager,
             cron_job_service,
+            cron_registration_rx: Some(cron_registration_rx),
             foreign_rt_manager,
         })
     }
@@ -980,16 +989,38 @@ impl AppState {
 struct GatewaySystemInfoProvider {
     cron_job_service: Arc<crate::services::CronJobService>,
     state_manager: Arc<beebotos_agents::state_manager::AgentStateManager>,
+    cron_registration_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::services::cron_job_service::CronJob>>,
 }
 
 impl GatewaySystemInfoProvider {
     fn new(
         cron_job_service: Arc<crate::services::CronJobService>,
         state_manager: Arc<beebotos_agents::state_manager::AgentStateManager>,
+        cron_registration_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<crate::services::cron_job_service::CronJob>,
+        >,
     ) -> Self {
         Self {
             cron_job_service,
             state_manager,
+            cron_registration_tx,
+        }
+    }
+
+    fn cron_job_info(
+        job: crate::services::cron_job_service::CronJob,
+    ) -> beebotos_agents::system_info::GatewayCronJobInfo {
+        beebotos_agents::system_info::GatewayCronJobInfo {
+            id: job.id,
+            name: job.name,
+            description: job.description,
+            schedule_type: job.schedule_type.to_string(),
+            schedule_expr: job.schedule_expr,
+            timezone: job.timezone,
+            enabled: job.enabled,
+            run_count: job.run_count,
+            last_run_at: job.last_run_at.map(|dt| dt.to_rfc3339()),
         }
     }
 }
@@ -1007,18 +1038,67 @@ impl beebotos_agents::system_info::SystemInfoProvider for GatewaySystemInfoProvi
 
         Ok(jobs
             .into_iter()
-            .map(|j| beebotos_agents::system_info::GatewayCronJobInfo {
-                id: j.id,
-                name: j.name,
-                description: j.description,
-                schedule_type: j.schedule_type.to_string(),
-                schedule_expr: j.schedule_expr,
-                timezone: j.timezone,
-                enabled: j.enabled,
-                run_count: j.run_count,
-                last_run_at: j.last_run_at.map(|dt| dt.to_rfc3339()),
-            })
+            .map(Self::cron_job_info)
             .collect())
+    }
+
+    async fn create_gateway_cron_job(
+        &self,
+        request: beebotos_agents::system_info::CreateGatewayCronJobRequest,
+    ) -> Result<beebotos_agents::system_info::GatewayCronJobInfo, String> {
+        use crate::services::cron_job_service::{ContextMode, CronJobRequest, ScheduleType};
+
+        let schedule_type = match request.schedule_type.trim().to_ascii_lowercase().as_str() {
+            "at" => ScheduleType::At,
+            "every" => ScheduleType::Every,
+            "cron" => ScheduleType::Cron,
+            other => return Err(format!("Unsupported schedule_type '{}'", other)),
+        };
+        let context_mode = match request
+            .context_mode
+            .as_deref()
+            .unwrap_or("isolated")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "main" => Some(ContextMode::Main),
+            "isolated" | "" => Some(ContextMode::Isolated),
+            other => return Err(format!("Unsupported context_mode '{}'", other)),
+        };
+
+        let req = CronJobRequest {
+            name: request.name,
+            description: request.description,
+            schedule_type,
+            schedule_expr: request.schedule_expr,
+            timezone: request.timezone,
+            prompt: request.prompt,
+            enabled: request.enabled,
+            context_mode,
+            delivery_channel: request.delivery_channel,
+            delivery_target: request.delivery_target,
+            max_runs: request.max_runs,
+        };
+        let job = self
+            .cron_job_service
+            .create_job(req, request.created_by.as_deref().unwrap_or("agent"))
+            .await
+            .map_err(|e| format!("Failed to create cron job: {}", e))?;
+
+        if job.enabled {
+            if let Some(ref tx) = self.cron_registration_tx {
+                if let Err(e) = tx.send(job.clone()) {
+                    tracing::warn!(
+                        "Failed to enqueue agent-created cron job {} for scheduler registration: {}",
+                        job.id,
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(Self::cron_job_info(job))
     }
 
     async fn list_agents(
@@ -1456,6 +1536,40 @@ async fn main() -> anyhow::Result<()> {
     if let Some(state_mut) = Arc::get_mut(&mut app_state) {
         state_mut.workflow_cron_scheduler = Some(Arc::new(cron_scheduler));
         state_mut.workflow_cron_job_uuids = Arc::new(tokio::sync::RwLock::new(boot_cron_uuids));
+    }
+
+    {
+        let mut rx = Arc::get_mut(&mut app_state)
+            .and_then(|state| state.cron_registration_rx.take());
+        if let Some(mut rx) = rx.take() {
+            let state_for_agent_created_cron = app_state.clone();
+            tokio::spawn(async move {
+                while let Some(job) = rx.recv().await {
+                    if matches!(
+                        job.schedule_type,
+                        crate::services::cron_job_service::ScheduleType::At
+                    ) {
+                        continue;
+                    }
+                    if let Err(e) = handlers::http::cron_jobs::register_job_with_scheduler(
+                        &state_for_agent_created_cron,
+                        &job,
+                    )
+                    .await
+                    {
+                        warn!(
+                            "Failed to register agent-created cron job {} with scheduler: {}",
+                            job.id, e
+                        );
+                    } else {
+                        info!(
+                            "Registered agent-created cron job {} with scheduler",
+                            job.id
+                        );
+                    }
+                }
+            });
+        }
     }
 
     // 🟢 Register all enabled standalone cron jobs with the scheduler

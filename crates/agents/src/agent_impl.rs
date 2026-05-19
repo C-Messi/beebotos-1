@@ -340,6 +340,7 @@ impl Agent {
                 | "file_list"
                 | "bash_shell"
                 | "process_exec"
+                | "create_cron_job"
         )
     }
 
@@ -431,6 +432,31 @@ impl Agent {
                         "max_matches": { "type": "integer", "description": "Maximum matches to return", "default": 200 }
                     },
                     "required": ["pattern"]
+                }),
+            },
+            communication::ToolDefinition {
+                name: "create_cron_job".to_string(),
+                description: "Create a Gateway-managed scheduled Agent task. Use this when the \
+                              user asks to remind, schedule, periodically run, or create a cron \
+                              task. Parameters include name, schedule_type (at/every/cron), \
+                              schedule_expr, prompt, timezone, delivery_channel, and max_runs."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Short human-readable task name" },
+                        "description": { "type": "string", "description": "Optional task description" },
+                        "schedule_type": { "type": "string", "enum": ["at", "every", "cron"], "description": "at=one-shot ISO time, every=interval like 30m/1h/1d, cron=5-field cron expression" },
+                        "schedule_expr": { "type": "string", "description": "ISO 8601 time, interval, or cron expression matching schedule_type" },
+                        "timezone": { "type": "string", "description": "IANA timezone, default Asia/Shanghai" },
+                        "prompt": { "type": "string", "description": "Instruction the agent should execute when the schedule fires" },
+                        "enabled": { "type": "boolean", "description": "Whether the job starts enabled", "default": true },
+                        "context_mode": { "type": "string", "enum": ["isolated", "main"], "description": "isolated is recommended for scheduled tasks", "default": "isolated" },
+                        "delivery_channel": { "type": "string", "description": "Optional result delivery channel, e.g. webchat or webhook" },
+                        "delivery_target": { "type": "string", "description": "Optional delivery target such as a webchat channel/session or webhook URL" },
+                        "max_runs": { "type": "integer", "description": "Optional maximum number of executions" }
+                    },
+                    "required": ["name", "schedule_type", "schedule_expr", "prompt"]
                 }),
             },
         ];
@@ -691,6 +717,76 @@ impl Agent {
                     .unwrap_or(200)
                     .clamp(1, 1000);
                 self.execute_workspace_grep(pattern, path, include, case_sensitive, max_matches)
+            }
+            "create_cron_job" => {
+                let provider = self.system_info_provider.as_ref().ok_or_else(|| {
+                    AgentError::Execution(
+                        "create_cron_job is unavailable: system info provider is not configured"
+                            .to_string(),
+                    )
+                })?;
+                let name = get("name")
+                    .ok_or_else(|| AgentError::Execution("create_cron_job requires name".to_string()))?
+                    .trim();
+                let schedule_type = get("schedule_type")
+                    .ok_or_else(|| {
+                        AgentError::Execution("create_cron_job requires schedule_type".to_string())
+                    })?
+                    .trim()
+                    .to_ascii_lowercase();
+                let schedule_expr = get("schedule_expr")
+                    .ok_or_else(|| {
+                        AgentError::Execution("create_cron_job requires schedule_expr".to_string())
+                    })?
+                    .trim();
+                let prompt = get("prompt").unwrap_or(fallback_input).trim();
+                if name.is_empty() || schedule_expr.is_empty() || prompt.is_empty() {
+                    return Err(AgentError::Execution(
+                        "create_cron_job requires non-empty name, schedule_expr, and prompt"
+                            .to_string(),
+                    ));
+                }
+                let request = crate::system_info::CreateGatewayCronJobRequest {
+                    name: name.to_string(),
+                    description: get("description")
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned),
+                    schedule_type,
+                    schedule_expr: schedule_expr.to_string(),
+                    timezone: get("timezone")
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned),
+                    prompt: prompt.to_string(),
+                    enabled: get("enabled").map(|s| !matches!(s, "false" | "0" | "FALSE" | "no" | "NO")),
+                    context_mode: get("context_mode")
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned),
+                    delivery_channel: get("delivery_channel")
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned),
+                    delivery_target: get("delivery_target")
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned),
+                    max_runs: get("max_runs").and_then(|s| s.parse::<i64>().ok()),
+                    created_by: Some(self.config.id.clone()),
+                };
+                let job = provider.create_gateway_cron_job(request).await.map_err(|e| {
+                    AgentError::Execution(format!("Failed to create cron job: {}", e))
+                })?;
+                Ok(format!(
+                    "Created cron job '{}' (id: {}, type: {}, schedule: {}, timezone: {}, enabled: {}).",
+                    job.name,
+                    job.id,
+                    job.schedule_type,
+                    job.schedule_expr,
+                    job.timezone,
+                    job.enabled
+                ))
             }
             "write_file" => {
                 let path = get("path")

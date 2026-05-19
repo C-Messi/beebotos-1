@@ -9,6 +9,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::GatewayError;
 
+const CRON_AGENT_ID: &str = "auto-agent-cron";
+
 /// Resolves a channel message to an agent ID
 pub struct AgentResolver {
     /// Optional default agent ID from configuration
@@ -95,6 +97,12 @@ impl AgentResolver {
         user_id: &str,
     ) -> Result<String, GatewayError> {
         let platform_str = platform.to_string();
+
+        if platform == beebotos_agents::communication::PlatformType::Custom
+            && channel_id.starts_with("cron:")
+        {
+            return self.ensure_cron_agent().await;
+        }
 
         // 1. Try legacy channel-agent binding store (DEPRECATED)
         // P2 OPTIMIZE: This layer will be removed once all bindings are migrated
@@ -217,6 +225,7 @@ impl AgentResolver {
         for agent_status in runtime_agents {
             if agent_status.state != gateway::AgentState::Stopped
                 && agent_status.state != gateway::AgentState::Error
+                && agent_status.agent_id != CRON_AGENT_ID
             {
                 info!(
                     "Resolved agent {} from AgentRuntime (first available)",
@@ -230,24 +239,11 @@ impl AgentResolver {
         let agent_id = format!("auto-agent-{}-{}", platform_str, channel_id);
         let agent_name = format!("Auto Agent {} {}", platform_str, channel_id);
 
-        let models = &self.config.models;
-        let default_provider = &models.default_provider;
-        let provider_cfg = models.providers.get(default_provider);
-
-        let llm_config = gateway::LlmConfig {
-            provider: default_provider.clone(),
-            model: provider_cfg
-                .as_ref()
-                .and_then(|p| p.model.clone())
-                .unwrap_or_else(|| beebotos_agents::llm::types::kimi_models::KIMI_PRO.to_string()),
-            api_key: provider_cfg.as_ref().and_then(|p| p.api_key.clone()),
-            temperature: provider_cfg.as_ref().map(|p| p.temperature).unwrap_or(0.7),
-            max_tokens: models.max_tokens as u32,
-        };
-        let agent_config = gateway::AgentConfigBuilder::new(&agent_id, &agent_name)
-            .description("Auto-created default agent for incoming messages")
-            .with_llm(llm_config)
-            .build();
+        let agent_config = self.build_auto_agent_config(
+            &agent_id,
+            &agent_name,
+            "Auto-created default agent for incoming messages",
+        );
 
         info!(
             "🆕 No available agent found, auto-creating default agent {}",
@@ -350,5 +346,69 @@ impl AgentResolver {
         }
 
         Ok(agent_id)
+    }
+
+    async fn ensure_cron_agent(&self) -> Result<String, GatewayError> {
+        let cron_agent_id = CRON_AGENT_ID.to_string();
+        match self.agent_runtime.status(&cron_agent_id).await {
+            Ok(status)
+                if status.state != gateway::AgentState::Stopped
+                    && status.state != gateway::AgentState::Error =>
+            {
+                info!("Resolved dedicated cron agent {}", CRON_AGENT_ID);
+                return Ok(cron_agent_id);
+            }
+            Ok(status) => {
+                warn!(
+                    "Dedicated cron agent {} is in state {:?}, respawning if possible",
+                    CRON_AGENT_ID, status.state
+                );
+            }
+            Err(e) => {
+                debug!("Dedicated cron agent {} not found: {}", CRON_AGENT_ID, e);
+            }
+        }
+
+        let agent_config = self.build_auto_agent_config(
+            CRON_AGENT_ID,
+            "Cron Agent",
+            "Dedicated agent for scheduled cron jobs",
+        );
+        info!("🕒 Creating dedicated cron agent {}", CRON_AGENT_ID);
+        match self.agent_runtime.spawn(agent_config).await {
+            Ok(_) => Ok(cron_agent_id),
+            Err(ref e) if e.to_string().contains("already exists") => Ok(cron_agent_id),
+            Err(e) => Err(GatewayError::Internal {
+                message: format!("Failed to create dedicated cron agent: {}", e),
+                correlation_id: uuid::Uuid::new_v4().to_string(),
+            }),
+        }
+    }
+
+    fn build_auto_agent_config(
+        &self,
+        agent_id: &str,
+        agent_name: &str,
+        description: &str,
+    ) -> gateway::AgentConfig {
+        let models = &self.config.models;
+        let default_provider = &models.default_provider;
+        let provider_cfg = models.providers.get(default_provider);
+
+        let llm_config = gateway::LlmConfig {
+            provider: default_provider.clone(),
+            model: provider_cfg
+                .as_ref()
+                .and_then(|p| p.model.clone())
+                .unwrap_or_else(|| beebotos_agents::llm::types::kimi_models::KIMI_PRO.to_string()),
+            api_key: provider_cfg.as_ref().and_then(|p| p.api_key.clone()),
+            temperature: provider_cfg.as_ref().map(|p| p.temperature).unwrap_or(0.7),
+            max_tokens: models.max_tokens as u32,
+        };
+
+        gateway::AgentConfigBuilder::new(agent_id, agent_name)
+            .description(description)
+            .with_llm(llm_config)
+            .build()
     }
 }
