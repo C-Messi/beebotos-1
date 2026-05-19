@@ -22,6 +22,25 @@ pub struct GatewayCronJobInfo {
     pub last_run_at: Option<String>,
 }
 
+/// Request to create a Gateway-managed cron job from an agent tool call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateGatewayCronJobRequest {
+    pub name: String,
+    pub description: Option<String>,
+    /// "at" / "every" / "cron"
+    pub schedule_type: String,
+    pub schedule_expr: String,
+    pub timezone: Option<String>,
+    pub prompt: String,
+    pub enabled: Option<bool>,
+    /// "main" / "isolated"
+    pub context_mode: Option<String>,
+    pub delivery_channel: Option<String>,
+    pub delivery_target: Option<String>,
+    pub max_runs: Option<i64>,
+    pub created_by: Option<String>,
+}
+
 /// Summary information about an agent in the system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSummaryInfo {
@@ -40,6 +59,14 @@ pub struct AgentSummaryInfo {
 pub trait SystemInfoProvider: Send + Sync {
     /// List cron jobs created via the Gateway frontend control panel.
     async fn list_gateway_cron_jobs(&self) -> Result<Vec<GatewayCronJobInfo>, String>;
+
+    /// Create a Gateway-managed cron job.
+    async fn create_gateway_cron_job(
+        &self,
+        _request: CreateGatewayCronJobRequest,
+    ) -> Result<GatewayCronJobInfo, String> {
+        Err("Creating cron jobs is not supported by this runtime".to_string())
+    }
 
     /// List all agents registered in the system.
     /// Default implementation returns empty list for backward compatibility.

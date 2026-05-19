@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
@@ -34,6 +34,14 @@ pub struct UnifiedReActConfig {
     pub max_rounds: usize,
     /// Timeout per LLM call in seconds. Default: 30.
     pub round_timeout_sec: u64,
+    /// Timeout per tool call in seconds. Default: 60.
+    pub tool_timeout_sec: u64,
+    /// Maximum malformed LLM responses before stopping. Default: 3.
+    pub max_parse_failures: usize,
+    /// Maximum repeated calls with identical tool + arguments. Default: 2.
+    pub max_duplicate_tool_calls: usize,
+    /// Maximum consecutive tool errors before stopping. Default: 3.
+    pub max_consecutive_tool_errors: usize,
     /// Whether to enable self-reflection on each step. Default: true.
     pub enable_reflection: bool,
     /// Whether the final answer must be valid JSON. Default: true.
@@ -51,6 +59,10 @@ impl Default for UnifiedReActConfig {
         Self {
             max_rounds: 30,
             round_timeout_sec: 30,
+            tool_timeout_sec: 60,
+            max_parse_failures: 3,
+            max_duplicate_tool_calls: 2,
+            max_consecutive_tool_errors: 3,
             enable_reflection: true,
             require_structured_output: true,
             cancel_rx: None,
@@ -154,6 +166,9 @@ impl UnifiedReActExecutor {
     ) -> Result<String, AgentError> {
         let mut rounds: Vec<ReActRound> = Vec::new();
         let mut messages = Vec::new();
+        let mut parse_failures = 0usize;
+        let mut duplicate_tool_calls = 0usize;
+        let mut consecutive_tool_errors = 0usize;
 
         // Round 0: inject system prompt as the first message
         messages.push(CommMessage::new(
@@ -203,13 +218,30 @@ impl UnifiedReActExecutor {
             );
 
             // Call LLM
-            let llm_response = match self.llm.call_llm(messages.clone(), None).await {
-                Ok(resp) => resp,
-                Err(e) => {
-                    return Err(AgentError::Execution(format!(
-                        "Round {} LLM call failed: {}",
-                        round, e
-                    )));
+            let round_timeout = Duration::from_secs(self.config.round_timeout_sec.max(1));
+            let llm_response = match tokio::time::timeout(
+                round_timeout,
+                self.llm.call_llm(messages.clone(), None),
+            )
+            .await
+            {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => {
+                    return Ok(self.build_failed_answer(
+                        &rounds,
+                        user_request,
+                        &format!("第 {} 轮模型调用失败：{}", round, e),
+                    ));
+                }
+                Err(_) => {
+                    return Ok(self.build_failed_answer(
+                        &rounds,
+                        user_request,
+                        &format!(
+                            "第 {} 轮模型调用超过 {} 秒限制",
+                            round, self.config.round_timeout_sec
+                        ),
+                    ));
                 }
             };
 
@@ -223,12 +255,20 @@ impl UnifiedReActExecutor {
             let parsed = match parse_react_response(&llm_response) {
                 Ok(p) => p,
                 Err(e) => {
+                    parse_failures += 1;
                     warn!(
                         "Round {}: Failed to parse LLM response: {}. Response: {}",
                         round,
                         e,
                         safe_prefix(&llm_response, 200)
                     );
+                    if parse_failures >= self.config.max_parse_failures {
+                        return Ok(self.build_failed_answer(
+                            &rounds,
+                            user_request,
+                            &format!("模型连续 {} 次没有返回可执行的结构化格式", parse_failures),
+                        ));
+                    }
                     // Guide LLM to retry with correct format
                     messages.push(CommMessage::new(
                         uuid::Uuid::new_v4(),
@@ -242,6 +282,7 @@ impl UnifiedReActExecutor {
                     continue;
                 }
             };
+            parse_failures = 0;
 
             // 🆕 L3 on-demand injection: detect if LLM asks for detailed skill docs
             if let Some(ref registry) = self.skill_registry {
@@ -309,10 +350,21 @@ impl UnifiedReActExecutor {
                     });
 
                     let observation = if is_duplicate {
+                        duplicate_tool_calls += 1;
                         warn!(
                             "Duplicate tool call detected: {} with same args. Skipping.",
                             tool_name
                         );
+                        if duplicate_tool_calls >= self.config.max_duplicate_tool_calls {
+                            return Ok(self.build_failed_answer(
+                                &rounds,
+                                user_request,
+                                &format!(
+                                    "工具 `{}` 被重复调用且参数没有变化，已停止以避免循环",
+                                    tool_name
+                                ),
+                            ));
+                        }
                         format_tool_observation(
                             &tool_name,
                             "skipped_duplicate",
@@ -321,13 +373,55 @@ impl UnifiedReActExecutor {
                              final_answer if the observations are sufficient.",
                         )
                     } else {
+                        duplicate_tool_calls = 0;
                         // Execute the tool
-                        match self
-                            .execute_tool(&tool_name, arguments.clone(), available_tools)
-                            .await
+                        let tool_timeout = Duration::from_secs(self.config.tool_timeout_sec.max(1));
+                        match tokio::time::timeout(
+                            tool_timeout,
+                            self.execute_tool(&tool_name, arguments.clone(), available_tools),
+                        )
+                        .await
                         {
-                            Ok(result) => format_tool_observation(&tool_name, "ok", &result),
-                            Err(e) => format_tool_observation(&tool_name, "error", &e),
+                            Ok(Ok(result)) => {
+                                consecutive_tool_errors = 0;
+                                format_tool_observation(&tool_name, "ok", &result)
+                            }
+                            Ok(Err(e)) => {
+                                consecutive_tool_errors += 1;
+                                if consecutive_tool_errors
+                                    >= self.config.max_consecutive_tool_errors
+                                {
+                                    return Ok(self.build_failed_answer(
+                                        &rounds,
+                                        user_request,
+                                        &format!(
+                                            "工具连续 {} 次执行失败，最后一次失败来自 `{}`：{}",
+                                            consecutive_tool_errors, tool_name, e
+                                        ),
+                                    ));
+                                }
+                                format_tool_observation(&tool_name, "error", &e)
+                            }
+                            Err(_) => {
+                                consecutive_tool_errors += 1;
+                                let e = format!(
+                                    "Tool '{}' timed out after {} seconds",
+                                    tool_name, self.config.tool_timeout_sec
+                                );
+                                if consecutive_tool_errors
+                                    >= self.config.max_consecutive_tool_errors
+                                {
+                                    return Ok(self.build_failed_answer(
+                                        &rounds,
+                                        user_request,
+                                        &format!(
+                                            "工具连续 {} 次执行超时或失败，最后一次为 `{}` 超时",
+                                            consecutive_tool_errors, tool_name
+                                        ),
+                                    ));
+                                }
+                                format_tool_observation(&tool_name, "timeout", &e)
+                            }
                         }
                     };
 
@@ -470,11 +564,31 @@ impl UnifiedReActExecutor {
             .to_string(),
         ));
 
-        let forced_response = self
-            .llm
-            .call_llm(messages, None)
-            .await
-            .map_err(|e| AgentError::Execution(format!("Forced final_answer failed: {}", e)))?;
+        let forced_response = match tokio::time::timeout(
+            Duration::from_secs(self.config.round_timeout_sec.max(1)),
+            self.llm.call_llm(messages, None),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                return Ok(self.build_failed_answer(
+                    &rounds,
+                    user_request,
+                    &format!("达到最大轮数后生成最终答案失败：{}", e),
+                ));
+            }
+            Err(_) => {
+                return Ok(self.build_failed_answer(
+                    &rounds,
+                    user_request,
+                    &format!(
+                        "达到最大轮数后生成最终答案超过 {} 秒限制",
+                        self.config.round_timeout_sec
+                    ),
+                ));
+            }
+        };
 
         // Try to parse as final_answer
         let final_content = match parse_react_response(&forced_response) {
@@ -671,6 +785,53 @@ impl UnifiedReActExecutor {
         lines
             .push("由于任务被中断，以上信息可能不完整。如需继续，请重新发送您的请求。".to_string());
 
+        lines.join("\n")
+    }
+
+    /// Build a user-facing answer when runtime guardrails stop the loop.
+    fn build_failed_answer(
+        &self,
+        rounds: &[ReActRound],
+        _user_request: &str,
+        reason: &str,
+    ) -> String {
+        let mut lines = vec![
+            "任务已停止继续执行。".to_string(),
+            format!("原因：{}。", reason),
+            "我没有继续重试，以避免重复调用工具或陷入循环。".to_string(),
+        ];
+
+        if rounds.is_empty() {
+            lines.push("目前还没有获得可用的中间结果。".to_string());
+            return lines.join("\n");
+        }
+
+        lines.push(String::new());
+        lines.push("已完成的关键信息：".to_string());
+        for round in rounds.iter().rev().take(3).rev() {
+            if let ReActAction::CallTool {
+                tool_name,
+                reasoning,
+                ..
+            } = &round.action
+            {
+                lines.push(format!(
+                    "- 第 {} 轮调用 `{}`：{}",
+                    round.round_number, tool_name, reasoning
+                ));
+                if let Some(obs) = &round.observation {
+                    let display = if obs.len() > 360 {
+                        format!("{}...", safe_prefix(obs, 360))
+                    } else {
+                        obs.clone()
+                    };
+                    lines.push(format!("  结果摘要：{}", display));
+                }
+            }
+        }
+
+        lines.push(String::new());
+        lines.push("可以缩小任务范围、检查相关工具配置后继续。".to_string());
         lines.join("\n")
     }
 

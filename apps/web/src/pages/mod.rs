@@ -3,8 +3,8 @@
 //! 包含应用的所有页面组件
 
 pub mod agent_detail;
-pub mod ai_commerce;
 pub mod agents;
+pub mod ai_commerce;
 pub mod browser;
 pub mod channels;
 pub mod cron_jobs;
@@ -25,8 +25,8 @@ pub mod workflow_detail;
 pub mod workflows;
 
 pub use agent_detail::AgentDetail;
-pub use ai_commerce::AiCommercePage;
 pub use agents::AgentsPage;
+pub use ai_commerce::AiCommercePage;
 pub use browser::BrowserPage;
 pub use channels::ChannelsPage;
 pub use cron_jobs::CronJobsPage;

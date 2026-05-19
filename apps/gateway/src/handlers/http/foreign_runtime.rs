@@ -7,10 +7,9 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
+use beebotos_foreign_rt::ForeignRuntimeManager;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
-
-use beebotos_foreign_rt::ForeignRuntimeManager;
 
 use crate::error::GatewayError;
 use crate::AppState;
@@ -170,13 +169,12 @@ pub async fn execute_script(
     );
 
     // Get foreign runtime manager
-    let manager = state
-        .foreign_rt_manager
-        .as_ref()
-        .ok_or_else(|| GatewayError::service_unavailable(
+    let manager = state.foreign_rt_manager.as_ref().ok_or_else(|| {
+        GatewayError::service_unavailable(
             "foreign_runtime",
             "Foreign runtime manager not initialized",
-        ))?;
+        )
+    })?;
 
     // Parse runtime type
     let runtime = match req.runtime.as_str() {
@@ -203,22 +201,16 @@ pub async fn execute_script(
 
     // Build script source
     let source = match req.source.source_type {
-        ScriptSourceType::Inline => {
-            beebotos_foreign_rt::ScriptSource::Inline {
-                code: req.source.content,
-            }
-        }
-        ScriptSourceType::Prebuilt => {
-            beebotos_foreign_rt::ScriptSource::Prebuilt {
-                module_id: req.source.content,
-                entrypoint: None,
-            }
-        }
-        ScriptSourceType::File => {
-            beebotos_foreign_rt::ScriptSource::File {
-                path: std::path::PathBuf::from(&req.source.content),
-            }
-        }
+        ScriptSourceType::Inline => beebotos_foreign_rt::ScriptSource::Inline {
+            code: req.source.content,
+        },
+        ScriptSourceType::Prebuilt => beebotos_foreign_rt::ScriptSource::Prebuilt {
+            module_id: req.source.content,
+            entrypoint: None,
+        },
+        ScriptSourceType::File => beebotos_foreign_rt::ScriptSource::File {
+            path: std::path::PathBuf::from(&req.source.content),
+        },
     };
 
     // Build sandbox requirements
@@ -227,11 +219,13 @@ pub async fn execute_script(
     sandbox.network_allowed = req.sandbox.network_allowed;
     sandbox.gpu_allowed = req.sandbox.gpu_allowed;
     for mapping in req.sandbox.filesystem_paths {
-        sandbox.filesystem_paths.push(beebotos_foreign_rt::PathMapping {
-            host_path: std::path::PathBuf::from(mapping.host_path),
-            guest_path: std::path::PathBuf::from(mapping.guest_path),
-            read_only: mapping.read_only,
-        });
+        sandbox
+            .filesystem_paths
+            .push(beebotos_foreign_rt::PathMapping {
+                host_path: std::path::PathBuf::from(mapping.host_path),
+                guest_path: std::path::PathBuf::from(mapping.guest_path),
+                read_only: mapping.read_only,
+            });
     }
 
     // Build script task
@@ -250,12 +244,13 @@ pub async fn execute_script(
 
     // Execute
     let start = std::time::Instant::now();
-    let result = manager.execute(task).await.map_err(|e| {
-        GatewayError::Internal {
+    let result = manager
+        .execute(task)
+        .await
+        .map_err(|e| GatewayError::Internal {
             message: format!("Foreign runtime execution failed: {}", e),
             correlation_id: task_id.clone(),
-        }
-    })?;
+        })?;
 
     let execution_time_ms = start.elapsed().as_millis() as u64;
 
@@ -313,20 +308,20 @@ pub async fn execute_script(
 pub async fn list_runtimes(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListRuntimesResponse>, GatewayError> {
-    let manager = state
-        .foreign_rt_manager
-        .as_ref()
-        .ok_or_else(|| GatewayError::service_unavailable(
+    let manager = state.foreign_rt_manager.as_ref().ok_or_else(|| {
+        GatewayError::service_unavailable(
             "foreign_runtime",
             "Foreign runtime manager not initialized",
-        ))?;
+        )
+    })?;
 
     let runtimes = vec![
         RuntimeInfoResponse {
             name: "python".to_string(),
             available: manager.is_available(beebotos_foreign_rt::ForeignRuntime::Python),
             wasm_available: manager.is_wasm_available(beebotos_foreign_rt::ForeignRuntime::Python),
-            process_available: manager.is_process_available(beebotos_foreign_rt::ForeignRuntime::Python),
+            process_available: manager
+                .is_process_available(beebotos_foreign_rt::ForeignRuntime::Python),
             default_max_memory_mb: 256,
             default_timeout_secs: 30,
         },
@@ -334,7 +329,8 @@ pub async fn list_runtimes(
             name: "nodejs".to_string(),
             available: manager.is_available(beebotos_foreign_rt::ForeignRuntime::NodeJs),
             wasm_available: manager.is_wasm_available(beebotos_foreign_rt::ForeignRuntime::NodeJs),
-            process_available: manager.is_process_available(beebotos_foreign_rt::ForeignRuntime::NodeJs),
+            process_available: manager
+                .is_process_available(beebotos_foreign_rt::ForeignRuntime::NodeJs),
             default_max_memory_mb: 256,
             default_timeout_secs: 30,
         },

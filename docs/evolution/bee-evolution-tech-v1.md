@@ -129,7 +129,7 @@ BeeBotOS 在 Hermes 四层模型基础上，针对工程型 Agent 做适应性�
 #### L0: 热记忆（Hot Memory）—— 会话内上下文
 - **载体**: `PlanContext.history` + `ToolTrail`
 - **生命周期**: 当前会话活跃，会话结束后自动压缩归档
-- **容量**: 受 `ContextAssembler` 的 `context_window` 约束（默认 128K tokens）
+- **容量**: 受 `ContextAssembler` 的 `context_window` 约束（默认 258K tokens）
 - **进化机制**: 
   - 会话结束时，Nudge Engine 评估热记忆中是否有值得长期保留的事实
   - 通过 `SummarizeMiddle` 策略压缩为 L1/L2 可接受的格式

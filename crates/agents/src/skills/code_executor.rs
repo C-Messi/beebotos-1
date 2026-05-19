@@ -119,6 +119,10 @@ impl CodeSkillExecutor {
             crate::skills::UnifiedReActConfig {
                 max_rounds: 6,
                 round_timeout_sec: 30,
+                tool_timeout_sec: 60,
+                max_parse_failures: 3,
+                max_duplicate_tool_calls: 2,
+                max_consecutive_tool_errors: 3,
                 enable_reflection: false,
                 require_structured_output: false,
                 cancel_rx: None,

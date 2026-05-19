@@ -47,7 +47,10 @@ impl RuntimeRouter {
 
         // Rule 2: GPU requirements
         if sandbox.gpu_allowed || hints.requires_gpu {
-            info!(runtime = runtime.name(), "Selecting process path for GPU access");
+            info!(
+                runtime = runtime.name(),
+                "Selecting process path for GPU access"
+            );
             return Ok(process_route(runtime));
         }
 
@@ -64,7 +67,10 @@ impl RuntimeRouter {
 
         // Rule 4: Prebuilt WASM modules always go WASM path
         if matches!(source, ScriptSource::Prebuilt { .. }) {
-            info!(runtime = runtime.name(), "Selecting WASM path for prebuilt module");
+            info!(
+                runtime = runtime.name(),
+                "Selecting WASM path for prebuilt module"
+            );
             return Ok(wasm_route(runtime));
         }
 
@@ -92,7 +98,11 @@ impl RuntimeRouter {
             return Ok(process_route(runtime));
         }
 
-        info!(runtime = runtime.name(), route = route.name(), "Selected execution route");
+        info!(
+            runtime = runtime.name(),
+            route = route.name(),
+            "Selected execution route"
+        );
         Ok(route)
     }
 
@@ -170,12 +180,16 @@ mod tests {
         let sandbox = SandboxRequirements::default();
         let hints = RouteHints::default();
 
-        let route = router.select(
-            ForeignRuntime::Python,
-            &ScriptSource::Inline { code: "1+1".to_string() },
-            &sandbox,
-            &hints,
-        ).unwrap();
+        let route = router
+            .select(
+                ForeignRuntime::Python,
+                &ScriptSource::Inline {
+                    code: "1+1".to_string(),
+                },
+                &sandbox,
+                &hints,
+            )
+            .unwrap();
 
         assert_eq!(route, ExecutionRoute::WasmPyodide);
     }
@@ -187,12 +201,16 @@ mod tests {
         sandbox.gpu_allowed = true;
         let hints = RouteHints::default();
 
-        let route = router.select(
-            ForeignRuntime::Python,
-            &ScriptSource::Inline { code: "".to_string() },
-            &sandbox,
-            &hints,
-        ).unwrap();
+        let route = router
+            .select(
+                ForeignRuntime::Python,
+                &ScriptSource::Inline {
+                    code: "".to_string(),
+                },
+                &sandbox,
+                &hints,
+            )
+            .unwrap();
 
         assert_eq!(route, ExecutionRoute::ProcessPython);
     }
@@ -204,12 +222,16 @@ mod tests {
         sandbox.max_memory_mb = 1024; // > 512 wasm max
         let hints = RouteHints::default();
 
-        let route = router.select(
-            ForeignRuntime::NodeJs,
-            &ScriptSource::Inline { code: "".to_string() },
-            &sandbox,
-            &hints,
-        ).unwrap();
+        let route = router
+            .select(
+                ForeignRuntime::NodeJs,
+                &ScriptSource::Inline {
+                    code: "".to_string(),
+                },
+                &sandbox,
+                &hints,
+            )
+            .unwrap();
 
         assert_eq!(route, ExecutionRoute::ProcessNodeJs);
     }
@@ -223,12 +245,16 @@ mod tests {
             ..Default::default()
         };
 
-        let route = router.select(
-            ForeignRuntime::Python,
-            &ScriptSource::Inline { code: "".to_string() },
-            &sandbox,
-            &hints,
-        ).unwrap();
+        let route = router
+            .select(
+                ForeignRuntime::Python,
+                &ScriptSource::Inline {
+                    code: "".to_string(),
+                },
+                &sandbox,
+                &hints,
+            )
+            .unwrap();
 
         assert_eq!(route, ExecutionRoute::ProcessPython);
     }
@@ -241,12 +267,16 @@ mod tests {
         let sandbox = SandboxRequirements::default();
         let hints = RouteHints::default();
 
-        let route = router.select(
-            ForeignRuntime::Python,
-            &ScriptSource::Inline { code: "".to_string() },
-            &sandbox,
-            &hints,
-        ).unwrap();
+        let route = router
+            .select(
+                ForeignRuntime::Python,
+                &ScriptSource::Inline {
+                    code: "".to_string(),
+                },
+                &sandbox,
+                &hints,
+            )
+            .unwrap();
 
         assert_eq!(route, ExecutionRoute::ProcessPython);
     }

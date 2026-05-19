@@ -13,6 +13,9 @@ use crate::error::Result;
 use crate::media::attachment::ParsedAttachment;
 use crate::media::formatter::{FormattedMessage, MessageFormatter, MessageRole};
 
+/// Default context window used across agent context management.
+pub const DEFAULT_CONTEXT_WINDOW: usize = 258_000;
+
 /// Summarizer trait for LLM-based context compression
 #[async_trait::async_trait]
 pub trait Summarizer: Send + Sync {
@@ -192,7 +195,7 @@ pub struct AssemblerConfig {
 impl Default for AssemblerConfig {
     fn default() -> Self {
         Self {
-            context_window: 128_000, // Default to 128k context window
+            context_window: DEFAULT_CONTEXT_WINDOW,
             response_reserve: 4096,
             strategy: AssemblyStrategy::SystemAndRecent,
             max_messages: 100,

@@ -249,7 +249,7 @@ pub async fn list_runs(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-async fn register_job_with_scheduler(
+pub async fn register_job_with_scheduler(
     state: &Arc<AppState>,
     job: &crate::services::cron_job_service::CronJob,
 ) -> Result<(), GatewayError> {

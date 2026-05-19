@@ -183,7 +183,8 @@ impl SkillLoader {
             if skill_path.exists() {
                 let manifest = self.load_manifest(&skill_path).await?;
 
-                // WASM skills require skill.wasm; foreign runtime skills require entry_point file
+                // WASM skills require skill.wasm; foreign runtime skills require entry_point
+                // file
                 let wasm_path = skill_path.join("skill.wasm");
                 let entry_path = skill_path.join(&manifest.entry_point);
 
