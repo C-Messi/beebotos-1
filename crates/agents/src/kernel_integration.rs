@@ -421,6 +421,7 @@ impl AgentKernelTask {
         .await;
 
         let task_id = task.id.clone();
+        let session_id = task.parameters.get("session_id").cloned();
         let timeout_secs = if timeout_secs == 0 {
             self.config.task_execution_timeout_secs
         } else {
@@ -430,7 +431,93 @@ impl AgentKernelTask {
         // Execute task with a real worker-side timeout. The gateway caller also
         // has a timeout, but this is the one that keeps the serial kernel task
         // loop from getting stuck behind an abandoned request.
-        let result =
+        let result = if let Some(session_id) = session_id.as_deref() {
+            if let Some(mut cancel_rx) = crate::session_cancellation::get_receiver(session_id).await
+            {
+                if *cancel_rx.borrow() {
+                    info!(
+                        "Agent {} task {} interrupted before execution for session {}",
+                        self.config.agent_id, task_id, session_id
+                    );
+                    let mut agent = self.agent.write().await;
+                    agent.state = AgentState::Idle;
+                    Err(AgentError::Timeout(format!("Task {} interrupted", task_id)))
+                } else {
+                let execution = async {
+                    let mut agent = self.agent.write().await;
+                    agent.execute_task(task).await
+                };
+                let timeout = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs));
+                tokio::pin!(timeout);
+
+                tokio::select! {
+                    result = execution => result,
+                    _ = &mut timeout => {
+                        warn!(
+                            "Agent {} task {} timed out after {}s",
+                            self.config.agent_id, task_id, timeout_secs
+                        );
+
+                        // `Agent::execute_task` normally returns the in-memory
+                        // agent to Idle. If the future is cancelled by timeout,
+                        // do that cleanup here before accepting the next request.
+                        let mut agent = self.agent.write().await;
+                        agent.state = AgentState::Idle;
+
+                        Err(AgentError::Timeout(format!(
+                            "Task {} timed out after {}s",
+                            task_id, timeout_secs
+                        )))
+                    }
+                    changed = cancel_rx.changed() => {
+                        let cancelled = changed.is_ok() && *cancel_rx.borrow();
+                        if cancelled {
+                            info!(
+                                "Agent {} task {} interrupted for session {}",
+                                self.config.agent_id, task_id, session_id
+                            );
+                        } else {
+                            warn!(
+                                "Agent {} task {} cancellation watcher closed for session {}",
+                                self.config.agent_id, task_id, session_id
+                            );
+                        }
+
+                        let mut agent = self.agent.write().await;
+                        agent.state = AgentState::Idle;
+
+                        Err(AgentError::Timeout(format!("Task {} interrupted", task_id)))
+                    }
+                }
+                }
+            } else {
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(timeout_secs),
+                    async {
+                        let mut agent = self.agent.write().await;
+                        agent.execute_task(task).await
+                    },
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!(
+                            "Agent {} task {} timed out after {}s",
+                            self.config.agent_id, task_id, timeout_secs
+                        );
+
+                        let mut agent = self.agent.write().await;
+                        agent.state = AgentState::Idle;
+
+                        Err(AgentError::Timeout(format!(
+                            "Task {} timed out after {}s",
+                            task_id, timeout_secs
+                        )))
+                    }
+                }
+            }
+        } else {
             match tokio::time::timeout(tokio::time::Duration::from_secs(timeout_secs), async {
                 let mut agent = self.agent.write().await;
                 agent.execute_task(task).await
@@ -444,9 +531,6 @@ impl AgentKernelTask {
                         self.config.agent_id, task_id, timeout_secs
                     );
 
-                    // `Agent::execute_task` normally returns the in-memory agent to
-                    // Idle. If the future is cancelled by timeout, do that cleanup
-                    // here before accepting the next request.
                     let mut agent = self.agent.write().await;
                     agent.state = AgentState::Idle;
 
@@ -455,7 +539,8 @@ impl AgentKernelTask {
                         task_id, timeout_secs
                     )))
                 }
-            };
+            }
+        };
 
         // Handle result
         let success = result.is_ok();

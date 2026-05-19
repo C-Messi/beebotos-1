@@ -1091,14 +1091,6 @@ impl MessageProcessor {
             completion_result
         });
 
-        let abort_handle = work_handle.abort_handle();
-        let _ = beebotos_agents::session_cancellation::set_abort_handle(
-            &db_session_id,
-            cancel_gen,
-            abort_handle,
-        )
-        .await;
-
         tokio::spawn(async move {
             match work_handle.await {
                 Ok(completion_result) => {

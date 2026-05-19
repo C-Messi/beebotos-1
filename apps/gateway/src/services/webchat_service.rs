@@ -3,7 +3,7 @@
 //! Unified chat persistence and session management for all channels
 //! (webchat, personal_wechat, lark, dingtalk, qq, feishu, etc.).
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value;
 use sqlx::SqlitePool;
 use tracing::{error, info};
@@ -47,16 +47,20 @@ impl TryFrom<ChatSessionRow> for ChatSession {
             title: row.title,
             is_pinned: row.is_pinned != 0,
             is_archived: row.is_archived != 0,
-            created_at: row
-                .created_at
-                .parse()
-                .map_err(|e| format!("Invalid datetime: {}", e))?,
-            updated_at: row
-                .updated_at
-                .parse()
-                .map_err(|e| format!("Invalid datetime: {}", e))?,
+            created_at: parse_sqlite_datetime(&row.created_at)?,
+            updated_at: parse_sqlite_datetime(&row.updated_at)?,
         })
     }
+}
+
+fn parse_sqlite_datetime(value: &str) -> Result<DateTime<Utc>, String> {
+    if let Ok(dt) = value.parse::<DateTime<Utc>>() {
+        return Ok(dt);
+    }
+
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .map(|dt| dt.and_utc())
+        .map_err(|e| format!("Invalid datetime '{}': {}", value, e))
 }
 
 /// Chat message model
@@ -87,22 +91,36 @@ impl TryFrom<ChatMessageRow> for ChatMessage {
     type Error = String;
 
     fn try_from(row: ChatMessageRow) -> Result<Self, Self::Error> {
+        let message_id = row.id.clone();
         Ok(Self {
             id: row.id,
             session_id: row.session_id,
             role: row.role,
             content: row.content,
-            metadata: serde_json::from_str(&row.metadata)
-                .map_err(|e| format!("Invalid metadata JSON: {}", e))?,
+            metadata: serde_json::from_str(&row.metadata).unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Invalid WebChat metadata JSON for message {}; using empty metadata: {}",
+                    message_id,
+                    e
+                );
+                serde_json::json!({})
+            }),
             token_usage: row
                 .token_usage
-                .map(|s| serde_json::from_str(&s))
+                .map(|s| {
+                    serde_json::from_str(&s).map_err(|e| {
+                        tracing::warn!(
+                            "Invalid WebChat token_usage JSON for message {}; ignoring it: {}",
+                            message_id,
+                            e
+                        );
+                        e
+                    })
+                })
                 .transpose()
-                .map_err(|e| format!("Invalid token_usage JSON: {}", e))?,
-            created_at: row
-                .created_at
-                .parse()
-                .map_err(|e| format!("Invalid datetime: {}", e))?,
+                .ok()
+                .flatten(),
+            created_at: parse_sqlite_datetime(&row.created_at)?,
         })
     }
 }
