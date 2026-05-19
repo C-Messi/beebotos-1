@@ -45,6 +45,7 @@ pub mod a2a;
 pub mod agent_impl;
 pub mod channel_registry;
 // Channel factories are now in communication::channel module
+mod command_env;
 pub mod communication;
 pub mod config_watcher;
 pub mod context;
