@@ -267,6 +267,34 @@ pub fn WebchatPage() -> impl IntoView {
     let on_submit: Box<dyn Fn(String)> = Box::new(handle_send);
     let on_submit = on_submit as Box<dyn Fn(String)>;
 
+    // 停止当前会话中正在执行的 Agent 任务
+    let chat_state_for_stop = chat_state.clone();
+    let auth_state_for_stop = auth_state.clone();
+    let handle_stop = move || {
+        let Some(session_id) = chat_state_for_stop.current_session_id.get() else {
+            return;
+        };
+
+        chat_state_for_stop.is_sending.set(false);
+        chat_state_for_stop.is_streaming.set(false);
+        chat_state_for_stop.streaming_content.set(String::new());
+        chat_state_for_stop.streaming_tool_calls.set(Vec::new());
+        chat_state_for_stop.set_error(None);
+
+        let chat_state_stop = chat_state_for_stop.clone();
+        let auth_state_stop = auth_state_for_stop.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let client = create_client();
+            client.set_auth_token(auth_state_stop.get_token());
+            let service = create_webchat_service(client);
+            if let Err(e) = service.stop_session(&session_id).await {
+                chat_state_stop.set_error(Some(format!("停止失败: {}", e)));
+            }
+        });
+    };
+    let on_stop: Box<dyn Fn()> = Box::new(handle_stop);
+    let on_stop = on_stop as Box<dyn Fn()>;
+
     // 切换会话
     let chat_state_select = chat_state.clone();
     let auth_state_select = auth_state.clone();
@@ -394,8 +422,13 @@ pub fn WebchatPage() -> impl IntoView {
                     }}
                     <MessageInput
                         placeholder="Type a message... (use /btw for side question)".to_string()
-                        disabled=chat_state.is_sending.get()
+                        disabled=Signal::derive(|| false)
+                        is_generating=Signal::derive({
+                            let chat_state = chat_state.clone();
+                            move || chat_state.is_sending.get() || chat_state.is_streaming.get()
+                        })
                         on_submit=on_submit
+                        on_stop=on_stop
                     />
                     {move || {
                         if let Some(ref error) = chat_state.error.get() {

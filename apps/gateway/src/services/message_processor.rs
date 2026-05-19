@@ -522,24 +522,6 @@ impl MessageProcessor {
         // 3. 处理多模态内容（下载图片等）
         let (content, images) = self.process_multimodal(&message).await?;
 
-        // 🆕 FIX: Stop-command detection — cancel any running ReAct loop for this
-        // session
-        let stop_keywords = ["停止", "终止", "停下来", "结束", "stop", "cancel", "abort"];
-        let is_stop = stop_keywords
-            .iter()
-            .any(|kw| content.to_lowercase().contains(kw));
-        if is_stop {
-            let _ = beebotos_agents::session_cancellation::cancel(&db_session_id).await;
-            self.send_reply(
-                platform,
-                channel_id,
-                &message,
-                "⏹️ 已收到停止指令，正在中断当前任务...",
-            )
-            .await?;
-            return Ok(());
-        }
-
         // 🟢 P1 FIX: Check for /workflow command trigger (same as handle_message)
         if let Some(workflow_result) = self.try_execute_workflow_command(&content).await {
             match workflow_result {
@@ -813,7 +795,6 @@ impl MessageProcessor {
 
         let session_id = session.id.clone();
         let db_session_id_bg = db_session_id.clone();
-        let cancel_gen_bg = cancel_gen;
         let user_id_bg = user_id.clone();
         let content_bg = content.clone();
         let channel_id_bg = channel_id.to_string();
@@ -923,7 +904,9 @@ impl MessageProcessor {
             let _ = stream_count_tx.send(0);
         }
 
-        tokio::spawn(async move {
+        let db_session_id_cleanup = db_session_id.clone();
+        let channel_id_cleanup = channel_id_bg.clone();
+        let work_handle = tokio::spawn(async move {
             info!("🤖 [BG] Agent {} 开始后台处理消息", agent_id_bg);
             let start = std::time::Instant::now();
 
@@ -1105,15 +1088,42 @@ impl MessageProcessor {
                     .await;
             }
 
-            // 🆕 FIX: Unregister cancellation token when background task completes.
-            // Only remove if the generation matches, preventing race with newer tasks.
-            beebotos_agents::session_cancellation::unregister(&db_session_id_bg, cancel_gen_bg)
-                .await;
+            completion_result
+        });
 
-            // 🆕 CRON FIX: Notify synchronous waiter if completion channel was provided
-            if let Some(tx) = completion_tx {
-                let _ = tx.send(completion_result);
+        tokio::spawn(async move {
+            match work_handle.await {
+                Ok(completion_result) => {
+                    if let Some(tx) = completion_tx {
+                        let _ = tx.send(completion_result);
+                    }
+                }
+                Err(e) if e.is_cancelled() => {
+                    info!(
+                        "[BG] Agent task interrupted for WebChat session {}",
+                        channel_id_cleanup
+                    );
+                    if let Some(tx) = completion_tx {
+                        let _ = tx.send(Err(GatewayError::internal("Agent task interrupted")));
+                    }
+                }
+                Err(e) => {
+                    let err = format!("Agent task join failed: {}", e);
+                    warn!("[BG] {} for session {}", err, channel_id_cleanup);
+                    if let Some(tx) = completion_tx {
+                        let _ = tx.send(Err(GatewayError::internal(err)));
+                    }
+                }
             }
+
+            // Unregister cancellation token when background work completes or
+            // is aborted. Only remove if the generation matches, preventing
+            // race with newer tasks.
+            beebotos_agents::session_cancellation::unregister(
+                &db_session_id_cleanup,
+                cancel_gen,
+            )
+            .await;
         });
 
         Ok(())

@@ -178,40 +178,7 @@ fn decode_utf16_be(bytes: &[u8]) -> String {
 }
 
 fn configure_command_environment(cmd: &mut tokio::process::Command, workspace: Option<&Path>) {
-    #[cfg(windows)]
-    {
-        cmd.env("PATH", process_path());
-        for key in [
-            "PATHEXT",
-            "SystemRoot",
-            "WINDIR",
-            "COMSPEC",
-            "TEMP",
-            "TMP",
-            "USERPROFILE",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "PROGRAMDATA",
-            "ProgramFiles",
-            "ProgramFiles(x86)",
-            "ProgramW6432",
-            "PSModulePath",
-        ] {
-            if let Ok(value) = std::env::var(key) {
-                cmd.env(key, value);
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        cmd.env_clear();
-        cmd.env("PATH", process_path());
-    }
-
-    if let Some(workspace) = workspace {
-        cmd.env("HOME", workspace);
-        cmd.env("BEEBOTOS_WORKSPACE", workspace);
-    }
+    crate::command_env::configure_host_user_cli_environment(cmd, workspace);
 }
 
 #[cfg(windows)]
@@ -255,80 +222,6 @@ fn encode_base64(bytes: &[u8]) -> String {
         }
     }
     encoded
-}
-
-fn process_path() -> String {
-    let current = std::env::var("PATH").unwrap_or_default();
-    #[cfg(windows)]
-    {
-        merge_windows_path(current)
-    }
-    #[cfg(not(windows))]
-    {
-        current
-    }
-}
-
-#[cfg(windows)]
-fn merge_windows_path(current: String) -> String {
-    let mut entries = Vec::new();
-    for key in [
-        r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-        r"HKEY_CURRENT_USER\Environment",
-    ] {
-        if let Ok(output) = std::process::Command::new("reg")
-            .args(["query", key, "/v", "Path"])
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.starts_with("Path") {
-                        continue;
-                    }
-                    if let Some(value) = parse_reg_path_value(trimmed) {
-                        entries.extend(
-                            std::env::split_paths(&value).map(|p| p.to_string_lossy().to_string()),
-                        );
-                    }
-                }
-            }
-        }
-    }
-    entries.extend(std::env::split_paths(&current).map(|p| p.to_string_lossy().to_string()));
-
-    let mut seen = std::collections::HashSet::new();
-    let mut merged = Vec::new();
-    for entry in entries {
-        if entry.trim().is_empty() {
-            continue;
-        }
-        let key = entry.trim_end_matches(['\\', '/']).to_ascii_lowercase();
-        if seen.insert(key) {
-            merged.push(entry);
-        }
-    }
-    std::env::join_paths(merged)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or(current)
-}
-
-#[cfg(windows)]
-fn parse_reg_path_value(line: &str) -> Option<String> {
-    let marker = if line.contains("REG_EXPAND_SZ") {
-        "REG_EXPAND_SZ"
-    } else if line.contains("REG_SZ") {
-        "REG_SZ"
-    } else {
-        return None;
-    };
-    let value = line.split_once(marker)?.1.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
 }
 
 fn extract_usd_notional(text: &str) -> Option<String> {
@@ -615,8 +508,9 @@ impl Agent {
         vec![
             communication::ToolDefinition {
                 name: "write_file".to_string(),
-                description: "Write a UTF-8 text file inside the current workspace. Controlled \
-                              tool: only available when runtime policy enables workspace writes."
+                description: "Write a UTF-8 text file. Relative paths are resolved from the \
+                              current workspace; absolute paths are allowed. Controlled tool: \
+                              only available when runtime policy enables file writes."
                     .to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
@@ -629,8 +523,9 @@ impl Agent {
             },
             communication::ToolDefinition {
                 name: "edit_file".to_string(),
-                description: "Replace text in a UTF-8 workspace file. Controlled tool: only \
-                              available when runtime policy enables workspace writes."
+                description: "Replace text in a UTF-8 file. Relative paths are resolved from the \
+                              current workspace; absolute paths are allowed. Controlled tool: \
+                              only available when runtime policy enables file writes."
                     .to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
@@ -645,14 +540,16 @@ impl Agent {
             },
             communication::ToolDefinition {
                 name: "exec".to_string(),
-                description: "Execute a shell command in the current workspace. Controlled tool: \
-                              only available when runtime policy enables command execution."
+                description: "Execute a shell command. By default it runs in the current \
+                              workspace; working_dir may be relative to the workspace or \
+                              absolute. Controlled tool: only available when runtime policy \
+                              enables command execution."
                     .to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "Shell command to run" },
-                        "working_dir": { "type": "string", "description": "Optional workspace-relative working directory", "default": "." },
+                        "working_dir": { "type": "string", "description": "Optional working directory, relative to the workspace unless absolute", "default": "." },
                         "timeout_ms": { "type": "integer", "description": "Timeout in milliseconds", "default": 30000 }
                     },
                     "required": ["command"]
@@ -661,7 +558,7 @@ impl Agent {
         ]
     }
 
-    fn resolve_workspace_path(&self, path: &str) -> Result<PathBuf, AgentError> {
+    fn resolve_tool_path(&self, path: &str) -> Result<PathBuf, AgentError> {
         let workspace = self.workspace_dir();
         let candidate = PathBuf::from(path);
         let joined = if candidate.is_absolute() {
@@ -669,16 +566,7 @@ impl Agent {
         } else {
             workspace.join(candidate)
         };
-        let normalized = Self::normalize_path_without_fs(&joined);
-        let workspace_normalized = Self::normalize_path_without_fs(&workspace);
-        if !normalized.starts_with(&workspace_normalized) {
-            return Err(AgentError::Execution(format!(
-                "Path '{}' escapes workspace root '{}'",
-                path,
-                workspace_normalized.display()
-            )));
-        }
-        Ok(normalized)
+        Ok(Self::normalize_path_without_fs(&joined))
     }
 
     fn normalize_path_without_fs(path: &Path) -> PathBuf {
@@ -729,7 +617,7 @@ impl Agent {
                 let max_chars = get("max_chars")
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(12000);
-                let resolved = self.resolve_workspace_path(path)?;
+                let resolved = self.resolve_tool_path(path)?;
                 let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
                     AgentError::Execution(format!("Failed to read '{}': {}", resolved.display(), e))
                 })?;
@@ -751,8 +639,7 @@ impl Agent {
             }
             "list_dir" => {
                 let path = get("path").unwrap_or(".").trim();
-                let resolved =
-                    self.resolve_workspace_path(if path.is_empty() { "." } else { path })?;
+                let resolved = self.resolve_tool_path(if path.is_empty() { "." } else { path })?;
                 let mut entries = tokio::fs::read_dir(&resolved).await.map_err(|e| {
                     AgentError::Execution(format!("Failed to list '{}': {}", resolved.display(), e))
                 })?;
@@ -811,7 +698,7 @@ impl Agent {
                 let content = get("content").ok_or_else(|| {
                     AgentError::Execution("write_file requires content".to_string())
                 })?;
-                let resolved = self.resolve_workspace_path(path)?;
+                let resolved = self.resolve_tool_path(path)?;
                 if let Some(parent) = resolved.parent() {
                     tokio::fs::create_dir_all(parent).await.map_err(|e| {
                         AgentError::Execution(format!(
@@ -847,7 +734,7 @@ impl Agent {
                 let replace_all = get("replace_all")
                     .map(|s| s == "true" || s == "1")
                     .unwrap_or(false);
-                let resolved = self.resolve_workspace_path(path)?;
+                let resolved = self.resolve_tool_path(path)?;
                 let content = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
                     AgentError::Execution(format!("Failed to read '{}': {}", resolved.display(), e))
                 })?;
@@ -893,7 +780,7 @@ impl Agent {
                 }
                 self.validate_workspace_command(command)?;
                 let working_dir = match get("working_dir") {
-                    Some(dir) if !dir.trim().is_empty() => self.resolve_workspace_path(dir)?,
+                    Some(dir) if !dir.trim().is_empty() => self.resolve_tool_path(dir)?,
                     _ => self.workspace_dir(),
                 };
                 let workspace = self.workspace_dir();
@@ -954,48 +841,6 @@ impl Agent {
                     "Dangerous command pattern blocked: {}",
                     pattern
                 )));
-            }
-        }
-        let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
-        for fragment in command.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '|')) {
-            let unquoted = fragment.trim_matches(|c| {
-                matches!(
-                    c,
-                    '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
-                )
-            });
-            if unquoted.is_empty() {
-                continue;
-            }
-            for path_part in unquoted
-                .split(|c| matches!(c, '=' | ':' | ','))
-                .filter(|part| !part.is_empty())
-            {
-                if path_part == ".."
-                    || path_part.starts_with("../")
-                    || path_part.ends_with("/..")
-                    || path_part.contains("/../")
-                {
-                    return Err(AgentError::Execution(
-                        "Command path traversal outside the workspace is blocked".to_string(),
-                    ));
-                }
-                if !path_part.starts_with('/') {
-                    continue;
-                }
-                let normalized = Self::normalize_path_without_fs(Path::new(path_part));
-                if !normalized.starts_with(&workspace) {
-                    return Err(AgentError::Execution(format!(
-                        "Absolute command path '{}' escapes workspace root '{}'",
-                        path_part,
-                        workspace.display()
-                    )));
-                }
-            }
-            if unquoted.contains("..") {
-                return Err(AgentError::Execution(
-                    "Command path traversal outside the workspace is blocked".to_string(),
-                ));
             }
         }
         Ok(())
@@ -1292,7 +1137,7 @@ impl Agent {
         path: &str,
         max_results: usize,
     ) -> Result<String, AgentError> {
-        let root = self.resolve_workspace_path(if path.is_empty() { "." } else { path })?;
+        let root = self.resolve_tool_path(if path.is_empty() { "." } else { path })?;
         let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
         let files = self.collect_workspace_files(&root, max_results.saturating_mul(20).max(200))?;
         let mut matches = Vec::new();
@@ -1341,7 +1186,7 @@ impl Agent {
         case_sensitive: bool,
         max_matches: usize,
     ) -> Result<String, AgentError> {
-        let root = self.resolve_workspace_path(if path.is_empty() { "." } else { path })?;
+        let root = self.resolve_tool_path(if path.is_empty() { "." } else { path })?;
         let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
         let regex_pattern = if case_sensitive {
             pattern.to_string()
@@ -3327,7 +3172,8 @@ impl Agent {
         let controlled_tool_prompt = if self.controlled_workspace_tools_enabled() {
             "Controlled workspace tools are currently enabled. You may use write_file, edit_file, \
              and exec when the user asks you to create files, modify files, run code, or execute \
-             commands. Keep all paths inside the workspace root."
+             commands. Relative paths resolve from the workspace root; absolute paths are allowed \
+             when the user asks you to configure or inspect files elsewhere."
         } else {
             "Controlled workspace tools such as write_file, edit_file, and exec are not exposed \
              right now. Do not claim you can write files or run commands unless those tools are \
@@ -3339,12 +3185,13 @@ impl Agent {
              is needed; otherwise call the most appropriate tool, observe the result, then \
              continue until you can give the user a natural final answer. Do not claim you cannot \
              inspect the environment; use tools when inspection is needed.\n\n{}\n\n## \
-             Workspace\nWorking directory: {}\nAll workspace tools are restricted to this \
-             root.\n\nThis is the BeeBotOS user workspace, normally ./data/workspace relative to \
-             the repo. Treat it as your current working directory, not the repository root.\n\n## \
-             Tools\nExecutable tools include read_file, list_dir, glob, grep, write_file, \
-             edit_file, exec, web_fetch, web_search, and activate_skill when enabled by runtime \
-             policy. {}\n\n## Skills\n{}",
+             Workspace\nWorking directory: {}\nRelative paths resolve from this directory. \
+             Absolute paths are allowed when the user asks you to inspect or configure files \
+             elsewhere.\n\nThis is the BeeBotOS user workspace, normally ./data/workspace \
+             relative to the repo. Treat it as your current working directory, not the repository \
+             root.\n\n## Tools\nExecutable tools include read_file, list_dir, glob, grep, \
+             write_file, edit_file, exec, web_fetch, web_search, and activate_skill when enabled \
+             by runtime policy. {}\n\n## Skills\n{}",
             self.config.name,
             self.config.description,
             runtime_context,
@@ -3443,6 +3290,10 @@ impl Agent {
         messages
     }
 
+    fn is_cancelled(cancel_rx: &Option<tokio::sync::watch::Receiver<bool>>) -> bool {
+        cancel_rx.as_ref().map(|rx| *rx.borrow()).unwrap_or(false)
+    }
+
     async fn process_task_react(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {
         let llm = self
             .llm_interface
@@ -3454,6 +3305,7 @@ impl Agent {
 
         let (input_text, mut extra_params, history, memory_context, weather_data, session_key) =
             self.extract_react_input(task);
+        let cancel_rx = crate::session_cancellation::get_receiver(&session_key).await;
         let tools = self.builtin_react_tools();
         let mut loop_messages = self
             .build_react_messages(
@@ -3489,6 +3341,13 @@ impl Agent {
         .await;
         for round in 0..max_tool_rounds {
             let round_number = round + 1;
+            if Self::is_cancelled(&cancel_rx) {
+                info!(
+                    "process_task_react: session {} cancelled before round {}",
+                    session_key, round_number
+                );
+                return Ok(("⏹️ 已停止当前任务。".to_string(), vec![]));
+            }
             extra_params.insert("react_round".to_string(), round_number.to_string());
             let turn = llm
                 .call_llm_tool_turn(
@@ -3574,6 +3433,13 @@ impl Agent {
                 turn.reasoning_content.as_deref(),
             ));
             for tool_call in &turn.tool_calls {
+                if Self::is_cancelled(&cancel_rx) {
+                    info!(
+                        "process_task_react: session {} cancelled before tool {}",
+                        session_key, tool_call.function.name
+                    );
+                    return Ok(("⏹️ 已停止当前任务。".to_string(), vec![]));
+                }
                 self.emit_react_trace(
                     crate::react_trace::ReActTraceEvent::new(
                         run_id.clone(),
@@ -4308,6 +4174,24 @@ impl Agent {
             psychological_prices,
         );
 
+        let session_key = task
+            .parameters
+            .get("session_id")
+            .or_else(|| task.parameters.get("channel_id"))
+            .cloned()
+            .or_else(|| {
+                serde_json::from_str::<serde_json::Value>(&task.input)
+                    .ok()
+                    .and_then(|json| {
+                        json.get("session_id")
+                            .or_else(|| json.get("channel_id"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
+            })
+            .unwrap_or_else(|| task.id.clone());
+        let cancel_rx = crate::session_cancellation::get_receiver(&session_key).await;
+
         // Step 5: Execute the ReAct loop
         let executor = crate::skills::UnifiedReActExecutor::new(llm).with_config(
             crate::skills::UnifiedReActConfig {
@@ -4316,7 +4200,7 @@ impl Agent {
                 round_timeout_sec: 30,
                 enable_reflection: true,
                 require_structured_output: true,
-                cancel_rx: None,
+                cancel_rx,
                 stream_tx: None,
             },
         );
@@ -5413,19 +5297,19 @@ impl Agent {
         );
         let workspace_context = format!(
             "\n\n## Workspace\nYour working directory is: {}\nTreat this directory as the single \
-             global workspace for file operations unless the user explicitly gives a narrower \
-             path. By default this is ./data/workspace relative to the BeeBotOS repository, not \
-             the repository root.\n\n## Built-in Workspace Tools\nYou can call these top-level \
-             tools when the user asks about files, code, commands, or the current environment:\n- \
-             read_file(path, max_chars?): read a UTF-8 file\n- list_dir(path?): list a \
-             directory\n{} Use available tools instead of claiming you cannot inspect the \
-             environment.",
+             default workspace for relative file operations unless the user explicitly gives a \
+             narrower or absolute path. By default this is ./data/workspace relative to the \
+             BeeBotOS repository, not the repository root.\n\n## Built-in Workspace Tools\nYou \
+             can call these top-level tools when the user asks about files, code, commands, or \
+             the current environment:\n- read_file(path, max_chars?): read a UTF-8 file\n- \
+             list_dir(path?): list a directory\n{} Use available tools instead of claiming you \
+             cannot inspect the environment.",
             self.workspace_dir_display(),
             if self.controlled_workspace_tools_enabled() {
                 "Controlled tools are enabled: write_file(path, content), edit_file(path, \
                  old_text, new_text, replace_all?), and exec(command, working_dir?, timeout_ms?) \
-                 are available. All file operations and command working directories are limited to \
-                 this workspace."
+                 are available. Relative paths and missing working_dir default to this workspace; \
+                 absolute paths and absolute working_dir values are allowed."
             } else {
                 "Controlled tools such as write_file, edit_file, and exec exist but are disabled \
                  unless runtime policy explicitly enables them."
@@ -6194,6 +6078,7 @@ impl Agent {
                 .or_else(|| extra_params.get("channel_id"))
                 .cloned()
                 .unwrap_or_else(|| task.id.clone());
+            let cancel_rx = crate::session_cancellation::get_receiver(&session_key).await;
             let run_id = Self::react_run_id(&task.id);
             extra_params.insert("agent_id".to_string(), self.config.id.clone());
             extra_params.insert("react_run_id".to_string(), run_id.clone());
@@ -6214,6 +6099,14 @@ impl Agent {
 
             for round in 0..max_tool_rounds {
                 let round_number = round + 1;
+                if Self::is_cancelled(&cancel_rx) {
+                    info!(
+                        "handle_llm_task: session {} cancelled before native tool round {}",
+                        session_key, round_number
+                    );
+                    final_text = "⏹️ 已停止当前任务。".to_string();
+                    break;
+                }
                 extra_params.insert("react_round".to_string(), round_number.to_string());
                 let turn = llm
                     .call_llm_tool_turn(
@@ -6266,6 +6159,14 @@ impl Agent {
                 ));
 
                 for tool_call in &turn.tool_calls {
+                    if Self::is_cancelled(&cancel_rx) {
+                        info!(
+                            "handle_llm_task: session {} cancelled before native tool {}",
+                            session_key, tool_call.function.name
+                        );
+                        final_text = "⏹️ 已停止当前任务。".to_string();
+                        break;
+                    }
                     self.emit_react_trace(
                         crate::react_trace::ReActTraceEvent::new(
                             run_id.clone(),
@@ -6329,6 +6230,9 @@ impl Agent {
                         }
                     };
                     loop_messages.push(Self::tool_result_message(&tool_call.id, output));
+                }
+                if final_text == "⏹️ 已停止当前任务。" {
+                    break;
                 }
             }
 
@@ -10088,8 +9992,12 @@ fn flatten_json_value(key: &str, value: &serde_json::Value, depth: usize) -> Vec
 
 #[cfg(test)]
 mod planning_integration_tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::planning::{PlanExecutor, PlanningEngine};
+
+    static WORKSPACE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Helper function to create a test agent without planning
     fn create_test_agent() -> Agent {
@@ -10201,6 +10109,7 @@ mod planning_integration_tests {
 
     #[test]
     fn test_react_workspace_glob_and_grep() {
+        let _guard = WORKSPACE_ENV_LOCK.lock().expect("workspace env lock");
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
         std::fs::write(
@@ -10221,21 +10130,24 @@ mod planning_integration_tests {
             .expect("grep");
         assert!(grep.contains("src/lib.rs:1:pub struct ToolAwareResponse;"));
 
-        let escaped = agent.resolve_workspace_path("../outside.txt");
-        assert!(escaped.is_err());
+        let outside = agent
+            .resolve_tool_path("../outside.txt")
+            .expect("outside path");
+        assert!(outside.ends_with("outside.txt"));
         std::env::remove_var("BEEBOTOS_WORKSPACE");
     }
 
     #[test]
-    fn test_react_workspace_exec_blocks_paths_outside_workspace() {
+    fn test_react_workspace_exec_allows_paths_outside_workspace() {
+        let _guard = WORKSPACE_ENV_LOCK.lock().expect("workspace env lock");
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var("BEEBOTOS_WORKSPACE", dir.path());
         let agent = create_test_agent();
 
-        assert!(agent.validate_workspace_command("cat /etc/passwd").is_err());
+        assert!(agent.validate_workspace_command("cat /etc/passwd").is_ok());
         assert!(agent
             .validate_workspace_command("cat ../outside.txt")
-            .is_err());
+            .is_ok());
 
         let inside = dir.path().join("ok.txt");
         let command = format!("cat {}", inside.display());

@@ -81,35 +81,7 @@ fn decode_utf16_be(bytes: &[u8]) -> String {
 }
 
 fn configure_command_environment(cmd: &mut tokio::process::Command) {
-    #[cfg(windows)]
-    {
-        cmd.env("PATH", process_path());
-        for key in [
-            "PATHEXT",
-            "SystemRoot",
-            "WINDIR",
-            "COMSPEC",
-            "TEMP",
-            "TMP",
-            "USERPROFILE",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "PROGRAMDATA",
-            "ProgramFiles",
-            "ProgramFiles(x86)",
-            "ProgramW6432",
-            "PSModulePath",
-        ] {
-            if let Ok(value) = std::env::var(key) {
-                cmd.env(key, value);
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        cmd.env_clear();
-        cmd.env("PATH", process_path());
-    }
+    crate::command_env::configure_host_user_cli_environment(cmd, None);
 }
 
 #[cfg(windows)]
@@ -155,80 +127,6 @@ fn encode_base64(bytes: &[u8]) -> String {
     encoded
 }
 
-fn process_path() -> String {
-    let current = std::env::var("PATH").unwrap_or_default();
-    #[cfg(windows)]
-    {
-        merge_windows_path(current)
-    }
-    #[cfg(not(windows))]
-    {
-        current
-    }
-}
-
-#[cfg(windows)]
-fn merge_windows_path(current: String) -> String {
-    let mut entries = Vec::new();
-    for key in [
-        r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-        r"HKEY_CURRENT_USER\Environment",
-    ] {
-        if let Ok(output) = std::process::Command::new("reg")
-            .args(["query", key, "/v", "Path"])
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.starts_with("Path") {
-                        continue;
-                    }
-                    if let Some(value) = parse_reg_path_value(trimmed) {
-                        entries.extend(
-                            std::env::split_paths(&value).map(|p| p.to_string_lossy().to_string()),
-                        );
-                    }
-                }
-            }
-        }
-    }
-    entries.extend(std::env::split_paths(&current).map(|p| p.to_string_lossy().to_string()));
-
-    let mut seen = std::collections::HashSet::new();
-    let mut merged = Vec::new();
-    for entry in entries {
-        if entry.trim().is_empty() {
-            continue;
-        }
-        let key = entry.trim_end_matches(['\\', '/']).to_ascii_lowercase();
-        if seen.insert(key) {
-            merged.push(entry);
-        }
-    }
-    std::env::join_paths(merged)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or(current)
-}
-
-#[cfg(windows)]
-fn parse_reg_path_value(line: &str) -> Option<String> {
-    let marker = if line.contains("REG_EXPAND_SZ") {
-        "REG_EXPAND_SZ"
-    } else if line.contains("REG_SZ") {
-        "REG_SZ"
-    } else {
-        return None;
-    };
-    let value = line.split_once(marker)?.1.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
-}
-
 /// Trait for tools usable inside the skill ReAct loop
 #[async_trait::async_trait]
 pub trait SkillTool: Send + Sync {
@@ -256,11 +154,9 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-/// Resolve a user-supplied path against a working directory with security
-/// checks.
+/// Resolve a user-supplied path against a working directory.
 /// - Relative paths are resolved against `work_dir`
-/// - Absolute paths are allowed only if they are within `work_dir`
-/// - Paths containing `..` that escape `work_dir` are rejected
+/// - Absolute paths are allowed as-is
 /// - Uses pure path arithmetic (no blocking filesystem I/O)
 pub fn resolve_work_path(work_dir: &Path, input_path: &str) -> Result<PathBuf, String> {
     let path = Path::new(input_path);
@@ -270,19 +166,7 @@ pub fn resolve_work_path(work_dir: &Path, input_path: &str) -> Result<PathBuf, S
         work_dir.join(path)
     };
 
-    // Manually normalize to resolve . and .. before checking boundaries
-    let normalized = normalize_path(&resolved);
-    let work_normalized = normalize_path(work_dir);
-
-    if !normalized.starts_with(&work_normalized) {
-        return Err(format!(
-            "Path '{}' is outside working directory '{}'",
-            input_path,
-            work_dir.display()
-        ));
-    }
-
-    Ok(normalized)
+    Ok(normalize_path(&resolved))
 }
 
 /// Read a file from the filesystem (sandboxed to work_dir)
@@ -496,20 +380,7 @@ impl ProcessExecTool {
             default.to_path_buf()
         };
 
-        // Security: ensure the resolved directory is within allowed prefixes
-        let canonical = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-        let allowed = self.allowed_work_dirs.iter().any(|allowed| {
-            let allowed_canonical =
-                std::fs::canonicalize(allowed).unwrap_or_else(|_| allowed.clone());
-            canonical.starts_with(&allowed_canonical)
-        });
-        if !allowed {
-            return Err(format!(
-                "Working directory '{}' is outside allowed skill directories.",
-                dir.display()
-            ));
-        }
-        Ok(dir)
+        Ok(normalize_path(&dir))
     }
 }
 

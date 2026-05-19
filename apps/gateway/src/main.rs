@@ -2668,6 +2668,10 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
             post(handlers::http::webchat::clear_messages),
         )
         .route(
+            "/api/v1/webchat/sessions/:id/stop",
+            post(handlers::http::webchat::stop_session),
+        )
+        .route(
             "/api/v1/webchat/sessions/:id/export",
             get(handlers::http::webchat::export_session),
         )

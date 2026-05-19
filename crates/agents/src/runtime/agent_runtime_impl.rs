@@ -1158,6 +1158,7 @@ impl AgentRuntime for GatewayAgentRuntime {
         // Send task to agent
         let kernel_request = crate::kernel_integration::KernelTaskRequest {
             task: agent_task,
+            timeout_secs: task.timeout_secs,
             result_tx,
         };
 
@@ -1166,8 +1167,10 @@ impl AgentRuntime for GatewayAgentRuntime {
             .send(kernel_request)
             .map_err(|_| GatewayError::agent("Agent task channel closed".to_string()))?;
 
-        // Wait for result with timeout
-        let timeout = tokio::time::Duration::from_secs(task.timeout_secs);
+        // Wait for result with a small grace period. The kernel worker applies
+        // the real execution timeout; this caller-side timeout only protects
+        // the gateway if the worker itself cannot report back.
+        let timeout = tokio::time::Duration::from_secs(task.timeout_secs.saturating_add(5));
         let result = tokio::time::timeout(timeout, result_rx)
             .await
             .map_err(|_| GatewayError::agent("Task execution timeout".to_string()))?
