@@ -224,6 +224,19 @@ impl WebchatApiService {
             .await
     }
 
+    /// 停止当前会话正在执行的任务
+    pub async fn stop_session(&self, id: &str) -> Result<serde_json::Value, ApiError> {
+        self.client
+            .post(
+                &format!(
+                    "/webchat/sessions/{}/stop",
+                    js_sys::encode_uri_component(id)
+                ),
+                &serde_json::json!({}),
+            )
+            .await
+    }
+
     /// 获取用量统计
     pub async fn get_usage(&self) -> Result<UsagePanel, ApiError> {
         self.client.get("/webchat/usage").await

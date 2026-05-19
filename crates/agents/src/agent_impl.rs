@@ -3290,6 +3290,10 @@ impl Agent {
         messages
     }
 
+    fn is_cancelled(cancel_rx: &Option<tokio::sync::watch::Receiver<bool>>) -> bool {
+        cancel_rx.as_ref().map(|rx| *rx.borrow()).unwrap_or(false)
+    }
+
     async fn process_task_react(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {
         let llm = self
             .llm_interface
@@ -3301,6 +3305,7 @@ impl Agent {
 
         let (input_text, mut extra_params, history, memory_context, weather_data, session_key) =
             self.extract_react_input(task);
+        let cancel_rx = crate::session_cancellation::get_receiver(&session_key).await;
         let tools = self.builtin_react_tools();
         let mut loop_messages = self
             .build_react_messages(
@@ -3336,6 +3341,13 @@ impl Agent {
         .await;
         for round in 0..max_tool_rounds {
             let round_number = round + 1;
+            if Self::is_cancelled(&cancel_rx) {
+                info!(
+                    "process_task_react: session {} cancelled before round {}",
+                    session_key, round_number
+                );
+                return Ok(("⏹️ 已停止当前任务。".to_string(), vec![]));
+            }
             extra_params.insert("react_round".to_string(), round_number.to_string());
             let turn = llm
                 .call_llm_tool_turn(
@@ -3421,6 +3433,13 @@ impl Agent {
                 turn.reasoning_content.as_deref(),
             ));
             for tool_call in &turn.tool_calls {
+                if Self::is_cancelled(&cancel_rx) {
+                    info!(
+                        "process_task_react: session {} cancelled before tool {}",
+                        session_key, tool_call.function.name
+                    );
+                    return Ok(("⏹️ 已停止当前任务。".to_string(), vec![]));
+                }
                 self.emit_react_trace(
                     crate::react_trace::ReActTraceEvent::new(
                         run_id.clone(),
@@ -4155,6 +4174,24 @@ impl Agent {
             psychological_prices,
         );
 
+        let session_key = task
+            .parameters
+            .get("session_id")
+            .or_else(|| task.parameters.get("channel_id"))
+            .cloned()
+            .or_else(|| {
+                serde_json::from_str::<serde_json::Value>(&task.input)
+                    .ok()
+                    .and_then(|json| {
+                        json.get("session_id")
+                            .or_else(|| json.get("channel_id"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
+            })
+            .unwrap_or_else(|| task.id.clone());
+        let cancel_rx = crate::session_cancellation::get_receiver(&session_key).await;
+
         // Step 5: Execute the ReAct loop
         let executor = crate::skills::UnifiedReActExecutor::new(llm).with_config(
             crate::skills::UnifiedReActConfig {
@@ -4163,7 +4200,7 @@ impl Agent {
                 round_timeout_sec: 30,
                 enable_reflection: true,
                 require_structured_output: true,
-                cancel_rx: None,
+                cancel_rx,
                 stream_tx: None,
             },
         );
@@ -6041,6 +6078,7 @@ impl Agent {
                 .or_else(|| extra_params.get("channel_id"))
                 .cloned()
                 .unwrap_or_else(|| task.id.clone());
+            let cancel_rx = crate::session_cancellation::get_receiver(&session_key).await;
             let run_id = Self::react_run_id(&task.id);
             extra_params.insert("agent_id".to_string(), self.config.id.clone());
             extra_params.insert("react_run_id".to_string(), run_id.clone());
@@ -6061,6 +6099,14 @@ impl Agent {
 
             for round in 0..max_tool_rounds {
                 let round_number = round + 1;
+                if Self::is_cancelled(&cancel_rx) {
+                    info!(
+                        "handle_llm_task: session {} cancelled before native tool round {}",
+                        session_key, round_number
+                    );
+                    final_text = "⏹️ 已停止当前任务。".to_string();
+                    break;
+                }
                 extra_params.insert("react_round".to_string(), round_number.to_string());
                 let turn = llm
                     .call_llm_tool_turn(
@@ -6113,6 +6159,14 @@ impl Agent {
                 ));
 
                 for tool_call in &turn.tool_calls {
+                    if Self::is_cancelled(&cancel_rx) {
+                        info!(
+                            "handle_llm_task: session {} cancelled before native tool {}",
+                            session_key, tool_call.function.name
+                        );
+                        final_text = "⏹️ 已停止当前任务。".to_string();
+                        break;
+                    }
                     self.emit_react_trace(
                         crate::react_trace::ReActTraceEvent::new(
                             run_id.clone(),
@@ -6176,6 +6230,9 @@ impl Agent {
                         }
                     };
                     loop_messages.push(Self::tool_result_message(&tool_call.id, output));
+                }
+                if final_text == "⏹️ 已停止当前任务。" {
+                    break;
                 }
             }
 

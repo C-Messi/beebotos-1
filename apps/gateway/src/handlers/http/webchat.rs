@@ -247,6 +247,32 @@ pub async fn clear_messages(
     })))
 }
 
+/// Stop the currently running task for a WebChat session.
+pub async fn stop_session(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+
+    let svc = state
+        .webchat_service
+        .as_ref()
+        .ok_or_else(|| GatewayError::internal("Webchat service not initialized"))?;
+
+    if !svc.validate_session(&id, &user.user_id).await? {
+        return Err(GatewayError::not_found("Session", &id));
+    }
+
+    let cancelled = beebotos_agents::session_cancellation::cancel(&id).await;
+
+    Ok(Json(json!({
+        "success": true,
+        "session_id": id,
+        "cancelled": cancelled,
+    })))
+}
+
 /// Get usage statistics for the authenticated user
 pub async fn get_usage(
     State(state): State<Arc<AppState>>,
