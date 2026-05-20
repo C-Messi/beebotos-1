@@ -533,18 +533,32 @@ impl CronJobService {
         Ok(())
     }
 
-    /// Count consecutive failed runs for a job (within last 24h)
+    /// Count consecutive non-success runs for a job (within last 24h).
+    ///
+    /// Retryable attempts are expected to be stored as `cancelled`, while the
+    /// final exhausted attempt is stored as `failed`. A `success` breaks the
+    /// streak.
     pub async fn get_recent_failure_count(&self, job_id: &str) -> Result<i64, AppError> {
         let since = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM cron_job_runs WHERE job_id = ?1 AND status = 'failed' AND \
-             started_at > ?2",
+        let statuses: Vec<String> = sqlx::query_scalar(
+            "SELECT status FROM cron_job_runs WHERE job_id = ?1 AND started_at > ?2 ORDER BY \
+             started_at DESC",
         )
         .bind(job_id)
         .bind(&since)
-        .fetch_one(&self.db)
+        .fetch_all(&self.db)
         .await
         .map_err(AppError::database)?;
+
+        let mut count = 0;
+        for status in statuses {
+            match status.as_str() {
+                "success" => break,
+                "failed" | "cancelled" => count += 1,
+                _ => {}
+            }
+        }
+
         Ok(count)
     }
 

@@ -397,9 +397,12 @@ async fn run_scheduled_cron_job(
         Err(e) => {
             let err_str = e.to_string();
             let _ = svc
-                .record_run_complete(&run_id, "failed", "", &err_str)
+                .record_run_complete(&run_id, "cancelled", "", &err_str)
                 .await;
-            warn!("Cron job {} failed: {}", job.id, err_str);
+            warn!(
+                "Cron job {} encountered a retryable failure: {}",
+                job.id, err_str
+            );
 
             // Exponential backoff retry (max 3 retries within 24h)
             let fail_count = match svc.get_recent_failure_count(&job.id).await {
@@ -423,6 +426,9 @@ async fn run_scheduled_cron_job(
                 }
             } else {
                 warn!("Cron job {} reached max retries (3), disabling", job.id);
+                let _ = svc
+                    .record_run_complete(&run_id, "failed", "", &err_str)
+                    .await;
                 let _ = svc.disable_job(&job.id).await;
             }
         }
@@ -473,8 +479,38 @@ async fn latest_cron_assistant_output(
     state: &Arc<AppState>,
     job: &crate::services::cron_job_service::CronJob,
 ) -> Option<String> {
-    let svc = state.webchat_service.as_ref()?;
     let channel_id = format!("cron:{}", job.id);
+    if let Some(processor) = state.message_processor.as_ref() {
+        let session_manager = processor.session_manager();
+        for attempt in 0..3 {
+            match session_manager
+                .get_history_for_key(
+                    beebotos_agents::communication::PlatformType::Custom,
+                    &channel_id,
+                    "cron",
+                    50,
+                )
+                .await
+            {
+                Ok(history) => {
+                    if let Some(message) = history
+                        .into_iter()
+                        .rev()
+                        .find(|m| m.role == "assistant" && !looks_like_internal_error(&m.content))
+                    {
+                        return Some(message.content);
+                    }
+                }
+                Err(_) => {}
+            }
+
+            if attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+
+    let svc = state.webchat_service.as_ref()?;
     for attempt in 0..3 {
         let message = match svc
             .get_latest_assistant_message_by_channel(&channel_id)
