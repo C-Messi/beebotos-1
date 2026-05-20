@@ -195,7 +195,7 @@ impl CronJobService {
         req.validate()?;
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let schedule_type_str = match req.schedule_type {
+        let schedule_type_str = match &req.schedule_type {
             ScheduleType::At => "at",
             ScheduleType::Every => "every",
             ScheduleType::Cron => "cron",
@@ -204,11 +204,16 @@ impl CronJobService {
             ContextMode::Main => "main",
             ContextMode::Isolated => "isolated",
         };
-        let next_run = self.compute_next_run(
-            &req.schedule_type,
-            &req.schedule_expr,
-            req.timezone.as_deref().unwrap_or(DEFAULT_TIMEZONE),
-        );
+        let enabled = req.enabled.unwrap_or(true);
+        let next_run = if enabled {
+            self.compute_next_run(
+                &req.schedule_type,
+                &req.schedule_expr,
+                req.timezone.as_deref().unwrap_or(DEFAULT_TIMEZONE),
+            )
+        } else {
+            None
+        };
         let timezone = normalize_timezone(req.timezone.as_deref())?
             .name()
             .to_string();
@@ -229,7 +234,7 @@ impl CronJobService {
         .bind(&req.schedule_expr)
         .bind(&timezone)
         .bind(&req.prompt)
-        .bind(if req.enabled.unwrap_or(true) { 1 } else { 0 })
+        .bind(if enabled { 1 } else { 0 })
         .bind(context_mode_str)
         .bind(req.delivery_channel.as_deref().unwrap_or(""))
         .bind(req.delivery_target.as_deref().unwrap_or(""))
@@ -248,7 +253,7 @@ impl CronJobService {
     pub async fn update_job(&self, id: &str, req: CronJobRequest) -> Result<CronJob, AppError> {
         req.validate()?;
         let now = Utc::now().to_rfc3339();
-        let schedule_type_str = match req.schedule_type {
+        let schedule_type_str = match &req.schedule_type {
             ScheduleType::At => "at",
             ScheduleType::Every => "every",
             ScheduleType::Cron => "cron",
@@ -257,11 +262,16 @@ impl CronJobService {
             ContextMode::Main => "main",
             ContextMode::Isolated => "isolated",
         };
-        let next_run = self.compute_next_run(
-            &req.schedule_type,
-            &req.schedule_expr,
-            req.timezone.as_deref().unwrap_or(DEFAULT_TIMEZONE),
-        );
+        let enabled = req.enabled.unwrap_or(true);
+        let next_run = if enabled {
+            self.compute_next_run(
+                &req.schedule_type,
+                &req.schedule_expr,
+                req.timezone.as_deref().unwrap_or(DEFAULT_TIMEZONE),
+            )
+        } else {
+            None
+        };
         let timezone = normalize_timezone(req.timezone.as_deref())?
             .name()
             .to_string();
@@ -282,7 +292,7 @@ impl CronJobService {
         .bind(&req.schedule_expr)
         .bind(&timezone)
         .bind(&req.prompt)
-        .bind(if req.enabled.unwrap_or(true) { 1 } else { 0 })
+        .bind(if enabled { 1 } else { 0 })
         .bind(context_mode_str)
         .bind(req.delivery_channel.as_deref().unwrap_or(""))
         .bind(req.delivery_target.as_deref().unwrap_or(""))
@@ -778,6 +788,133 @@ fn parse_at_time(expr: &str, timezone: Tz) -> Result<DateTime<Utc>, AppError> {
         .single()
         .map(|d| d.with_timezone(&Utc))
         .ok_or_else(|| AppError::bad_request("One-shot time is ambiguous or invalid in timezone"))
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    use super::*;
+
+    async fn test_service() -> CronJobService {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        sqlx::query(
+            r#"
+            CREATE TABLE cron_jobs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                schedule_type TEXT NOT NULL,
+                schedule_expr TEXT NOT NULL,
+                timezone TEXT DEFAULT 'Asia/Shanghai',
+                prompt TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                context_mode TEXT DEFAULT 'isolated',
+                delivery_channel TEXT DEFAULT '',
+                delivery_target TEXT DEFAULT '',
+                max_runs INTEGER DEFAULT NULL,
+                run_count INTEGER DEFAULT 0,
+                last_run_at TEXT DEFAULT NULL,
+                next_run_at TEXT DEFAULT NULL,
+                created_by TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+            "#,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            r#"
+            CREATE TABLE cron_job_runs (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                output TEXT DEFAULT '',
+                error TEXT DEFAULT '',
+                started_at TEXT DEFAULT (datetime('now')),
+                completed_at TEXT DEFAULT NULL,
+                triggered_by TEXT DEFAULT 'scheduler'
+            );
+            "#,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        CronJobService::new(db)
+    }
+
+    fn every_minute_request(enabled: Option<bool>) -> CronJobRequest {
+        CronJobRequest {
+            name: "test job".to_string(),
+            description: None,
+            schedule_type: ScheduleType::Every,
+            schedule_expr: "1m".to_string(),
+            timezone: Some(DEFAULT_TIMEZONE.to_string()),
+            prompt: "say hi".to_string(),
+            enabled,
+            context_mode: Some(ContextMode::Isolated),
+            delivery_channel: None,
+            delivery_target: None,
+            max_runs: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_disabled_job_clears_next_run() {
+        let svc = test_service().await;
+
+        let job = svc
+            .create_job(every_minute_request(Some(false)), "test")
+            .await
+            .unwrap();
+
+        assert!(!job.enabled);
+        assert!(job.next_run_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_disabled_job_clears_next_run() {
+        let svc = test_service().await;
+        let job = svc
+            .create_job(every_minute_request(Some(true)), "test")
+            .await
+            .unwrap();
+        assert!(job.next_run_at.is_some());
+
+        let updated = svc
+            .update_job(&job.id, every_minute_request(Some(false)))
+            .await
+            .unwrap();
+
+        assert!(!updated.enabled);
+        assert!(updated.next_run_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn toggle_disabled_job_clears_next_run() {
+        let svc = test_service().await;
+        let job = svc
+            .create_job(every_minute_request(Some(true)), "test")
+            .await
+            .unwrap();
+        assert!(job.next_run_at.is_some());
+
+        let enabled = svc.toggle_enabled(&job.id).await.unwrap();
+        let toggled = svc.get_job(&job.id).await.unwrap();
+
+        assert!(!enabled);
+        assert!(!toggled.enabled);
+        assert!(toggled.next_run_at.is_none());
+    }
 }
 
 fn parse_db_datetime(s: &str) -> Option<DateTime<Utc>> {
