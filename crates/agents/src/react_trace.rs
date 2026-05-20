@@ -39,6 +39,8 @@ pub struct ReActTraceEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arguments_preview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub content_preview: Option<String>,
     pub is_error: bool,
     pub timestamp: DateTime<Utc>,
@@ -64,6 +66,7 @@ impl ReActTraceEvent {
             tool_name: None,
             tool_call_id: None,
             arguments_preview: None,
+            reasoning: None,
             content_preview: None,
             is_error,
             timestamp: Utc::now(),
@@ -82,6 +85,11 @@ impl ReActTraceEvent {
 
     pub fn with_arguments_preview(mut self, arguments: impl AsRef<str>) -> Self {
         self.arguments_preview = Some(sanitize_preview(arguments.as_ref()));
+        self
+    }
+
+    pub fn with_reasoning(mut self, reasoning: impl AsRef<str>) -> Self {
+        self.reasoning = Some(sanitize_preview(reasoning.as_ref()));
         self
     }
 

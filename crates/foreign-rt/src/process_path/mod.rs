@@ -19,11 +19,10 @@ use tracing::{debug, info, warn};
 use crate::config::{ProcessPathConfig, SecurityConfig};
 use crate::error::{ForeignRtError, Result};
 use crate::metering::{ForeignGasReport, GasOracle, StandardGasOracle};
-use crate::script_task::{ForeignRuntime, ScriptResult, ScriptTask};
-use crate::wasm_path::WasmExecutorUtils;
-
 use crate::process_path::cgroup::{CgroupController, CgroupHandle};
 use crate::process_path::sandbox::ProcessSandboxConfig;
+use crate::script_task::{ForeignRuntime, ScriptResult, ScriptTask};
+use crate::wasm_path::WasmExecutorUtils;
 
 /// Check if nsjail binary is available
 fn nsjail_available() -> bool {
@@ -119,8 +118,8 @@ impl ProcessSandboxExecutor {
         );
 
         let nsjail_config = sandbox_config.to_nsjail_config();
-        let config_path = std::env::temp_dir()
-            .join(format!("beebotos-nsjail-{}.cfg", uuid::Uuid::new_v4()));
+        let config_path =
+            std::env::temp_dir().join(format!("beebotos-nsjail-{}.cfg", uuid::Uuid::new_v4()));
 
         // Write nsjail config to temp file
         std::fs::write(&config_path, nsjail_config)
@@ -199,11 +198,9 @@ impl ProcessSandboxExecutor {
     ) -> Result<PathBuf> {
         let code = match &task.source {
             crate::script_task::ScriptSource::Inline { code } => code.clone(),
-            crate::script_task::ScriptSource::File { path } => {
-                tokio::fs::read_to_string(path)
-                    .await
-                    .map_err(|e| ForeignRtError::Io(format!("Failed to read script file: {}", e)))?
-            }
+            crate::script_task::ScriptSource::File { path } => tokio::fs::read_to_string(path)
+                .await
+                .map_err(|e| ForeignRtError::Io(format!("Failed to read script file: {}", e)))?,
             crate::script_task::ScriptSource::Prebuilt { module_id, .. } => {
                 return Err(ForeignRtError::InvalidConfig(format!(
                     "Prebuilt modules not yet supported in process path: {}",
@@ -218,7 +215,7 @@ impl ProcessSandboxExecutor {
             .map_err(|e| ForeignRtError::Io(format!("Failed to create temp dir: {}", e)))?;
 
         let ext = runtime.extension();
-        let script_path = temp_dir.join(format!("{}.{}" , task.task_id, ext));
+        let script_path = temp_dir.join(format!("{}.{}", task.task_id, ext));
 
         tokio::fs::write(&script_path, code)
             .await
@@ -380,12 +377,14 @@ impl ProcessSandboxExecutor {
             if result.is_err() {
                 Err(ForeignRtError::Timeout(timeout))
             } else {
-                Ok(ScriptResult::failure(
-                    &task.task_id,
-                    "Process execution failed",
-                    execution_time,
+                Ok(
+                    ScriptResult::failure(
+                        &task.task_id,
+                        "Process execution failed",
+                        execution_time,
+                    )
+                    .with_logs(logs),
                 )
-                .with_logs(logs))
             }
         }
     }
@@ -394,8 +393,9 @@ impl ProcessSandboxExecutor {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
     use super::*;
-    use crate::script_task::{ScriptSource, SandboxRequirements};
+    use crate::script_task::{SandboxRequirements, ScriptSource};
 
     #[test]
     fn test_is_available() {
@@ -429,7 +429,10 @@ mod tests {
             agent_id: None,
         };
 
-        let path = executor.prepare_script_file(ForeignRuntime::Python, &task).await.unwrap();
+        let path = executor
+            .prepare_script_file(ForeignRuntime::Python, &task)
+            .await
+            .unwrap();
         assert!(path.exists());
         assert!(path.to_string_lossy().ends_with(".py"));
 

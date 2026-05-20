@@ -263,9 +263,7 @@ impl ScriptTaskBuilder {
 
     /// Set source to file path
     pub fn with_file(mut self, path: impl Into<PathBuf>) -> Self {
-        self.source = Some(ScriptSource::File {
-            path: path.into(),
-        });
+        self.source = Some(ScriptSource::File { path: path.into() });
         self
     }
 

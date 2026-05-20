@@ -7,15 +7,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tracing::{debug, error, info, instrument, warn};
-
-pub use beebotos_foreign_rt::{
-    ForeignRuntime, ForeignRuntimeConfig, ScriptResult, ScriptSource, ScriptTask, ScriptTaskBuilder,
-    SandboxRequirements,
-};
 use beebotos_foreign_rt::{
     DefaultForeignRuntimeManager, ForeignRuntimeManager, ForeignRuntimeManagerBuilder,
 };
+pub use beebotos_foreign_rt::{
+    ForeignRuntime, ForeignRuntimeConfig, SandboxRequirements, ScriptResult, ScriptSource,
+    ScriptTask, ScriptTaskBuilder,
+};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::error::{AgentError, Result};
 use crate::runtime::executor::{BatchResult, TaskExecutor};
@@ -33,11 +32,9 @@ pub struct ForeignTaskExecutor {
 impl ForeignTaskExecutor {
     /// Create a new foreign task executor from configuration
     pub fn new(config: ForeignRuntimeConfig) -> Result<Self> {
-        let manager = Arc::new(
-            DefaultForeignRuntimeManager::new(config).map_err(|e| {
-                AgentError::configuration(format!("Failed to create foreign runtime manager: {}", e))
-            })?,
-        );
+        let manager = Arc::new(DefaultForeignRuntimeManager::new(config).map_err(|e| {
+            AgentError::configuration(format!("Failed to create foreign runtime manager: {}", e))
+        })?);
 
         Ok(Self { manager })
     }
@@ -53,9 +50,7 @@ impl ForeignTaskExecutor {
             TaskType::ForeignPythonWasm | TaskType::ForeignPythonProcess => ForeignRuntime::Python,
             TaskType::ForeignNodeJsWasm | TaskType::ForeignNodeJsProcess => ForeignRuntime::NodeJs,
             _ => {
-                return Err(AgentError::UnsupportedTaskType(
-                    task.task_type.to_string(),
-                ));
+                return Err(AgentError::UnsupportedTaskType(task.task_type.to_string()));
             }
         };
 
@@ -106,15 +101,20 @@ impl ForeignTaskExecutor {
         builder = match source {
             ScriptSource::Inline { code } => builder.with_inline_code(code),
             ScriptSource::File { path } => builder.with_file(path),
-            ScriptSource::Prebuilt { module_id, entrypoint: ep } => {
+            ScriptSource::Prebuilt {
+                module_id,
+                entrypoint: ep,
+            } => {
                 // Prebuilt requires special handling; for now, treat as inline error
                 return Err(AgentError::UnsupportedTaskType(format!(
-                    "Prebuilt module not supported: {}", module_id
+                    "Prebuilt module not supported: {}",
+                    module_id
                 )));
             }
         };
 
-        builder.build()
+        builder
+            .build()
             .map_err(|e| AgentError::Execution(format!("Failed to build script task: {}", e)))
     }
 
@@ -229,8 +229,9 @@ impl Default for ForeignTaskExecutorBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+
+    use super::*;
 
     #[test]
     fn test_convert_task_python() {

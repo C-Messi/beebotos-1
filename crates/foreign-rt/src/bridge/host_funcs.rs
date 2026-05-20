@@ -76,7 +76,12 @@ pub trait BackendServices: Send + Sync {
     }
 
     /// IPC send message
-    fn ipc_send(&self, _target: &str, _msg_type: &str, _payload: serde_json::Value) -> Option<String> {
+    fn ipc_send(
+        &self,
+        _target: &str,
+        _msg_type: &str,
+        _payload: serde_json::Value,
+    ) -> Option<String> {
         None
     }
     /// IPC receive messages (non-blocking)
@@ -286,13 +291,17 @@ impl HostFunctionDispatcher {
                 debug!("IPC send to {}: type={}", target, msg_type);
                 match self.backend.ipc_send(target, msg_type, payload) {
                     Some(msg_id) => BridgeResponse::success(json!({ "message_id": msg_id })),
-                    None => BridgeResponse::success(json!({ "message_id": uuid::Uuid::new_v4().to_string(), "mock": true })),
+                    None => BridgeResponse::success(
+                        json!({ "message_id": uuid::Uuid::new_v4().to_string(), "mock": true }),
+                    ),
                 }
             }
             "receive_messages" => {
-                let agent_id = call.args.get(0).and_then(|a| a.as_str()).unwrap_or(
-                    self.context.agent_id.as_deref().unwrap_or(""),
-                );
+                let agent_id = call
+                    .args
+                    .get(0)
+                    .and_then(|a| a.as_str())
+                    .unwrap_or(self.context.agent_id.as_deref().unwrap_or(""));
                 let limit = call.args.get(1).and_then(|a| a.as_u64()).unwrap_or(10) as usize;
                 debug!("IPC receive for {}: limit={}", agent_id, limit);
                 let messages = self.backend.ipc_receive(agent_id, limit);
@@ -409,9 +418,15 @@ impl HostFunctionDispatcher {
 
                 match level {
                     "debug" => debug!(task_id = %self.context.task_id, "[script] {}", message),
-                    "info" => tracing::info!(task_id = %self.context.task_id, "[script] {}", message),
-                    "warn" => tracing::warn!(task_id = %self.context.task_id, "[script] {}", message),
-                    "error" => tracing::error!(task_id = %self.context.task_id, "[script] {}", message),
+                    "info" => {
+                        tracing::info!(task_id = %self.context.task_id, "[script] {}", message)
+                    }
+                    "warn" => {
+                        tracing::warn!(task_id = %self.context.task_id, "[script] {}", message)
+                    }
+                    "error" => {
+                        tracing::error!(task_id = %self.context.task_id, "[script] {}", message)
+                    }
                     _ => tracing::info!(task_id = %self.context.task_id, "[script] {}", message),
                 }
 
@@ -517,12 +532,10 @@ impl HostFunctionDispatcher {
                     "bridge_version": crate::bridge::BRIDGE_PROTOCOL_VERSION,
                 }))
             }
-            "time" => {
-                BridgeResponse::success(json!({
-                    "timestamp_ms": chrono::Utc::now().timestamp_millis(),
-                    "rfc3339": chrono::Utc::now().to_rfc3339(),
-                }))
-            }
+            "time" => BridgeResponse::success(json!({
+                "timestamp_ms": chrono::Utc::now().timestamp_millis(),
+                "rfc3339": chrono::Utc::now().to_rfc3339(),
+            })),
             _ => BridgeResponse::error(format!("Unknown system method: {}", call.method)),
         }
     }
@@ -571,9 +584,8 @@ mod tests {
 
     #[test]
     fn test_dispatcher_env_whitelist() {
-        let dispatcher = HostFunctionDispatcher::new(
-            HostContext::new("test").with_agent_id("agent-1"),
-        );
+        let dispatcher =
+            HostFunctionDispatcher::new(HostContext::new("test").with_agent_id("agent-1"));
 
         let response = dispatcher.handle_env(BridgeCall {
             namespace: "env".to_string(),
@@ -621,7 +633,10 @@ mod tests {
             })
             .await;
         assert!(get_resp.success);
-        assert_eq!(get_resp.data, Some(json!({"value": "value1", "found": true})));
+        assert_eq!(
+            get_resp.data,
+            Some(json!({"value": "value1", "found": true}))
+        );
 
         // Delete
         let del_resp = dispatcher

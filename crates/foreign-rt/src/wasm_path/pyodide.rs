@@ -44,7 +44,7 @@ impl PyodideExecutor {
         };
 
         let executor = WasmScriptExecutor::new(engine.engine().clone());
-        
+
         // Precompile module if available
         if let Some(ref bytes) = module_bytes {
             if let Err(e) = executor.get_or_compile_module(bytes, ForeignRuntime::Python) {
@@ -205,6 +205,7 @@ impl WasmRuntimeExecutor for PyodideExecutor {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
     use super::*;
     use crate::script_task::ScriptSource;
 
@@ -217,9 +218,7 @@ mod tests {
 
     #[test]
     fn test_prepare_code() {
-        let engine = Arc::new(
-            WasmRuntimeEngine::new(WasmPathConfig::default()).unwrap()
-        );
+        let engine = Arc::new(WasmRuntimeEngine::new(WasmPathConfig::default()).unwrap());
         let executor = PyodideExecutor::new(engine, test_config()).unwrap();
 
         let task = ScriptTask {

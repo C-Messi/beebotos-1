@@ -5,8 +5,8 @@
 //!
 //! - **WASM Path**: Pyodide (Python) and QuickJS (Node.js) executed within
 //!   wasmtime sandbox, leveraging existing Kernel WASM infrastructure.
-//! - **Process Path**: CPython and Node.js executed in isolated processes
-//!   using Linux namespaces, seccomp-bpf, and cgroup v2.
+//! - **Process Path**: CPython and Node.js executed in isolated processes using
+//!   Linux namespaces, seccomp-bpf, and cgroup v2.
 //!
 //! # Architecture
 //!
@@ -41,23 +41,24 @@ pub mod wasm_path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{error, info, instrument, warn};
-
 pub use config::{
-    AuditLevel, CgroupConfig, ExecutionRoute, ForeignRuntimeConfig, ProcessPathConfig,
-    RouteHints, SeccompPolicy, SecurityConfig, WasmPathConfig, WasmPoolConfig,
+    AuditLevel, CgroupConfig, ExecutionRoute, ForeignRuntimeConfig, ProcessPathConfig, RouteHints,
+    SeccompPolicy, SecurityConfig, WasmPathConfig, WasmPoolConfig,
 };
 pub use error::{ForeignRtError, Result};
 pub use metering::{ForeignGasReport, GasLimit, GasOracle, StandardGasOracle};
 pub use pool::{ObjectPool, PooledInstance, ProcessSlotToken, RuntimePool};
 pub use router::RuntimeRouter;
 pub use script_task::{
-    ForeignRuntime, LogEntry, LogLevel, PathMapping, RuntimePoolStats, ScriptArtifact, ScriptResult,
-    ScriptSource, ScriptTask, ScriptTaskBuilder, SandboxRequirements,
+    ForeignRuntime, LogEntry, LogLevel, PathMapping, RuntimePoolStats, SandboxRequirements,
+    ScriptArtifact, ScriptResult, ScriptSource, ScriptTask, ScriptTaskBuilder,
 };
+use tracing::{error, info, instrument, warn};
 
 use crate::process_path::ProcessSandboxExecutor;
-use crate::wasm_path::{pyodide::PyodideExecutor, quickjs::QuickJsExecutor, WasmRuntimeEngine, WasmRuntimeExecutor};
+use crate::wasm_path::pyodide::PyodideExecutor;
+use crate::wasm_path::quickjs::QuickJsExecutor;
+use crate::wasm_path::{WasmRuntimeEngine, WasmRuntimeExecutor};
 
 /// Foreign Runtime Manager trait
 ///
@@ -167,19 +168,16 @@ impl DefaultForeignRuntimeManager {
         });
 
         // Initialize process executor
-        let process_executor = if config.process.python_rootfs.is_some()
-            || config.process.nodejs_rootfs.is_some()
-        {
-            let executor = ProcessSandboxExecutor::new(
-                config.process.clone(),
-                config.security.clone(),
-            );
-            info!("Process sandbox executor initialized");
-            Some(executor)
-        } else {
-            warn!("No process rootfs configured, process path unavailable");
-            None
-        };
+        let process_executor =
+            if config.process.python_rootfs.is_some() || config.process.nodejs_rootfs.is_some() {
+                let executor =
+                    ProcessSandboxExecutor::new(config.process.clone(), config.security.clone());
+                info!("Process sandbox executor initialized");
+                Some(executor)
+            } else {
+                warn!("No process rootfs configured, process path unavailable");
+                None
+            };
 
         let router = RuntimeRouter::new(config.clone());
         let pool = RuntimePool::new(config.wasm.pool.clone());
@@ -220,12 +218,9 @@ impl ForeignRuntimeManager for DefaultForeignRuntimeManager {
 
         // Select execution route
         let hints = RouteHints::default();
-        let route = self.router.select(
-            task.runtime,
-            &task.source,
-            &task.sandbox,
-            &hints,
-        )?;
+        let route = self
+            .router
+            .select(task.runtime, &task.source, &task.sandbox, &hints)?;
 
         info!(route = route.name(), "Selected execution route");
 
@@ -265,14 +260,14 @@ impl ForeignRuntimeManager for DefaultForeignRuntimeManager {
             ExecutionRoute::ProcessPython | ExecutionRoute::ProcessNodeJs => {
                 if let Some(ref executor) = self.process_executor {
                     // Acquire process slot
-                    let _permit = self
-                        .pool
-                        .acquire_process_slot(task.runtime)
-                        .await
-                        .map_err(|e| {
-                            error!("Failed to acquire process slot: {}", e);
-                            e
-                        })?;
+                    let _permit =
+                        self.pool
+                            .acquire_process_slot(task.runtime)
+                            .await
+                            .map_err(|e| {
+                                error!("Failed to acquire process slot: {}", e);
+                                e
+                            })?;
 
                     executor.execute(&task).await
                 } else {
@@ -345,12 +340,16 @@ impl ForeignRuntimeManager for DefaultForeignRuntimeManager {
         match runtime {
             ForeignRuntime::Python => {
                 if let Some(ref executor) = self.pyodide {
-                    executor.prewarm(self.config.wasm.pool.pyodide_warm_instances).await?;
+                    executor
+                        .prewarm(self.config.wasm.pool.pyodide_warm_instances)
+                        .await?;
                 }
             }
             ForeignRuntime::NodeJs => {
                 if let Some(ref executor) = self.quickjs {
-                    executor.prewarm(self.config.wasm.pool.quickjs_warm_instances).await?;
+                    executor
+                        .prewarm(self.config.wasm.pool.quickjs_warm_instances)
+                        .await?;
                 }
             }
         }
@@ -450,6 +449,7 @@ impl Default for ForeignRuntimeManagerBuilder {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -477,7 +477,9 @@ mod tests {
         let task = ScriptTask {
             task_id: "test".to_string(),
             runtime: ForeignRuntime::Python,
-            source: ScriptSource::Inline { code: "1+1".to_string() },
+            source: ScriptSource::Inline {
+                code: "1+1".to_string(),
+            },
             entrypoint: "main".to_string(),
             input: serde_json::Value::Null,
             sandbox: SandboxRequirements::default(),

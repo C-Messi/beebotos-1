@@ -45,6 +45,7 @@ pub mod a2a;
 pub mod agent_impl;
 pub mod channel_registry;
 // Channel factories are now in communication::channel module
+mod command_env;
 pub mod communication;
 pub mod config_watcher;
 pub mod context;
@@ -219,9 +220,7 @@ pub use react_trace::{
 // 🟢 P1 FIX: Gateway AgentRuntime implementation
 pub use runtime::agent_runtime_impl::GatewayAgentRuntime;
 // 🆕 Foreign runtime executor for Python/Node.js support
-pub use runtime::foreign_executor::{
-    ForeignTaskExecutor, ForeignTaskExecutorBuilder,
-};
+pub use runtime::foreign_executor::{ForeignTaskExecutor, ForeignTaskExecutorBuilder};
 // 🟢 P1 FIX: Re-export runtime types for object pool and batch processing
 pub use runtime::{
     AgentRuntime, AgentRuntimeBuilder, BatchExecutor, BatchResult, RuntimeConfig,

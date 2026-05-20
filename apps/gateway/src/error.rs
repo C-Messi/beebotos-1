@@ -199,47 +199,142 @@ pub fn convert_agent_error(err: beebotos_agents::error::AgentError) -> GatewayEr
         AgentError::RateLimited(msg) => GatewayError::rate_limited(Some(extract_retry_after(&msg))),
 
         // 503 Service Unavailable
-        AgentError::NotConnected(msg) => GatewayError::service_unavailable("Agent", msg),
+        AgentError::NotConnected(msg) => {
+            tracing::warn!(correlation_id = %correlation_id, details = %msg, "Agent not connected");
+            GatewayError::service_unavailable(
+                "Agent",
+                "智能体当前没有连接成功，我已经停止继续执行。请稍后重试或检查通道/服务状态。",
+            )
+        }
 
         // 500 Internal Server Errors
-        AgentError::Timeout(_) => GatewayError::timeout("Agent operation", 30),
-        AgentError::Platform(msg) => GatewayError::internal(format!("Platform error: {}", msg)),
-        AgentError::Execution(msg) => GatewayError::internal(format!("Execution error: {}", msg)),
-        AgentError::TaskExecutionFailed(msg) => GatewayError::Internal {
-            message: format!("Task execution failed: {}", msg),
+        AgentError::Timeout(msg) => {
+            tracing::warn!(correlation_id = %correlation_id, details = %msg, "Agent operation timed out");
+            GatewayError::timeout("智能体任务执行", 30)
+        }
+        AgentError::Platform(msg) => friendly_agent_internal(
             correlation_id,
-        },
-        AgentError::A2A(msg) => GatewayError::internal(format!("A2A communication error: {}", msg)),
-        AgentError::Wasm(msg) => GatewayError::internal(format!("WASM execution error: {}", msg)),
-        AgentError::MCPError(msg) => GatewayError::internal(format!("MCP tool error: {}", msg)),
-        AgentError::ServiceMesh(msg) => {
-            GatewayError::internal(format!("Service mesh error: {}", msg))
-        }
-        AgentError::DIDResolution(msg) => {
-            GatewayError::internal(format!("DID resolution error: {}", msg))
-        }
-        AgentError::CommunicationFailed(msg) => {
-            GatewayError::internal(format!("Communication failed: {}", msg))
-        }
-        AgentError::Planning(msg) => GatewayError::internal(format!("Planning error: {}", msg)),
-        AgentError::MessageReceiveFailed(msg) => {
-            GatewayError::internal(format!("Message receive failed: {}", msg))
-        }
-        AgentError::MessageSendFailed(msg) => {
-            GatewayError::internal(format!("Message send failed: {}", msg))
-        }
-        AgentError::Internal(msg) => GatewayError::internal(msg),
-        AgentError::Database(msg) => GatewayError::internal(format!("Database error: {}", msg)),
-        AgentError::Serialization(msg) => {
-            GatewayError::internal(format!("Serialization error: {}", msg))
-        }
-        AgentError::ResourceLimit(msg) => {
-            GatewayError::internal(format!("Resource limit: {}", msg))
-        }
+            "Platform error",
+            msg,
+            "平台通道处理失败，我已经停止继续执行。请稍后重试，或检查对应通道配置。",
+        ),
+        AgentError::Execution(msg) => friendly_agent_internal(
+            correlation_id,
+            "Execution error",
+            msg,
+            "任务执行过程中遇到问题，我已经停止继续重试，避免重复调用工具或陷入循环。",
+        ),
+        AgentError::TaskExecutionFailed(msg) => friendly_agent_internal(
+            correlation_id,
+            "Task execution failed",
+            msg,
+            "任务执行失败，我已经停止继续运行。请缩小任务范围或稍后重试。",
+        ),
+        AgentError::A2A(msg) => friendly_agent_internal(
+            correlation_id,
+            "A2A communication error",
+            msg,
+            "智能体之间通信失败，我已经停止继续执行。请稍后重试。",
+        ),
+        AgentError::Wasm(msg) => friendly_agent_internal(
+            correlation_id,
+            "WASM execution error",
+            msg,
+            "沙箱执行失败，我已经停止继续运行。请检查技能或运行时配置。",
+        ),
+        AgentError::MCPError(msg) => friendly_agent_internal(
+            correlation_id,
+            "MCP tool error",
+            msg,
+            "工具调用失败，我已经停止继续重试。请检查 MCP 工具配置、权限或参数。",
+        ),
+        AgentError::ServiceMesh(msg) => friendly_agent_internal(
+            correlation_id,
+            "Service mesh error",
+            msg,
+            "服务发现或路由失败，我已经停止继续执行。请稍后重试。",
+        ),
+        AgentError::DIDResolution(msg) => friendly_agent_internal(
+            correlation_id,
+            "DID resolution error",
+            msg,
+            "身份解析失败，我已经停止继续执行。请检查身份或凭证配置。",
+        ),
+        AgentError::CommunicationFailed(msg) => friendly_agent_internal(
+            correlation_id,
+            "Communication failed",
+            msg,
+            "消息发送或接收失败，我已经停止继续执行。请检查通道连接状态。",
+        ),
+        AgentError::Planning(msg) => friendly_agent_internal(
+            correlation_id,
+            "Planning error",
+            msg,
+            "任务规划失败，我已经停止继续运行。请缩小任务范围或补充更明确的目标。",
+        ),
+        AgentError::MessageReceiveFailed(msg) => friendly_agent_internal(
+            correlation_id,
+            "Message receive failed",
+            msg,
+            "消息接收失败，请稍后重试或检查通道状态。",
+        ),
+        AgentError::MessageSendFailed(msg) => friendly_agent_internal(
+            correlation_id,
+            "Message send failed",
+            msg,
+            "回复发送失败，请稍后重试或检查通道状态。",
+        ),
+        AgentError::Internal(msg) => friendly_agent_internal(
+            correlation_id,
+            "Internal agent error",
+            msg,
+            "智能体内部处理失败，我已经停止继续执行。请稍后重试。",
+        ),
+        AgentError::Database(msg) => friendly_agent_internal(
+            correlation_id,
+            "Database error",
+            msg,
+            "数据读写失败，我已经停止继续执行。请稍后重试。",
+        ),
+        AgentError::Serialization(msg) => friendly_agent_internal(
+            correlation_id,
+            "Serialization error",
+            msg,
+            "数据格式处理失败，我已经停止继续执行。请检查输入内容后重试。",
+        ),
+        AgentError::ResourceLimit(msg) => friendly_agent_internal(
+            correlation_id,
+            "Resource limit exceeded",
+            msg,
+            "任务触达资源上限，我已经停止继续执行，避免占用过多系统资源。",
+        ),
         AgentError::NotFound(msg) => GatewayError::not_found("resource", msg),
-        AgentError::Wallet(msg) => GatewayError::internal(format!("Wallet error: {}", msg)),
-        AgentError::TimeoutMsg(_msg) => GatewayError::timeout("Agent operation", 30),
+        AgentError::Wallet(msg) => friendly_agent_internal(
+            correlation_id,
+            "Wallet error",
+            msg,
+            "钱包操作失败，我已经停止继续执行。请检查钱包配置、余额或权限。",
+        ),
+        AgentError::TimeoutMsg(msg) => {
+            tracing::warn!(correlation_id = %correlation_id, details = %msg, "Agent operation timed out");
+            GatewayError::timeout("智能体任务执行", 30)
+        }
     }
+}
+
+fn friendly_agent_internal(
+    correlation_id: String,
+    label: &str,
+    details: String,
+    user_message: &str,
+) -> GatewayError {
+    tracing::warn!(
+        correlation_id = %correlation_id,
+        error_label = %label,
+        details = %details,
+        "Agent error converted to user-facing message"
+    );
+    GatewayError::agent(format!("{}（参考编号：{}）", user_message, correlation_id))
 }
 
 /// Extract retry after seconds from rate limit message

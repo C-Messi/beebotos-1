@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{interval, Duration};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Expand tilde to home directory
 fn expand_tilde(path: &str) -> String {
