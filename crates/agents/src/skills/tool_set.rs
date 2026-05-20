@@ -14,6 +14,19 @@ use tracing::{info, warn};
 use crate::skills::process_sandbox::apply_sandbox;
 use crate::Agent;
 
+#[derive(Debug, Clone)]
+struct SearchResult {
+    title: String,
+    url: String,
+    snippet: String,
+}
+
+#[derive(Debug, Clone)]
+struct SearchFailure {
+    provider: &'static str,
+    reason: String,
+}
+
 fn configure_shell_command(cmd: &mut tokio::process::Command, command: &str) {
     #[cfg(windows)]
     {
@@ -1055,8 +1068,8 @@ impl SkillTool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web for information using DuckDuckGo. Parameters: query (string), num_results \
-         (integer, optional, default 5, max 10)"
+        "Search the web for information using Bing first, then DuckDuckGo as fallback. Parameters: \
+         query (string), num_results (integer, optional, default 5, max 10)"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1080,81 +1093,281 @@ impl SkillTool for WebSearchTool {
             return Ok(official);
         }
 
-        let encoded_query = urlencoding::encode(query);
-        let url = format!("https://html.duckduckgo.com/html/?q={}", encoded_query);
-
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .user_agent(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                 Chrome/120.0.0.0",
+            )
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
-        let response = client
-            .get(&url)
-            .header(
-                "User-Agent",
-                "Mozilla/5.0 (X11; Linux x64) AppleWebKit/537.36 (KHTML, like Gecko) \
-                 Chrome/120.0.0.0",
-            )
-            .send()
-            .await
-            .map_err(|e| format!("Search request failed: {}", e))?;
-
-        let html = response
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read search response: {}", e))?;
-
-        let document = scraper::Html::parse_document(&html);
-        let result_selector = scraper::Selector::parse(".result")
-            .map_err(|_| "Failed to parse result selector".to_string())?;
-        let title_selector = scraper::Selector::parse(".result__a")
-            .map_err(|_| "Failed to parse title selector".to_string())?;
-        let snippet_selector = scraper::Selector::parse(".result__snippet")
-            .map_err(|_| "Failed to parse snippet selector".to_string())?;
-
-        let mut results = Vec::new();
-        for (i, element) in document.select(&result_selector).enumerate() {
-            if i >= num_results {
-                break;
+        let mut failures = Vec::new();
+        let (provider, results) = match search_bing(&client, query, num_results).await {
+            Ok(results) => ("bing", results),
+            Err(bing_error) => {
+                failures.push(bing_error);
+                match search_duckduckgo(&client, query, num_results).await {
+                    Ok(results) => ("duckduckgo", results),
+                    Err(duckduckgo_error) => {
+                        failures.push(duckduckgo_error);
+                        let reasons = failures
+                            .into_iter()
+                            .map(|failure| format!("{}: {}", failure.provider, failure.reason))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        return Err(format!(
+                            "web_search failed after trying Bing and DuckDuckGo: {}",
+                            reasons
+                        ));
+                    }
+                }
             }
+        };
 
-            let title = element
-                .select(&title_selector)
-                .next()
-                .map(|e| e.text().collect::<String>().trim().to_string())
-                .unwrap_or_default();
+        Ok(format_search_results(provider, query, results))
+    }
+}
 
-            let link = element
-                .select(&title_selector)
-                .next()
-                .and_then(|e| e.value().attr("href"))
-                .unwrap_or("#");
-
-            let snippet = element
-                .select(&snippet_selector)
-                .next()
-                .map(|e| e.text().collect::<String>().trim().to_string())
-                .unwrap_or_default();
-
-            results.push(format!(
-                "{}. {}\nURL: {}\n{}\n",
-                i + 1,
-                title,
-                link,
-                snippet
+fn format_search_results(provider: &str, query: &str, results: Vec<SearchResult>) -> String {
+    let mut lines = vec![format!(
+        "Provider: {}\nQuery: {}\nResults: {}",
+        provider,
+        query,
+        results.len()
+    )];
+    for (idx, result) in results.into_iter().enumerate() {
+        if result.snippet.is_empty() {
+            lines.push(format!(
+                "{}. {}\nURL: {}",
+                idx + 1,
+                result.title,
+                result.url
+            ));
+        } else {
+            lines.push(format!(
+                "{}. {}\nURL: {}\n{}",
+                idx + 1,
+                result.title,
+                result.url,
+                result.snippet
             ));
         }
+    }
+    lines.join("\n\n")
+}
 
-        if results.is_empty() {
-            Ok(
-                "No search results found. I could not verify this via live web search; do not use \
-                 stale memory as current data."
-                    .to_string(),
-            )
-        } else {
-            Ok(results.join("\n"))
+fn decode_html_entities(text: &str) -> String {
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+fn strip_html_to_text(html: &str) -> String {
+    let tag_re = match Regex::new(r"(?is)<[^>]+>") {
+        Ok(re) => re,
+        Err(_) => return decode_html_entities(html).trim().to_string(),
+    };
+    let collapsed_re = match Regex::new(r"\s+") {
+        Ok(re) => re,
+        Err(_) => return decode_html_entities(html).trim().to_string(),
+    };
+    let without_tags = tag_re.replace_all(html, " ");
+    let decoded = decode_html_entities(&without_tags);
+    collapsed_re.replace_all(decoded.trim(), " ").to_string()
+}
+
+fn decode_bing_url(raw: &str) -> String {
+    let decoded = decode_html_entities(raw);
+    if let Ok(parsed) = url::Url::parse(&decoded) {
+        if parsed
+            .domain()
+            .map(|domain| domain.ends_with("bing.com"))
+            .unwrap_or(false)
+            && parsed.path() == "/ck/a"
+        {
+            for (key, value) in parsed.query_pairs() {
+                if key == "u" || key == "url" {
+                    return value.to_string();
+                }
+            }
         }
     }
+    decoded
+}
+
+fn decode_duckduckgo_url(raw: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(raw) {
+        if parsed.domain() == Some("duckduckgo.com") {
+            for (key, value) in parsed.query_pairs() {
+                if key == "uddg" {
+                    return value.to_string();
+                }
+            }
+        }
+    }
+    raw.to_string()
+}
+
+fn parse_bing_results(html: &str, count: usize) -> Vec<SearchResult> {
+    let mut results = Vec::new();
+    let item_re =
+        match Regex::new(r#"(?is)<li[^>]+class=["'][^"']*b_algo[^"']*["'][^>]*>(.*?)</li>"#) {
+            Ok(re) => re,
+            Err(_) => return results,
+        };
+    let link_re =
+        match Regex::new(r#"(?is)<h2[^>]*>\s*<a[^>]+href=["']([^"']+)["'][^>]*>(.*?)</a>"#) {
+            Ok(re) => re,
+            Err(_) => return results,
+        };
+    let snippet_re = match Regex::new(
+        r#"(?is)<p[^>]*>(.*?)</p>|<div[^>]+class=["'][^"']*b_caption[^"']*["'][^>]*>.*?<p[^>]*>(.*?)</p>"#,
+    ) {
+        Ok(re) => re,
+        Err(_) => return results,
+    };
+    for item in item_re.captures_iter(html) {
+        let item_html = item.get(1).map(|m| m.as_str()).unwrap_or("");
+        let Some(link_caps) = link_re.captures(item_html) else {
+            continue;
+        };
+        let raw_url = link_caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        let title_html = link_caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        let title = strip_html_to_text(title_html);
+        let url = decode_bing_url(raw_url);
+        let snippet = snippet_re
+            .captures(item_html)
+            .and_then(|caps| caps.get(1).or_else(|| caps.get(2)))
+            .map(|m| strip_html_to_text(m.as_str()))
+            .unwrap_or_default();
+        if title.is_empty() || url.is_empty() {
+            continue;
+        }
+        results.push(SearchResult {
+            title,
+            url,
+            snippet,
+        });
+        if results.len() >= count {
+            break;
+        }
+    }
+    results
+}
+
+fn parse_duckduckgo_results(html: &str, count: usize) -> Vec<SearchResult> {
+    let mut results = Vec::new();
+    let document = scraper::Html::parse_document(html);
+    let result_selector = match scraper::Selector::parse(".result") {
+        Ok(selector) => selector,
+        Err(_) => return results,
+    };
+    let title_selector = match scraper::Selector::parse(".result__a") {
+        Ok(selector) => selector,
+        Err(_) => return results,
+    };
+    let snippet_selector = match scraper::Selector::parse(".result__snippet") {
+        Ok(selector) => selector,
+        Err(_) => return results,
+    };
+
+    for element in document.select(&result_selector) {
+        let Some(title_el) = element.select(&title_selector).next() else {
+            continue;
+        };
+        let title = title_el.text().collect::<String>().trim().to_string();
+        let raw_url = title_el.value().attr("href").unwrap_or("");
+        let url = decode_duckduckgo_url(&decode_html_entities(raw_url));
+        let snippet = element
+            .select(&snippet_selector)
+            .next()
+            .map(|e| e.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+        if title.is_empty() || url.is_empty() {
+            continue;
+        }
+        results.push(SearchResult {
+            title,
+            url,
+            snippet,
+        });
+        if results.len() >= count {
+            break;
+        }
+    }
+    results
+}
+
+async fn search_bing(
+    client: &reqwest::Client,
+    query: &str,
+    count: usize,
+) -> Result<Vec<SearchResult>, SearchFailure> {
+    let url = format!(
+        "https://cn.bing.com/search?q={}&ensearch=0",
+        urlencoding::encode(query)
+    );
+    let response = client.get(&url).send().await.map_err(|e| SearchFailure {
+        provider: "bing",
+        reason: format!("request failed: {}", e),
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(SearchFailure {
+            provider: "bing",
+            reason: format!("HTTP {}", status),
+        });
+    }
+    let html = response.text().await.map_err(|e| SearchFailure {
+        provider: "bing",
+        reason: format!("failed to read response: {}", e),
+    })?;
+    let results = parse_bing_results(&html, count);
+    if results.is_empty() {
+        return Err(SearchFailure {
+            provider: "bing",
+            reason: "no parseable results".to_string(),
+        });
+    }
+    Ok(results)
+}
+
+async fn search_duckduckgo(
+    client: &reqwest::Client,
+    query: &str,
+    count: usize,
+) -> Result<Vec<SearchResult>, SearchFailure> {
+    let url = format!(
+        "https://html.duckduckgo.com/html/?q={}",
+        urlencoding::encode(query)
+    );
+    let response = client.get(&url).send().await.map_err(|e| SearchFailure {
+        provider: "duckduckgo",
+        reason: format!("request failed: {}", e),
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(SearchFailure {
+            provider: "duckduckgo",
+            reason: format!("HTTP {}", status),
+        });
+    }
+    let html = response.text().await.map_err(|e| SearchFailure {
+        provider: "duckduckgo",
+        reason: format!("failed to read response: {}", e),
+    })?;
+    let results = parse_duckduckgo_results(&html, count);
+    if results.is_empty() {
+        return Err(SearchFailure {
+            provider: "duckduckgo",
+            reason: "no parseable results; it may be blocking automated search".to_string(),
+        });
+    }
+    Ok(results)
 }
 
 async fn try_official_search_shortcut(query: &str) -> Option<String> {
