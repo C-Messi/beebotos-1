@@ -75,6 +75,18 @@ pub struct ChatMessage {
     pub created_at: DateTime<Utc>,
 }
 
+/// Search result from persisted session history.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChatSessionSearchResult {
+    pub message_id: String,
+    pub session_id: String,
+    pub session_title: String,
+    pub role: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub score: f32,
+}
+
 /// SQLite-compatible row for ChatMessage
 #[derive(sqlx::FromRow)]
 struct ChatMessageRow {
@@ -85,6 +97,17 @@ struct ChatMessageRow {
     metadata: String,
     token_usage: Option<String>,
     created_at: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct ChatSessionSearchRow {
+    message_id: String,
+    session_id: String,
+    session_title: String,
+    role: String,
+    content: String,
+    created_at: String,
+    rank: f64,
 }
 
 impl TryFrom<ChatMessageRow> for ChatMessage {
@@ -122,6 +145,48 @@ impl TryFrom<ChatMessageRow> for ChatMessage {
                 .flatten(),
             created_at: parse_sqlite_datetime(&row.created_at)?,
         })
+    }
+}
+
+impl TryFrom<ChatSessionSearchRow> for ChatSessionSearchResult {
+    type Error = String;
+
+    fn try_from(row: ChatSessionSearchRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            message_id: row.message_id,
+            session_id: row.session_id,
+            session_title: row.session_title,
+            role: row.role,
+            content: row.content,
+            created_at: parse_sqlite_datetime(&row.created_at)?,
+            score: 1.0 / (row.rank.abs() as f32 + 1.0),
+        })
+    }
+}
+
+fn build_session_fts_query(query: &str) -> String {
+    let mut tokens: Vec<String> = query
+        .split_whitespace()
+        .filter_map(sanitize_session_fts_token)
+        .take(12)
+        .collect();
+    if tokens.is_empty() {
+        if let Some(token) = sanitize_session_fts_token(query) {
+            tokens.push(token);
+        }
+    }
+    tokens.join(" OR ")
+}
+
+fn sanitize_session_fts_token(token: &str) -> Option<String> {
+    let cleaned: String = token
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(format!("{}*", cleaned))
     }
 }
 
@@ -253,6 +318,53 @@ impl WebchatService {
         let messages: Result<Vec<_>, _> = rows.into_iter().map(|r| r.try_into()).collect();
 
         messages.map_err(|e: String| AppError::Internal(format!("Failed to parse messages: {}", e)))
+    }
+
+    /// Search persisted messages across a user's sessions.
+    pub async fn search_messages(
+        &self,
+        user_id: &str,
+        query: &str,
+        limit: usize,
+        exclude_session_id: Option<&str>,
+    ) -> Result<Vec<ChatSessionSearchResult>, AppError> {
+        let fts_query = build_session_fts_query(query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows: Vec<ChatSessionSearchRow> = sqlx::query_as(
+            r#"
+            SELECT
+                f.message_id,
+                f.session_id,
+                s.title AS session_title,
+                m.role,
+                m.content,
+                m.created_at,
+                bm25(chat_messages_fts) AS rank
+            FROM chat_messages_fts f
+            JOIN chat_messages m ON m.id = f.message_id
+            JOIN chat_sessions s ON s.id = f.session_id
+            WHERE chat_messages_fts MATCH ?1
+              AND f.user_id = ?2
+              AND (?3 IS NULL OR f.session_id != ?3)
+            ORDER BY rank ASC, m.created_at DESC
+            LIMIT ?4
+            "#,
+        )
+        .bind(&fts_query)
+        .bind(user_id)
+        .bind(exclude_session_id)
+        .bind(limit.clamp(1, 20) as i64)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| AppError::database(e))?;
+
+        rows.into_iter()
+            .map(|r| r.try_into())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Internal(format!("Failed to parse search result: {}", e)))
     }
 
     /// Save a message to a session
@@ -499,5 +611,138 @@ impl WebchatService {
         row.map(|r| r.try_into())
             .transpose()
             .map_err(|e| AppError::Internal(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::SqlitePool;
+
+    use super::*;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE chat_sessions (
+                id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+                user_id TEXT NOT NULL,
+                channel TEXT NOT NULL DEFAULT 'webchat',
+                title TEXT NOT NULL DEFAULT 'New Chat',
+                is_pinned INTEGER DEFAULT 0,
+                is_archived INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE chat_messages (
+                id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+                session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                metadata TEXT DEFAULT '{}',
+                token_usage TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                ws_delivered_at TEXT DEFAULT NULL
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            CREATE VIRTUAL TABLE chat_messages_fts USING fts5(
+                message_id UNINDEXED,
+                session_id UNINDEXED,
+                user_id UNINDEXED,
+                role UNINDEXED,
+                content,
+                created_at UNINDEXED
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TRIGGER chat_messages_ai AFTER INSERT ON chat_messages BEGIN
+                INSERT INTO chat_messages_fts(message_id, session_id, user_id, role, content, created_at)
+                SELECT NEW.id, NEW.session_id, s.user_id, NEW.role, NEW.content, NEW.created_at
+                FROM chat_sessions s WHERE s.id = NEW.session_id;
+            END;
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn search_messages_filters_user_and_excludes_current_session() {
+        let svc = WebchatService::new(test_pool().await);
+        let old_session = svc
+            .create_session("user-a", "webchat", "Old")
+            .await
+            .unwrap();
+        let current_session = svc
+            .create_session("user-a", "webchat", "Current")
+            .await
+            .unwrap();
+        let other_user_session = svc
+            .create_session("user-b", "webchat", "Other")
+            .await
+            .unwrap();
+
+        svc.save_message(
+            &old_session.id,
+            "user",
+            "Rust memory layering should use sqlite fts",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        svc.save_message(
+            &current_session.id,
+            "user",
+            "Rust memory layering from current turn",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        svc.save_message(
+            &other_user_session.id,
+            "user",
+            "Rust memory layering from another user",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let hits = svc
+            .search_messages(
+                "user-a",
+                "rust memory layering",
+                10,
+                Some(&current_session.id),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, old_session.id);
+        assert_eq!(hits[0].role, "user");
+        assert!(hits[0].content.contains("sqlite fts"));
     }
 }

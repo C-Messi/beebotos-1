@@ -54,6 +54,18 @@ pub struct AgentSummaryInfo {
     pub last_error: Option<String>,
 }
 
+/// A single match from persisted chat session history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSearchHit {
+    pub message_id: String,
+    pub session_id: String,
+    pub session_title: String,
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+    pub score: f32,
+}
+
 /// Trait for querying system information from external layers.
 #[async_trait::async_trait]
 pub trait SystemInfoProvider: Send + Sync {
@@ -72,5 +84,16 @@ pub trait SystemInfoProvider: Send + Sync {
     /// Default implementation returns empty list for backward compatibility.
     async fn list_agents(&self) -> Result<Vec<AgentSummaryInfo>, String> {
         Ok(Vec::new())
+    }
+
+    /// Search persisted chat messages for the current user.
+    async fn search_sessions(
+        &self,
+        _query: &str,
+        _user_id: &str,
+        _limit: usize,
+        _exclude_session_id: Option<&str>,
+    ) -> Result<Vec<SessionSearchHit>, String> {
+        Err("Session search is not supported by this runtime".to_string())
     }
 }
