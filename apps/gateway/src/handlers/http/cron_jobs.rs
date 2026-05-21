@@ -4,6 +4,7 @@
 //! integration.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -67,8 +68,10 @@ pub async fn create_job(
     let job = svc.create_job(req, &user.user_id).await?;
 
     // Register with tokio-cron-scheduler if enabled
-    if let Err(e) = register_job_with_scheduler(&state, &job).await {
-        warn!("Failed to register cron job with scheduler: {}", e);
+    if job.enabled {
+        if let Err(e) = register_job_with_scheduler(&state, &job).await {
+            warn!("Failed to register cron job with scheduler: {}", e);
+        }
     }
 
     info!("Created cron job {} by user {}", job.id, user.user_id);
@@ -253,6 +256,14 @@ pub async fn register_job_with_scheduler(
     state: &Arc<AppState>,
     job: &crate::services::cron_job_service::CronJob,
 ) -> Result<(), GatewayError> {
+    if !job.enabled {
+        info!(
+            "Skipping disabled cron job {} scheduler registration",
+            job.id
+        );
+        return Ok(());
+    }
+
     let scheduler = state
         .workflow_cron_scheduler
         .as_ref()
@@ -263,6 +274,15 @@ pub async fn register_job_with_scheduler(
         .ok_or_else(|| GatewayError::internal("Cron job service not initialized"))?;
 
     let job_id = job.id.clone();
+    if let Some(old_uuid) = svc.remove_scheduler_uuid(&job_id).await {
+        if let Err(e) = scheduler.remove(&old_uuid).await {
+            warn!(
+                "Failed to remove stale scheduler registration for cron job {}: {}",
+                job_id, e
+            );
+        }
+    }
+
     let state_clone = state.clone();
     let job_clone = job.clone();
 
@@ -318,8 +338,8 @@ async fn run_scheduled_cron_job(
     }
     let svc = svc.unwrap();
 
-    // 🆕 FIX (P0): Re-read latest run_count from DB before checking max_runs
-    // The closure captures a snapshot of run_count at registration time.
+    // Re-read mutable DB state before execution. The scheduler closure captures
+    // a snapshot from registration time, so enabled/run_count can be stale.
     let refreshed_job = match svc.get_job(&job.id).await {
         Ok(j) => j,
         Err(e) => {
@@ -331,7 +351,15 @@ async fn run_scheduled_cron_job(
         }
     };
 
-    // 🆕 FIX (P0): Check max_runs using latest DB state
+    if !refreshed_job.enabled {
+        info!(
+            "Cron job {} is disabled; skipping scheduled execution",
+            job.id
+        );
+        return;
+    }
+
+    // Check max_runs using latest DB state
     if let Some(max) = refreshed_job.max_runs {
         if refreshed_job.run_count >= max {
             info!(
@@ -369,9 +397,12 @@ async fn run_scheduled_cron_job(
         Err(e) => {
             let err_str = e.to_string();
             let _ = svc
-                .record_run_complete(&run_id, "failed", "", &err_str)
+                .record_run_complete(&run_id, "cancelled", "", &err_str)
                 .await;
-            warn!("Cron job {} failed: {}", job.id, err_str);
+            warn!(
+                "Cron job {} encountered a retryable failure: {}",
+                job.id, err_str
+            );
 
             // Exponential backoff retry (max 3 retries within 24h)
             let fail_count = match svc.get_recent_failure_count(&job.id).await {
@@ -395,6 +426,9 @@ async fn run_scheduled_cron_job(
                 }
             } else {
                 warn!("Cron job {} reached max retries (3), disabling", job.id);
+                let _ = svc
+                    .record_run_complete(&run_id, "failed", "", &err_str)
+                    .await;
                 let _ = svc.disable_job(&job.id).await;
             }
         }
@@ -410,11 +444,8 @@ async fn execute_cron_job(
     state: &Arc<AppState>,
     job: &crate::services::cron_job_service::CronJob,
 ) -> Result<String, GatewayError> {
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        execute_cron_job_inner(state, job),
-    )
-    .await;
+    let result =
+        tokio::time::timeout(Duration::from_secs(60), execute_cron_job_inner(state, job)).await;
 
     match result {
         Ok(Ok(output)) => {
@@ -424,6 +455,15 @@ async fn execute_cron_job(
         }
         Ok(Err(e)) => {
             let err_str = e.to_string();
+            if let Some(output) = latest_cron_assistant_output(state, job).await {
+                info!(
+                    "Cron job {} completion returned an error, but a final assistant response was \
+                     persisted; recording run as success. error={}",
+                    job.id, err_str
+                );
+                let _ = notify_cron_result(state, job, "success", &output, "").await;
+                return Ok(output);
+            }
             let _ = notify_cron_result(state, job, "failed", "", &err_str).await;
             Err(e)
         }
@@ -433,6 +473,81 @@ async fn execute_cron_job(
             Err(GatewayError::internal(err))
         }
     }
+}
+
+async fn latest_cron_assistant_output(
+    state: &Arc<AppState>,
+    job: &crate::services::cron_job_service::CronJob,
+) -> Option<String> {
+    let channel_id = format!("cron:{}", job.id);
+    if let Some(processor) = state.message_processor.as_ref() {
+        let session_manager = processor.session_manager();
+        for attempt in 0..3 {
+            match session_manager
+                .get_history_for_key(
+                    beebotos_agents::communication::PlatformType::Custom,
+                    &channel_id,
+                    "cron",
+                    50,
+                )
+                .await
+            {
+                Ok(history) => {
+                    if let Some(message) = history
+                        .into_iter()
+                        .rev()
+                        .find(|m| m.role == "assistant" && !looks_like_internal_error(&m.content))
+                    {
+                        return Some(message.content);
+                    }
+                }
+                Err(_) => {}
+            }
+
+            if attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+
+    let svc = state.webchat_service.as_ref()?;
+    for attempt in 0..3 {
+        let message = match svc
+            .get_latest_assistant_message_by_channel(&channel_id)
+            .await
+        {
+            Ok(message) => message,
+            Err(e) => {
+                warn!(
+                    "Failed to inspect persisted cron assistant output for job {}: {}",
+                    job.id, e
+                );
+                return None;
+            }
+        };
+
+        if let Some(message) = message {
+            if !looks_like_internal_error(&message.content) {
+                return Some(message.content);
+            }
+        }
+
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    None
+}
+
+fn looks_like_internal_error(content: &str) -> bool {
+    let trimmed = content.trim();
+    trimmed.is_empty()
+        || trimmed.contains("Internal server error")
+        || trimmed.contains("correlation_id:")
+        || trimmed.starts_with("处理失败:")
+        || trimmed.starts_with("Agent processing failed")
+        || trimmed.starts_with("Agent returned empty response")
 }
 
 async fn execute_cron_job_inner(

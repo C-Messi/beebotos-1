@@ -74,6 +74,12 @@ impl MessageProcessor {
         }
     }
 
+    /// Expose the in-memory session manager for internal consumers like cron
+    /// result reconciliation.
+    pub fn session_manager(&self) -> Arc<SessionManager> {
+        Arc::clone(&self.session_manager)
+    }
+
     /// 处理频道事件
     pub async fn process_event(&self, event: ChannelEvent) -> Result<(), GatewayError> {
         match event {
