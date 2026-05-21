@@ -11,17 +11,17 @@ pub struct AiCommerceShop {
     pub url: Option<&'static str>,
 }
 
-const AI_COMMERCE_SHOPS: [AiCommerceShop; 3] = [
+const AI_COMMERCE_SHOPS: [AiCommerceShop; 6] = [
     AiCommerceShop {
-        name: "抖音小店",
-        description: "面向短视频与直播场景的小店入口",
+        name: "抖店",
+        description: "面向短视频与直播场景的商品发布入口",
         icon: "🎵",
         tag: "待接入",
         url: None,
     },
     AiCommerceShop {
-        name: "微信小店",
-        description: "面向微信生态私域经营的小店入口",
+        name: "微店",
+        description: "面向私域经营的商品发布入口",
         icon: "💬",
         tag: "待接入",
         url: None,
@@ -30,6 +30,27 @@ const AI_COMMERCE_SHOPS: [AiCommerceShop; 3] = [
         name: "云柑小店",
         description: "面向自有业务的小店入口",
         icon: "🍊",
+        tag: "待接入",
+        url: None,
+    },
+    AiCommerceShop {
+        name: "拼多多",
+        description: "面向拼多多平台的商品发布入口",
+        icon: "多",
+        tag: "待接入",
+        url: None,
+    },
+    AiCommerceShop {
+        name: "淘宝",
+        description: "面向淘宝店铺的商品发布入口",
+        icon: "淘",
+        tag: "待接入",
+        url: None,
+    },
+    AiCommerceShop {
+        name: "京东",
+        description: "面向京东店铺的商品发布入口",
+        icon: "京",
         tag: "待接入",
         url: None,
     },
@@ -101,9 +122,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ai_commerce_shops_match_initial_scope() {
+    fn ai_commerce_shops_match_requested_scope() {
         let shops: Vec<_> = ai_commerce_shops().iter().map(|shop| shop.name).collect();
 
-        assert_eq!(shops, vec!["抖音小店", "微信小店", "云柑小店"]);
+        assert_eq!(
+            shops,
+            vec!["抖店", "微店", "云柑小店", "拼多多", "淘宝", "京东"]
+        );
     }
 }

@@ -615,6 +615,9 @@ impl AppState {
                 cron_job_service
                     .clone()
                     .expect("CronJobService must be initialized before AgentRuntime"),
+                webchat_service
+                    .clone()
+                    .expect("WebchatService must be initialized before AgentRuntime"),
                 gateway_state_manager,
                 Some(cron_registration_tx),
             )));
@@ -988,6 +991,7 @@ impl AppState {
 /// Gateway-layer implementation of SystemInfoProvider for cross-crate queries.
 struct GatewaySystemInfoProvider {
     cron_job_service: Arc<crate::services::CronJobService>,
+    webchat_service: Arc<crate::services::webchat_service::WebchatService>,
     state_manager: Arc<beebotos_agents::state_manager::AgentStateManager>,
     cron_registration_tx:
         Option<tokio::sync::mpsc::UnboundedSender<crate::services::cron_job_service::CronJob>>,
@@ -996,6 +1000,7 @@ struct GatewaySystemInfoProvider {
 impl GatewaySystemInfoProvider {
     fn new(
         cron_job_service: Arc<crate::services::CronJobService>,
+        webchat_service: Arc<crate::services::webchat_service::WebchatService>,
         state_manager: Arc<beebotos_agents::state_manager::AgentStateManager>,
         cron_registration_tx: Option<
             tokio::sync::mpsc::UnboundedSender<crate::services::cron_job_service::CronJob>,
@@ -1003,6 +1008,7 @@ impl GatewaySystemInfoProvider {
     ) -> Self {
         Self {
             cron_job_service,
+            webchat_service,
             state_manager,
             cron_registration_tx,
         }
@@ -1097,6 +1103,33 @@ impl beebotos_agents::system_info::SystemInfoProvider for GatewaySystemInfoProvi
         }
 
         Ok(Self::cron_job_info(job))
+    }
+
+    async fn search_sessions(
+        &self,
+        query: &str,
+        user_id: &str,
+        limit: usize,
+        exclude_session_id: Option<&str>,
+    ) -> Result<Vec<beebotos_agents::system_info::SessionSearchHit>, String> {
+        let hits = self
+            .webchat_service
+            .search_messages(user_id, query, limit, exclude_session_id)
+            .await
+            .map_err(|e| format!("Database error: {}", e))?;
+
+        Ok(hits
+            .into_iter()
+            .map(|hit| beebotos_agents::system_info::SessionSearchHit {
+                message_id: hit.message_id,
+                session_id: hit.session_id,
+                session_title: hit.session_title,
+                role: hit.role,
+                content: hit.content,
+                created_at: hit.created_at.to_rfc3339(),
+                score: hit.score,
+            })
+            .collect())
     }
 
     async fn list_agents(

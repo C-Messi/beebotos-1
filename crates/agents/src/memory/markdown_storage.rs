@@ -546,6 +546,42 @@ impl MarkdownStorage {
         Ok(())
     }
 
+    /// Rewrite all structured entries while preserving any file preamble.
+    pub async fn rewrite_entries(
+        &self,
+        file_type: MemoryFileType,
+        entries: &[MarkdownMemoryEntry],
+        date: Option<chrono::NaiveDate>,
+    ) -> Result<()> {
+        let path = self.get_file_path(file_type, date)?;
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await.ok();
+        }
+
+        let preamble = if path.exists() {
+            let content = fs::read_to_string(&path).await.map_err(|e| {
+                crate::error::AgentError::storage(format!("Failed to read memory file: {}", e))
+            })?;
+            Self::extract_preamble(&content)
+        } else {
+            String::new()
+        };
+
+        let mut next = String::new();
+        if !preamble.trim().is_empty() {
+            next.push_str(preamble.trim_end());
+            next.push_str("\n\n");
+        }
+        for entry in entries {
+            next.push_str(&entry.to_markdown());
+        }
+
+        self.write_file_atomic(&path, &next).await?;
+        debug!("Rewrote entries in {:?}", path);
+        Ok(())
+    }
+
     /// Read all entries from a memory file
     pub async fn read_entries(
         &self,
@@ -581,6 +617,14 @@ impl MarkdownStorage {
         }
 
         Ok(entries)
+    }
+
+    fn extract_preamble(content: &str) -> String {
+        let lines: Vec<_> = content.lines().collect();
+        let first_entry = lines.iter().position(|line| line.trim() == "---");
+        first_entry
+            .map(|idx| lines[..idx].join("\n"))
+            .unwrap_or_else(|| content.to_string())
     }
 
     /// Get file path for memory type

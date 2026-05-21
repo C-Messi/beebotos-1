@@ -178,6 +178,40 @@ impl UnifiedMemorySystem {
         Ok(())
     }
 
+    /// Rewrite a memory file and refresh its indexed entries.
+    pub async fn rewrite_entries(
+        &self,
+        file_type: MemoryFileType,
+        entries: &[MarkdownMemoryEntry],
+        date: Option<chrono::NaiveDate>,
+    ) -> Result<()> {
+        let old_entries = self.storage.read_entries(file_type, date).await?;
+        self.storage.rewrite_entries(file_type, entries, date).await?;
+
+        if self.config.auto_index {
+            {
+                let search = self.search.read().await;
+                for entry in &old_entries {
+                    let _ = search.delete_entry(entry.id);
+                }
+            }
+            {
+                let mut indexed = self.indexed_hashes.write().await;
+                for entry in old_entries {
+                    indexed.remove(&Self::hash_content(&format!(
+                        "{}{}",
+                        entry.title, entry.content
+                    )));
+                }
+            }
+            for entry in entries {
+                self.index_entry(entry).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Index a single entry
     pub async fn index_entry(&self, entry: &MarkdownMemoryEntry) -> Result<()> {
         let content_hash = Self::hash_content(&format!("{}{}", entry.title, entry.content));

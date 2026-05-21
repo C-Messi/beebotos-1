@@ -502,6 +502,23 @@ impl Agent {
             }),
         });
 
+        if self.system_info_provider.is_some() {
+            tools.push(communication::ToolDefinition {
+                name: "session_search".to_string(),
+                description: "Search previous persisted chat messages for the current user. Use \
+                              this only when the answer needs context from older conversations."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query for older conversations" },
+                        "limit": { "type": "integer", "description": "Maximum results to return", "default": 5 }
+                    },
+                    "required": ["query"]
+                }),
+            });
+        }
+
         if self.web_tools_enabled() {
             tools.push(communication::ToolDefinition {
                 name: "web_fetch".to_string(),
@@ -739,7 +756,9 @@ impl Agent {
                     )
                 })?;
                 let name = get("name")
-                    .ok_or_else(|| AgentError::Execution("create_cron_job requires name".to_string()))?
+                    .ok_or_else(|| {
+                        AgentError::Execution("create_cron_job requires name".to_string())
+                    })?
                     .trim();
                 let schedule_type = get("schedule_type")
                     .ok_or_else(|| {
@@ -772,7 +791,8 @@ impl Agent {
                         .filter(|s| !s.is_empty())
                         .map(ToOwned::to_owned),
                     prompt: prompt.to_string(),
-                    enabled: get("enabled").map(|s| !matches!(s, "false" | "0" | "FALSE" | "no" | "NO")),
+                    enabled: get("enabled")
+                        .map(|s| !matches!(s, "false" | "0" | "FALSE" | "no" | "NO")),
                     context_mode: get("context_mode")
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
@@ -788,11 +808,15 @@ impl Agent {
                     max_runs: get("max_runs").and_then(|s| s.parse::<i64>().ok()),
                     created_by: Some(self.config.id.clone()),
                 };
-                let job = provider.create_gateway_cron_job(request).await.map_err(|e| {
-                    AgentError::Execution(format!("Failed to create cron job: {}", e))
-                })?;
+                let job = provider
+                    .create_gateway_cron_job(request)
+                    .await
+                    .map_err(|e| {
+                        AgentError::Execution(format!("Failed to create cron job: {}", e))
+                    })?;
                 Ok(format!(
-                    "Created cron job '{}' (id: {}, type: {}, schedule: {}, timezone: {}, enabled: {}).",
+                    "Created cron job '{}' (id: {}, type: {}, schedule: {}, timezone: {}, \
+                     enabled: {}).",
                     job.name,
                     job.id,
                     job.schedule_type,
@@ -1873,6 +1897,7 @@ impl Agent {
         tool_call: &crate::llm::ToolCall,
         session_key: &str,
         input_text: &str,
+        context_params: &HashMap<String, String>,
     ) -> Result<String, AgentError> {
         let tool_name = tool_call.function.name.as_str();
         let params = Self::parse_tool_arguments(&tool_call.function.arguments)?;
@@ -1911,6 +1936,29 @@ impl Agent {
                 )
                 .await
             }
+            "session_search" => {
+                let query = Self::tool_arg(&params, "query").ok_or_else(|| {
+                    AgentError::Execution("session_search requires query".to_string())
+                })?;
+                let limit = Self::tool_arg(&params, "limit")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(5)
+                    .clamp(1, 10);
+                let user_id = context_params
+                    .get("user_id")
+                    .map(|s| s.as_str())
+                    .ok_or_else(|| {
+                        AgentError::Execution(
+                            "session_search unavailable: current user_id is missing".to_string(),
+                        )
+                    })?;
+                let exclude_session_id = context_params
+                    .get("db_session_id")
+                    .or_else(|| context_params.get("session_id"))
+                    .map(|s| s.as_str());
+                self.execute_session_search(query, user_id, exclude_session_id, limit)
+                    .await
+            }
             _ if Self::is_builtin_workspace_tool(tool_name) => {
                 self.execute_builtin_workspace_tool(tool_name, params.as_ref(), input_text)
                     .await
@@ -1921,6 +1969,45 @@ impl Agent {
                 tool_name
             ))),
         }
+    }
+
+    async fn execute_session_search(
+        &self,
+        query: &str,
+        user_id: &str,
+        exclude_session_id: Option<&str>,
+        limit: usize,
+    ) -> Result<String, AgentError> {
+        let provider = self.system_info_provider.as_ref().ok_or_else(|| {
+            AgentError::Execution("session_search is unavailable in this runtime".to_string())
+        })?;
+        let hits = provider
+            .search_sessions(query, user_id, limit.clamp(1, 10), exclude_session_id)
+            .await
+            .map_err(|e| AgentError::Execution(format!("session_search failed: {}", e)))?;
+        if hits.is_empty() {
+            return Ok("Session search found no previous matching messages.".to_string());
+        }
+
+        let mut lines = vec!["Session search results:".to_string()];
+        for (idx, hit) in hits.iter().enumerate() {
+            let mut snippet: String = hit.content.chars().take(300).collect();
+            if hit.content.chars().count() > 300 {
+                snippet.push_str("...");
+            }
+            lines.push(format!(
+                "{}. score={:.2} session={} title={} role={} at={} message={}\n{}",
+                idx + 1,
+                hit.score,
+                hit.session_id,
+                hit.session_title,
+                hit.role,
+                hit.created_at,
+                hit.message_id,
+                snippet
+            ));
+        }
+        Ok(lines.join("\n"))
     }
 
     fn assistant_tool_call_message(
@@ -3377,7 +3464,13 @@ impl Agent {
                 .unwrap_or(&task.input)
                 .to_string();
             let mut params = task.parameters.clone();
-            for key in ["platform", "channel_id", "user_id", "session_id"] {
+            for key in [
+                "platform",
+                "channel_id",
+                "user_id",
+                "session_id",
+                "db_session_id",
+            ] {
                 if let Some(value) = json.get(key).and_then(|v| v.as_str()) {
                     params.insert(key.to_string(), value.to_string());
                 }
@@ -3728,7 +3821,7 @@ impl Agent {
                 )
                 .await;
                 let output = match self
-                    .execute_react_tool_call(tool_call, &session_key, &input_text)
+                    .execute_react_tool_call(tool_call, &session_key, &input_text, &extra_params)
                     .await
                 {
                     Ok(output) => {
@@ -10476,6 +10569,56 @@ mod planning_integration_tests {
             .expect("active context");
         assert!(active.contains("Full test skill context"));
         assert!(active.contains("`test-skill`"));
+    }
+
+    struct FakeSessionSearchProvider;
+
+    #[async_trait::async_trait]
+    impl crate::system_info::SystemInfoProvider for FakeSessionSearchProvider {
+        async fn list_gateway_cron_jobs(
+            &self,
+        ) -> Result<Vec<crate::system_info::GatewayCronJobInfo>, String> {
+            Ok(Vec::new())
+        }
+
+        async fn search_sessions(
+            &self,
+            query: &str,
+            user_id: &str,
+            limit: usize,
+            exclude_session_id: Option<&str>,
+        ) -> Result<Vec<crate::system_info::SessionSearchHit>, String> {
+            assert_eq!(query, "memory layering");
+            assert_eq!(user_id, "user-a");
+            assert_eq!(limit, 5);
+            assert_eq!(exclude_session_id, Some("current-session"));
+            Ok(vec![crate::system_info::SessionSearchHit {
+                message_id: "message-1".to_string(),
+                session_id: "old-session".to_string(),
+                session_title: "Old Chat".to_string(),
+                role: "assistant".to_string(),
+                content: "Use SessionDB for complete history and keep MEMORY.md stable."
+                    .to_string(),
+                created_at: "2026-05-21T10:00:00Z".to_string(),
+                score: 0.91,
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_search_formats_provider_hits() {
+        let agent =
+            create_test_agent().with_system_info_provider(Arc::new(FakeSessionSearchProvider));
+
+        let output = agent
+            .execute_session_search("memory layering", "user-a", Some("current-session"), 5)
+            .await
+            .expect("session search");
+
+        assert!(output.contains("old-session"));
+        assert!(output.contains("assistant"));
+        assert!(output.contains("SessionDB for complete history"));
+        assert!(output.contains("0.91"));
     }
 
     // ============================================================================

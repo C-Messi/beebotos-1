@@ -9,10 +9,13 @@ use beebotos_agents::communication::channel::session_manager::{SessionManager, S
 use beebotos_agents::communication::channel::ChannelEvent;
 use beebotos_agents::communication::{Message, MessageType, PlatformType};
 use beebotos_agents::deduplicator::MessageDeduplicator;
+use beebotos_agents::llm::Message as LLMMessage;
 use beebotos_agents::media::multimodal::MultimodalProcessor;
+use beebotos_agents::memory::{MarkdownMemoryEntry, MemoryFileType};
 use beebotos_agents::skills::unified_react_executor::STREAM_EVENT_PREFIX;
 use beebotos_agents::ChannelRegistry;
 use regex::Regex;
+use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -378,53 +381,8 @@ impl MessageProcessor {
             let _ = svc.mark_ws_delivered(msg_id).await;
         }
 
-        // 9. Memory 回写
-        if let Some(ref memory) = self.memory_system {
-            use beebotos_agents::memory::markdown_storage::{MarkdownMemoryEntry, MemoryFileType};
-
-            let user_entry = MarkdownMemoryEntry {
-                id: Uuid::new_v4(),
-                timestamp: chrono::Utc::now(),
-                title: format!("User: {}", content.chars().take(30).collect::<String>()),
-                content: content.clone(),
-                category: "conversation".to_string(),
-                importance: 0.5,
-                metadata: {
-                    let mut m = HashMap::new();
-                    m.insert("session_id".to_string(), db_session_id.clone());
-                    m.insert("user_id".to_string(), user_id.clone());
-                    m.insert("role".to_string(), "user".to_string());
-                    m.insert("channel".to_string(), platform.to_string());
-                    m
-                },
-                session_id: Some(db_session_id.clone()),
-            };
-            let _ = memory.store(MemoryFileType::Core, &user_entry, None).await;
-
-            let assistant_entry = MarkdownMemoryEntry {
-                id: Uuid::new_v4(),
-                timestamp: chrono::Utc::now(),
-                title: format!(
-                    "Assistant: {}",
-                    llm_response.chars().take(30).collect::<String>()
-                ),
-                content: llm_response.clone(),
-                category: "conversation".to_string(),
-                importance: 0.5,
-                metadata: {
-                    let mut m = HashMap::new();
-                    m.insert("session_id".to_string(), db_session_id.clone());
-                    m.insert("user_id".to_string(), user_id.clone());
-                    m.insert("role".to_string(), "assistant".to_string());
-                    m.insert("channel".to_string(), platform.to_string());
-                    m
-                },
-                session_id: Some(db_session_id.clone()),
-            };
-            let _ = memory
-                .store(MemoryFileType::Core, &assistant_entry, None)
-                .await;
-        }
+        self.promote_user_message_facts(&content, &user_id, &db_session_id, platform)
+            .await;
 
         Ok(())
     }
@@ -705,6 +663,8 @@ impl MessageProcessor {
                     let _ = svc.mark_ws_delivered(&id).await;
                 }
             }
+            self.promote_user_message_facts(&content, &user_id, &db_session_id, platform)
+                .await;
             return Ok(());
         }
 
@@ -713,7 +673,7 @@ impl MessageProcessor {
         // (travel/planner/analytical/generative). Planning need is now
         // determined by the Agent's LLM Intent Analyzer. Gateway no longer
         // injects plan=true based on skill name keywords.
-        let mut has_skill_plan = false;
+        let has_skill_plan = false;
 
         // 8. 构造 TaskConfig
         let mut task_input = serde_json::json!({
@@ -1045,54 +1005,14 @@ impl MessageProcessor {
                 let _ = svc.mark_ws_delivered(msg_id).await;
             }
 
-            // Memory 回写
-            if let Some(ref memory) = processor.memory_system {
-                use beebotos_agents::memory::markdown_storage::{
-                    MarkdownMemoryEntry, MemoryFileType,
-                };
-                let user_entry = MarkdownMemoryEntry {
-                    id: Uuid::new_v4(),
-                    timestamp: chrono::Utc::now(),
-                    title: format!("User: {}", content_bg.chars().take(30).collect::<String>()),
-                    content: content_bg.clone(),
-                    category: "conversation".to_string(),
-                    importance: 0.5,
-                    metadata: {
-                        let mut m = HashMap::new();
-                        m.insert("session_id".to_string(), db_session_id_bg.clone());
-                        m.insert("user_id".to_string(), user_id_bg.clone());
-                        m.insert("role".to_string(), "user".to_string());
-                        m.insert("channel".to_string(), platform_bg.to_string());
-                        m
-                    },
-                    session_id: Some(db_session_id_bg.clone()),
-                };
-                let _ = memory.store(MemoryFileType::Core, &user_entry, None).await;
-
-                let assistant_entry = MarkdownMemoryEntry {
-                    id: Uuid::new_v4(),
-                    timestamp: chrono::Utc::now(),
-                    title: format!(
-                        "Assistant: {}",
-                        llm_response.chars().take(30).collect::<String>()
-                    ),
-                    content: llm_response.clone(),
-                    category: "conversation".to_string(),
-                    importance: 0.5,
-                    metadata: {
-                        let mut m = HashMap::new();
-                        m.insert("session_id".to_string(), db_session_id_bg.clone());
-                        m.insert("user_id".to_string(), user_id_bg.clone());
-                        m.insert("role".to_string(), "assistant".to_string());
-                        m.insert("channel".to_string(), platform_bg.to_string());
-                        m
-                    },
-                    session_id: Some(db_session_id_bg.clone()),
-                };
-                let _ = memory
-                    .store(MemoryFileType::Core, &assistant_entry, None)
-                    .await;
-            }
+            processor
+                .promote_user_message_facts(
+                    &content_bg,
+                    &user_id_bg,
+                    &db_session_id_bg,
+                    platform_bg,
+                )
+                .await;
 
             completion_result
         });
@@ -1136,6 +1056,461 @@ impl MessageProcessor {
         });
 
         Ok(())
+    }
+
+    async fn promote_user_message_facts(
+        &self,
+        content: &str,
+        user_id: &str,
+        session_id: &str,
+        platform: PlatformType,
+    ) {
+        let Some(memory) = self.memory_system.as_ref() else {
+            return;
+        };
+        let facts = match self
+            .extract_promoted_memory_facts_with_llm(content, memory)
+            .await
+        {
+            Ok(Some(facts)) => facts,
+            Ok(None) => Self::extract_promoted_memory_facts(content),
+            Err(e) => {
+                warn!("LLM memory fact promotion failed: {}", e);
+                Self::extract_promoted_memory_facts(content)
+            }
+        };
+        if facts.is_empty() {
+            return;
+        }
+
+        for fact in facts {
+            if let Err(e) = self
+                .apply_promoted_memory_fact(memory, &fact, user_id, session_id, platform)
+                .await
+            {
+                warn!("Failed to promote memory fact '{}': {}", fact.title, e);
+            }
+        }
+    }
+
+    async fn extract_promoted_memory_facts_with_llm(
+        &self,
+        content: &str,
+        memory: &beebotos_agents::memory::UnifiedMemorySystem,
+    ) -> Result<Option<Vec<PromotedMemoryFact>>, GatewayError> {
+        if !Self::should_review_memory_fact(content) {
+            return Ok(None);
+        }
+
+        let memory_context = Self::memory_promotion_context(memory).await;
+        let messages = vec![
+            LLMMessage::system(Self::memory_promotion_system_prompt()),
+            LLMMessage::user(format!(
+                "Current long-term memory:\n{}\n\nLatest user message:\n{}",
+                memory_context,
+                Self::truncate_for_prompt(content, 4000)
+            )),
+        ];
+        let raw = self
+            .llm_service
+            .chat(messages, Some(700), None, Some("none".to_string()), None)
+            .await?;
+
+        Ok(Some(Self::parse_promoted_memory_facts(&raw)))
+    }
+
+    async fn apply_promoted_memory_fact(
+        &self,
+        memory: &beebotos_agents::memory::UnifiedMemorySystem,
+        fact: &PromotedMemoryFact,
+        user_id: &str,
+        session_id: &str,
+        platform: PlatformType,
+    ) -> beebotos_agents::error::Result<()> {
+        match fact.action {
+            MemoryPromotionAction::Add => {
+                if Self::memory_fact_exists(memory, fact).await? {
+                    return Ok(());
+                }
+                self.store_promoted_memory_fact(memory, fact, user_id, session_id, platform)
+                    .await
+            }
+            MemoryPromotionAction::Replace => {
+                Self::remove_matching_memory_facts(memory, fact).await?;
+                if !Self::memory_fact_exists(memory, fact).await? {
+                    self.store_promoted_memory_fact(memory, fact, user_id, session_id, platform)
+                        .await?;
+                }
+                Ok(())
+            }
+            MemoryPromotionAction::Remove => {
+                Self::remove_matching_memory_facts(memory, fact).await?;
+                Ok(())
+            }
+            MemoryPromotionAction::Ignore => Ok(()),
+        }
+    }
+
+    async fn store_promoted_memory_fact(
+        &self,
+        memory: &beebotos_agents::memory::UnifiedMemorySystem,
+        fact: &PromotedMemoryFact,
+        user_id: &str,
+        session_id: &str,
+        platform: PlatformType,
+    ) -> beebotos_agents::error::Result<()> {
+        let entry = MarkdownMemoryEntry::new(&fact.title, &fact.content)
+            .with_category(&fact.category)
+            .with_importance(fact.importance)
+            .with_session_id(session_id)
+            .with_metadata("source", "fact_promotion")
+            .with_metadata("user_id", user_id)
+            .with_metadata("platform", platform.to_string())
+            .with_metadata("action", format!("{:?}", fact.action).to_lowercase());
+
+        memory.store(fact.file_type, &entry, None).await?;
+        info!(
+            "Promoted memory fact '{}' to {}",
+            fact.title,
+            fact.file_type.filename(None)
+        );
+        Ok(())
+    }
+
+    async fn memory_fact_exists(
+        memory: &beebotos_agents::memory::UnifiedMemorySystem,
+        fact: &PromotedMemoryFact,
+    ) -> beebotos_agents::error::Result<bool> {
+        let existing = memory.storage().read_entries(fact.file_type, None).await?;
+        let needle = Self::normalize_fact_text(&fact.content);
+        Ok(existing
+            .iter()
+            .any(|entry| Self::normalize_fact_text(&entry.content).contains(&needle)))
+    }
+
+    async fn remove_matching_memory_facts(
+        memory: &beebotos_agents::memory::UnifiedMemorySystem,
+        fact: &PromotedMemoryFact,
+    ) -> beebotos_agents::error::Result<bool> {
+        let Some(pattern) = fact
+            .replace_match
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return Ok(false);
+        };
+
+        let mut changed = false;
+        let mut entries = memory.storage().read_entries(fact.file_type, None).await?;
+        let needle = Self::normalize_fact_text(pattern);
+
+        for entry in &mut entries {
+            let before = entry.content.clone();
+            if Self::normalize_fact_text(&entry.content).contains(&needle) {
+                entry.content = Self::remove_matching_lines(&entry.content, pattern);
+                changed |= entry.content != before;
+            }
+        }
+
+        let before_len = entries.len();
+        entries.retain(|entry| !entry.content.trim().is_empty());
+        changed |= entries.len() != before_len;
+
+        if changed {
+            memory.rewrite_entries(fact.file_type, &entries, None).await?;
+        }
+
+        Ok(changed)
+    }
+
+    fn extract_promoted_memory_facts(content: &str) -> Vec<PromotedMemoryFact> {
+        let text = content.trim();
+        if text.is_empty() || text.starts_with('/') {
+            return Vec::new();
+        }
+
+        let mut facts = Vec::new();
+
+        if let Some(name) = Self::capture_first(
+            text,
+            r"(?:我叫|我的名字是|我名字叫)\s*([\p{Han}A-Za-z·]{2,24})",
+        ) {
+            facts.push(PromotedMemoryFact {
+                action: MemoryPromotionAction::Add,
+                file_type: MemoryFileType::User,
+                title: "Basic Information".to_string(),
+                content: format!("- Name: {}", name),
+                category: "profile".to_string(),
+                importance: 1.0,
+                replace_match: None,
+            });
+        }
+
+        if Self::contains_any(text, &["打篮球", "篮球"])
+            && Self::contains_any(text, &["我喜欢", "喜欢", "经常", "平常", "平时", "常常"])
+        {
+            let habit = if Self::contains_any(text, &["经常", "平常", "平时", "常常"]) {
+                "经常打篮球"
+            } else {
+                "喜欢打篮球"
+            };
+            facts.push(PromotedMemoryFact {
+                action: MemoryPromotionAction::Add,
+                file_type: MemoryFileType::User,
+                title: "Interests".to_string(),
+                content: format!("- Interests: {}", habit),
+                category: "profile".to_string(),
+                importance: 0.8,
+                replace_match: None,
+            });
+        }
+
+        if let Some(shell) = Self::extract_shell_fact(text) {
+            facts.push(PromotedMemoryFact {
+                action: MemoryPromotionAction::Add,
+                file_type: MemoryFileType::Core,
+                title: "Local Environment".to_string(),
+                content: format!("- Local shell: {}", shell.to_lowercase()),
+                category: "environment".to_string(),
+                importance: 1.0,
+                replace_match: None,
+            });
+        }
+
+        facts
+    }
+
+    fn parse_promoted_memory_facts(raw: &str) -> Vec<PromotedMemoryFact> {
+        let Some(payload) = Self::extract_json_payload(raw) else {
+            return Vec::new();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            return Vec::new();
+        };
+
+        let decisions = if let Some(items) = value.get("decisions").and_then(|v| v.as_array()) {
+            items.clone()
+        } else if let Some(items) = value.as_array() {
+            items.clone()
+        } else if value.get("action").is_some() {
+            vec![value]
+        } else {
+            Vec::new()
+        };
+
+        decisions
+            .into_iter()
+            .filter_map(|value| serde_json::from_value::<MemoryPromotionDecision>(value).ok())
+            .filter_map(Self::decision_to_promoted_fact)
+            .collect()
+    }
+
+    fn decision_to_promoted_fact(decision: MemoryPromotionDecision) -> Option<PromotedMemoryFact> {
+        let action = MemoryPromotionAction::parse(&decision.action)?;
+        if action == MemoryPromotionAction::Ignore {
+            return None;
+        }
+
+        let confidence = decision.confidence.unwrap_or(0.0);
+        if confidence < 0.72 {
+            return None;
+        }
+
+        let file_type = Self::memory_file_type_from_target(decision.target.as_deref()?)?;
+        let content = Self::normalize_promoted_fact_content(&decision.content.unwrap_or_default());
+        if action != MemoryPromotionAction::Remove
+            && (content.is_empty() || content.len() > 600 || Self::looks_sensitive(&content))
+        {
+            return None;
+        }
+
+        Some(PromotedMemoryFact {
+            action,
+            file_type,
+            title: decision
+                .title
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "Promoted Fact".to_string()),
+            content,
+            category: decision.category.unwrap_or_else(|| match file_type {
+                MemoryFileType::User => "profile".to_string(),
+                _ => "project".to_string(),
+            }),
+            importance: decision.importance.unwrap_or(0.7).clamp(0.0, 1.0),
+            replace_match: decision
+                .replace_match
+                .filter(|value| !value.trim().is_empty()),
+        })
+    }
+
+    fn memory_file_type_from_target(target: &str) -> Option<MemoryFileType> {
+        match target.trim().to_lowercase().as_str() {
+            "user" | "user.md" | "profile" => Some(MemoryFileType::User),
+            "memory" | "memory.md" | "core" | "agent" | "project" | "environment" => {
+                Some(MemoryFileType::Core)
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_json_payload(raw: &str) -> Option<String> {
+        let mut text = raw.trim();
+        if text.starts_with("```") {
+            text = text.trim_start_matches("```").trim_start();
+            if let Some(rest) = text.strip_prefix("json") {
+                text = rest.trim_start();
+            }
+            if let Some(idx) = text.rfind("```") {
+                text = &text[..idx];
+            }
+        }
+
+        let start = text.find(['{', '['])?;
+        let end_obj = text.rfind('}');
+        let end_arr = text.rfind(']');
+        let end = match (end_obj, end_arr) {
+            (Some(a), Some(b)) => a.max(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => return None,
+        };
+        Some(text[start..=end].trim().to_string())
+    }
+
+    fn should_review_memory_fact(content: &str) -> bool {
+        let text = content.trim();
+        if text.is_empty() || text.starts_with('/') || text.chars().count() > 4000 {
+            return false;
+        }
+
+        !matches!(
+            text.to_lowercase().as_str(),
+            "hi" | "hello" | "hey" | "你好" | "在吗" | "ok" | "嗯" | "好的"
+        )
+    }
+
+    async fn memory_promotion_context(
+        memory: &beebotos_agents::memory::UnifiedMemorySystem,
+    ) -> String {
+        let mut output = String::new();
+        Self::push_memory_entries(&mut output, memory, MemoryFileType::User, "USER.md").await;
+        Self::push_memory_entries(&mut output, memory, MemoryFileType::Core, "MEMORY.md").await;
+        Self::truncate_for_prompt(&output, 6000)
+    }
+
+    async fn push_memory_entries(
+        output: &mut String,
+        memory: &beebotos_agents::memory::UnifiedMemorySystem,
+        file_type: MemoryFileType,
+        label: &str,
+    ) {
+        output.push_str(label);
+        output.push('\n');
+        match memory.storage().read_entries(file_type, None).await {
+            Ok(entries) if !entries.is_empty() => {
+                for entry in entries {
+                    output.push_str("- ");
+                    output.push_str(&entry.title);
+                    output.push_str(": ");
+                    output.push_str(&entry.content.replace('\n', " "));
+                    output.push('\n');
+                }
+            }
+            _ => output.push_str("- <empty>\n"),
+        }
+    }
+
+    fn memory_promotion_system_prompt() -> &'static str {
+        r#"You are BeeBotOS memory reviewer. Decide whether the latest user message contains durable facts worth promoting to long-term memory.
+
+Memory layers:
+- USER.md: user identity, stable preferences, interests, communication style, personal profile facts.
+- MEMORY.md: agent/project/environment/tool notes, local setup, project conventions, operational pitfalls.
+- SessionDB: ordinary conversation, transient events, task details, and anything not durable.
+
+Return JSON only:
+{"decisions":[{"action":"add|replace|remove|ignore","target":"user|memory","title":"short section","content":"one concise Markdown bullet","category":"profile|environment|project|preference|tool_pitfall","importance":0.0-1.0,"confidence":0.0-1.0,"replace_match":"optional existing fact phrase","reason":"short"}]}
+
+Rules:
+- Prefer ignore unless the fact is durable and useful in future sessions.
+- Use add for new durable facts.
+- Use replace when the new message changes or contradicts existing memory; set replace_match to the old phrase to remove.
+- Use remove when the user says a stored fact is wrong or should be forgotten; set replace_match.
+- Never store passwords, tokens, secrets, private keys, or one-off sensitive content.
+- For transient facts like "today I played basketball", ignore.
+- Keep content short, factual, and directly usable. Do not store ordinary chat transcripts."#
+    }
+
+    fn extract_shell_fact(text: &str) -> Option<String> {
+        let lower = text.to_lowercase();
+        if !lower.contains("shell") && !text.contains("终端") {
+            return None;
+        }
+
+        for shell in ["fish", "zsh", "bash", "powershell", "pwsh", "nushell", "nu"] {
+            if lower.contains(shell) {
+                return Some(shell.to_string());
+            }
+        }
+
+        if lower.split_whitespace().any(|part| part == "sh") {
+            return Some("sh".to_string());
+        }
+        None
+    }
+
+    fn capture_first(text: &str, pattern: &str) -> Option<String> {
+        let re = Regex::new(pattern).ok()?;
+        re.captures(text)
+            .and_then(|cap| cap.get(1))
+            .map(|m| m.as_str().trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn contains_any(text: &str, needles: &[&str]) -> bool {
+        needles.iter().any(|needle| text.contains(needle))
+    }
+
+    fn normalize_fact_text(text: &str) -> String {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_lowercase()
+    }
+
+    fn normalize_promoted_fact_content(content: &str) -> String {
+        let content = content.trim();
+        if content.is_empty() || content.starts_with('-') {
+            content.to_string()
+        } else {
+            format!("- {}", content)
+        }
+    }
+
+    fn remove_matching_lines(content: &str, pattern: &str) -> String {
+        let needle = Self::normalize_fact_text(pattern);
+        content
+            .lines()
+            .filter(|line| !Self::normalize_fact_text(line).contains(&needle))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    }
+
+    fn truncate_for_prompt(text: &str, max_chars: usize) -> String {
+        let mut out = String::new();
+        for ch in text.chars().take(max_chars) {
+            out.push(ch);
+        }
+        out
+    }
+
+    fn looks_sensitive(text: &str) -> bool {
+        let lower = text.to_lowercase();
+        ["password", "passwd", "token", "api_key", "apikey", "secret", "私钥", "密码", "密钥"]
+            .iter()
+            .any(|needle| lower.contains(needle))
     }
 
     /// 处理多模态内容
@@ -2621,6 +2996,49 @@ enum QueryComplexity {
     High,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryPromotionAction {
+    Add,
+    Replace,
+    Remove,
+    Ignore,
+}
+
+impl MemoryPromotionAction {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "add" => Some(Self::Add),
+            "replace" | "update" => Some(Self::Replace),
+            "remove" | "delete" | "forget" => Some(Self::Remove),
+            "ignore" | "none" => Some(Self::Ignore),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MemoryPromotionDecision {
+    action: String,
+    target: Option<String>,
+    title: Option<String>,
+    content: Option<String>,
+    category: Option<String>,
+    importance: Option<f32>,
+    confidence: Option<f32>,
+    replace_match: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PromotedMemoryFact {
+    action: MemoryPromotionAction,
+    file_type: MemoryFileType,
+    title: String,
+    content: String,
+    category: String,
+    importance: f32,
+    replace_match: Option<String>,
+}
+
 /// 处理后的图片
 #[derive(Debug, Clone)]
 pub struct ProcessedImage {
@@ -2653,4 +3071,99 @@ impl ImageFormat {
 enum MessagePart {
     Text(String),
     Image { data: String, mime_type: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn promotes_user_name_to_user_profile() {
+        let facts = MessageProcessor::extract_promoted_memory_facts("我叫齐世浩，记住我");
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].file_type, MemoryFileType::User);
+        assert_eq!(facts[0].title, "Basic Information");
+        assert_eq!(facts[0].content, "- Name: 齐世浩");
+    }
+
+    #[test]
+    fn promotes_basketball_to_user_profile() {
+        let facts = MessageProcessor::extract_promoted_memory_facts("我平常经常打篮球");
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].file_type, MemoryFileType::User);
+        assert_eq!(facts[0].title, "Interests");
+        assert_eq!(facts[0].content, "- Interests: 经常打篮球");
+    }
+
+    #[test]
+    fn promotes_shell_to_agent_memory() {
+        let facts = MessageProcessor::extract_promoted_memory_facts("我电脑使用的shell环境是fish");
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].file_type, MemoryFileType::Core);
+        assert_eq!(facts[0].title, "Local Environment");
+        assert_eq!(facts[0].content, "- Local shell: fish");
+    }
+
+    #[test]
+    fn parses_llm_user_fact_from_json_fence() {
+        let facts = MessageProcessor::parse_promoted_memory_facts(
+            r#"```json
+            {
+              "decisions": [
+                {
+                  "action": "add",
+                  "target": "user",
+                  "title": "Interests",
+                  "content": "- Interests: 最近迷上羽毛球",
+                  "category": "profile",
+                  "importance": 0.8,
+                  "confidence": 0.91
+                }
+              ]
+            }
+            ```"#,
+        );
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].action, MemoryPromotionAction::Add);
+        assert_eq!(facts[0].file_type, MemoryFileType::User);
+        assert_eq!(facts[0].content, "- Interests: 最近迷上羽毛球");
+    }
+
+    #[test]
+    fn parses_llm_ignore_as_no_fact() {
+        let facts = MessageProcessor::parse_promoted_memory_facts(
+            r#"{"decisions":[{"action":"ignore","confidence":0.95,"reason":"transient event"}]}"#,
+        );
+
+        assert!(facts.is_empty());
+    }
+
+    #[test]
+    fn parses_llm_replace_fact() {
+        let facts = MessageProcessor::parse_promoted_memory_facts(
+            r#"{
+              "decisions": [
+                {
+                  "action": "replace",
+                  "target": "user",
+                  "title": "Interests",
+                  "content": "- Interests: 现在主要打羽毛球",
+                  "category": "profile",
+                  "importance": 0.85,
+                  "confidence": 0.93,
+                  "replace_match": "打篮球"
+                }
+              ]
+            }"#,
+        );
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].action, MemoryPromotionAction::Replace);
+        assert_eq!(facts[0].file_type, MemoryFileType::User);
+        assert_eq!(facts[0].replace_match.as_deref(), Some("打篮球"));
+    }
 }
