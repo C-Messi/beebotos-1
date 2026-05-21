@@ -200,6 +200,33 @@ impl SessionManager {
         }
     }
 
+    /// 获取指定平台/频道/用户对应的活跃会话历史
+    pub async fn get_history_for_key(
+        &self,
+        platform: PlatformType,
+        channel_id: &str,
+        user_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionMessage>> {
+        let user_key = format!("{}:{}:{}", platform, channel_id, user_id);
+        let session_id = {
+            let user_sessions = self.user_sessions.read().await;
+            user_sessions.get(&user_key).cloned()
+        }
+        .ok_or_else(|| AgentError::not_found(format!("会话不存在: {}", user_key)))?;
+
+        let sessions = self.sessions.read().await;
+        if let Some(session) = sessions.get(&session_id) {
+            let elapsed = chrono::Utc::now().signed_duration_since(session.last_activity);
+            if elapsed.num_seconds() < self.timeout_seconds as i64 {
+                let start = session.messages.len().saturating_sub(limit);
+                return Ok(session.messages[start..].to_vec());
+            }
+        }
+
+        Err(AgentError::not_found(format!("会话不存在: {}", user_key)))
+    }
+
     /// 更新会话元数据
     pub async fn update_metadata(&self, session_id: &str, key: &str, value: &str) -> Result<()> {
         let mut sessions = self.sessions.write().await;

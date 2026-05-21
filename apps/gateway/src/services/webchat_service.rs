@@ -474,4 +474,30 @@ impl WebchatService {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| AppError::Internal(e))
     }
+
+    /// Get the latest assistant message persisted for a specific channel_id
+    /// stored in message metadata.
+    pub async fn get_latest_assistant_message_by_channel(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<ChatMessage>, AppError> {
+        let escaped_channel_id = channel_id.replace('\\', "\\\\").replace('"', "\\\"");
+        let pattern = format!("%\"channel_id\":\"{}\"%", escaped_channel_id);
+        let row: Option<ChatMessageRow> = sqlx::query_as(
+            r#"
+            SELECT * FROM chat_messages
+            WHERE role = 'assistant' AND metadata LIKE ?1
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(pattern)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| AppError::database(e))?;
+
+        row.map(|r| r.try_into())
+            .transpose()
+            .map_err(|e| AppError::Internal(e))
+    }
 }

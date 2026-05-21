@@ -29,6 +29,19 @@ use crate::{
     a2a, communication, events, mcp, queue, skills, state_manager, types, wallet, AgentConfig,
 };
 
+#[derive(Debug, Clone)]
+struct WebSearchResult {
+    title: String,
+    url: String,
+    snippet: String,
+}
+
+#[derive(Debug, Clone)]
+struct WebSearchFailure {
+    provider: &'static str,
+    reason: String,
+}
+
 pub struct Agent {
     pub(crate) config: AgentConfig,
     pub(crate) a2a_client: Option<a2a::A2AClient>,
@@ -1482,6 +1495,25 @@ impl Agent {
             .replace("&#39;", "'")
     }
 
+    fn decode_bing_url(raw: &str) -> String {
+        let decoded = Self::decode_html_entities(raw);
+        if let Ok(parsed) = url::Url::parse(&decoded) {
+            if parsed
+                .domain()
+                .map(|domain| domain.ends_with("bing.com"))
+                .unwrap_or(false)
+                && parsed.path() == "/ck/a"
+            {
+                for (key, value) in parsed.query_pairs() {
+                    if key == "u" || key == "url" {
+                        return value.to_string();
+                    }
+                }
+            }
+        }
+        decoded
+    }
+
     fn decode_duckduckgo_url(raw: &str) -> String {
         if let Ok(parsed) = url::Url::parse(raw) {
             if parsed.domain() == Some("duckduckgo.com") {
@@ -1495,10 +1527,65 @@ impl Agent {
         raw.to_string()
     }
 
-    fn parse_duckduckgo_results(html: &str, count: usize) -> Vec<(String, String, String)> {
+    fn parse_bing_results(html: &str, count: usize) -> Vec<WebSearchResult> {
+        let mut results = Vec::new();
+        let item_re = match regex::Regex::new(
+            r#"(?is)<li[^>]+class=["'][^"']*b_algo[^"']*["'][^>]*>(.*?)</li>"#,
+        ) {
+            Ok(re) => re,
+            Err(_) => return results,
+        };
+        let link_re = match regex::Regex::new(
+            r#"(?is)<h2[^>]*>\s*<a[^>]+href=["']([^"']+)["'][^>]*>(.*?)</a>"#,
+        ) {
+            Ok(re) => re,
+            Err(_) => return results,
+        };
+        let snippet_re = match regex::Regex::new(
+            r#"(?is)<p[^>]*>(.*?)</p>|<div[^>]+class=["'][^"']*b_caption[^"']*["'][^>]*>.*?<p[^>]*>(.*?)</p>"#,
+        ) {
+            Ok(re) => re,
+            Err(_) => return results,
+        };
+        for item in item_re.captures_iter(html) {
+            let item_html = item.get(1).map(|m| m.as_str()).unwrap_or("");
+            let Some(link_caps) = link_re.captures(item_html) else {
+                continue;
+            };
+            let raw_url = link_caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let title_html = link_caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let url = Self::decode_bing_url(raw_url);
+            let title = Self::strip_html_to_text(title_html);
+            let snippet = snippet_re
+                .captures(item_html)
+                .and_then(|caps| caps.get(1).or_else(|| caps.get(2)))
+                .map(|m| Self::strip_html_to_text(m.as_str()))
+                .unwrap_or_default();
+            if title.is_empty() || url.is_empty() {
+                continue;
+            }
+            results.push(WebSearchResult {
+                title,
+                url,
+                snippet,
+            });
+            if results.len() >= count {
+                break;
+            }
+        }
+        results
+    }
+
+    fn parse_duckduckgo_results(html: &str, count: usize) -> Vec<WebSearchResult> {
         let mut results = Vec::new();
         let link_re = match regex::Regex::new(
             r#"(?is)<a[^>]+class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>"#,
+        ) {
+            Ok(re) => re,
+            Err(_) => return results,
+        };
+        let snippet_re = match regex::Regex::new(
+            r#"(?is)<a[^>]+class=["'][^"']*result__snippet[^"']*["'][^>]*>(.*?)</a>|<div[^>]+class=["'][^"']*result__snippet[^"']*["'][^>]*>(.*?)</div>"#,
         ) {
             Ok(re) => re,
             Err(_) => return results,
@@ -1511,12 +1598,115 @@ impl Agent {
             if title.is_empty() || url.is_empty() {
                 continue;
             }
-            results.push((title, url, String::new()));
+            let snippet = snippet_re
+                .captures(html)
+                .and_then(|caps| caps.get(1).or_else(|| caps.get(2)))
+                .map(|m| Self::strip_html_to_text(m.as_str()))
+                .unwrap_or_default();
+            results.push(WebSearchResult {
+                title,
+                url,
+                snippet,
+            });
             if results.len() >= count {
                 break;
             }
         }
         results
+    }
+
+    async fn fetch_bing_search_results(
+        client: &reqwest::Client,
+        query: &str,
+        count: usize,
+    ) -> Result<Vec<WebSearchResult>, WebSearchFailure> {
+        let url = format!(
+            "https://cn.bing.com/search?q={}&ensearch=0",
+            urlencoding::encode(query)
+        );
+        let parsed_url = Self::validate_public_web_url(&url).map_err(|e| WebSearchFailure {
+            provider: "bing",
+            reason: e.to_string(),
+        })?;
+        let response = client
+            .get(parsed_url)
+            .send()
+            .await
+            .map_err(|e| WebSearchFailure {
+                provider: "bing",
+                reason: format!("request failed: {}", e),
+            })?;
+        let final_url = response.url().clone();
+        Self::validate_public_web_url(final_url.as_str()).map_err(|e| WebSearchFailure {
+            provider: "bing",
+            reason: e.to_string(),
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(WebSearchFailure {
+                provider: "bing",
+                reason: format!("HTTP {}", status),
+            });
+        }
+        let html = response.text().await.map_err(|e| WebSearchFailure {
+            provider: "bing",
+            reason: format!("failed to read response: {}", e),
+        })?;
+        let results = Self::parse_bing_results(&html, count);
+        if results.is_empty() {
+            return Err(WebSearchFailure {
+                provider: "bing",
+                reason: "no parseable results".to_string(),
+            });
+        }
+        Ok(results)
+    }
+
+    async fn fetch_duckduckgo_search_results(
+        client: &reqwest::Client,
+        query: &str,
+        count: usize,
+    ) -> Result<Vec<WebSearchResult>, WebSearchFailure> {
+        let url = format!(
+            "https://html.duckduckgo.com/html/?q={}",
+            urlencoding::encode(query)
+        );
+        let parsed_url = Self::validate_public_web_url(&url).map_err(|e| WebSearchFailure {
+            provider: "duckduckgo",
+            reason: e.to_string(),
+        })?;
+        let response = client
+            .get(parsed_url)
+            .send()
+            .await
+            .map_err(|e| WebSearchFailure {
+                provider: "duckduckgo",
+                reason: format!("request failed: {}", e),
+            })?;
+        let final_url = response.url().clone();
+        Self::validate_public_web_url(final_url.as_str()).map_err(|e| WebSearchFailure {
+            provider: "duckduckgo",
+            reason: e.to_string(),
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(WebSearchFailure {
+                provider: "duckduckgo",
+                reason: format!("HTTP {}", status),
+            });
+        }
+        let html = response.text().await.map_err(|e| WebSearchFailure {
+            provider: "duckduckgo",
+            reason: format!("failed to read response: {}", e),
+        })?;
+        let results = Self::parse_duckduckgo_results(&html, count);
+        if results.is_empty() {
+            return Err(WebSearchFailure {
+                provider: "duckduckgo",
+                reason: "no parseable results; it may be blocking automated search".to_string(),
+            });
+        }
+        Ok(results)
     }
 
     async fn execute_web_search(
@@ -1530,66 +1720,53 @@ impl Agent {
         if !self.web_tools_enabled() {
             return Err(AgentError::Execution("web tools are disabled".to_string()));
         }
-        let provider = std::env::var("BEEBOTOS_WEB_SEARCH_PROVIDER")
-            .unwrap_or_else(|_| "duckduckgo".to_string())
-            .to_lowercase();
-        if provider != "duckduckgo" {
-            return Err(AgentError::Execution(format!(
-                "web_search provider '{}' is not configured; only keyless duckduckgo is available",
-                provider
-            )));
-        }
-        let url = format!(
-            "https://html.duckduckgo.com/html/?q={}",
-            urlencoding::encode(query)
-        );
-        let parsed_url = Self::validate_public_web_url(&url)?;
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
             .redirect(reqwest::redirect::Policy::limited(5))
             .user_agent("BeeBotOS/1.0 (+https://github.com/beebotos/beebotos)")
             .build()
             .map_err(|e| AgentError::Execution(format!("Failed to build HTTP client: {}", e)))?;
-        let response = client
-            .get(parsed_url)
-            .send()
-            .await
-            .map_err(|e| AgentError::Execution(format!("DuckDuckGo search failed: {}", e)))?;
-        let final_url = response.url().clone();
-        Self::validate_public_web_url(final_url.as_str())?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(AgentError::Execution(format!(
-                "DuckDuckGo search returned HTTP {}",
-                status
-            )));
-        }
-        let html = response
-            .text()
-            .await
-            .map_err(|e| AgentError::Execution(format!("Failed to read search response: {}", e)))?;
-        let results = Self::parse_duckduckgo_results(&html, count);
-        if results.is_empty() {
-            return Err(AgentError::Execution(
-                "DuckDuckGo returned no parseable results; it may be blocking automated search"
-                    .to_string(),
-            ));
-        }
+
+        let mut failures = Vec::new();
+        let (provider, results) = match Self::fetch_bing_search_results(&client, query, count).await
+        {
+            Ok(results) => ("bing", results),
+            Err(bing_error) => {
+                failures.push(bing_error);
+                match Self::fetch_duckduckgo_search_results(&client, query, count).await {
+                    Ok(results) => ("duckduckgo", results),
+                    Err(duckduckgo_error) => {
+                        failures.push(duckduckgo_error);
+                        let reasons = failures
+                            .into_iter()
+                            .map(|failure| format!("{}: {}", failure.provider, failure.reason))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        return Err(AgentError::Execution(format!(
+                            "web_search failed after trying Bing and DuckDuckGo: {}",
+                            reasons
+                        )));
+                    }
+                }
+            }
+        };
+
         let mut lines = vec![format!(
-            "Provider: duckduckgo\nQuery: {}\nResults: {}",
+            "Provider: {}\nQuery: {}\nResults: {}",
+            provider,
             query,
             results.len()
         )];
-        for (idx, (title, url, snippet)) in results.into_iter().enumerate() {
-            if snippet.is_empty() {
-                lines.push(format!("{}. {}\n   {}", idx + 1, title, url));
+        for (idx, result) in results.into_iter().enumerate() {
+            if result.snippet.is_empty() {
+                lines.push(format!("{}. {}\n   {}", idx + 1, result.title, result.url));
             } else {
                 lines.push(format!(
                     "{}. {}\n   {}\n   {}",
                     idx + 1,
-                    title,
-                    url,
-                    snippet
+                    result.title,
+                    result.url,
+                    result.snippet
                 ));
             }
         }
@@ -10205,8 +10382,23 @@ mod planning_integration_tests {
         "#;
         let results = Agent::parse_duckduckgo_results(html, 5);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "Example & Result");
-        assert_eq!(results[0].1, "https://example.com/a");
+        assert_eq!(results[0].title, "Example & Result");
+        assert_eq!(results[0].url, "https://example.com/a");
+    }
+
+    #[test]
+    fn test_react_bing_result_parser() {
+        let html = r#"
+            <li class="b_algo">
+                <h2><a href="https://example.com/b">Bing &amp; Result</a></h2>
+                <div class="b_caption"><p>Useful snippet.</p></div>
+            </li>
+        "#;
+        let results = Agent::parse_bing_results(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Bing & Result");
+        assert_eq!(results[0].url, "https://example.com/b");
+        assert_eq!(results[0].snippet, "Useful snippet.");
     }
 
     #[test]

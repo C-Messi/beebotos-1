@@ -1036,10 +1036,7 @@ impl beebotos_agents::system_info::SystemInfoProvider for GatewaySystemInfoProvi
             .await
             .map_err(|e| format!("Database error: {}", e))?;
 
-        Ok(jobs
-            .into_iter()
-            .map(Self::cron_job_info)
-            .collect())
+        Ok(jobs.into_iter().map(Self::cron_job_info).collect())
     }
 
     async fn create_gateway_cron_job(
@@ -1090,7 +1087,8 @@ impl beebotos_agents::system_info::SystemInfoProvider for GatewaySystemInfoProvi
             if let Some(ref tx) = self.cron_registration_tx {
                 if let Err(e) = tx.send(job.clone()) {
                     tracing::warn!(
-                        "Failed to enqueue agent-created cron job {} for scheduler registration: {}",
+                        "Failed to enqueue agent-created cron job {} for scheduler registration: \
+                         {}",
                         job.id,
                         e
                     );
@@ -1539,8 +1537,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     {
-        let mut rx = Arc::get_mut(&mut app_state)
-            .and_then(|state| state.cron_registration_rx.take());
+        let mut rx =
+            Arc::get_mut(&mut app_state).and_then(|state| state.cron_registration_rx.take());
         if let Some(mut rx) = rx.take() {
             let state_for_agent_created_cron = app_state.clone();
             tokio::spawn(async move {
