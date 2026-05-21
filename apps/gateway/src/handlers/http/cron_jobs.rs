@@ -425,11 +425,13 @@ async fn run_scheduled_cron_job(
                     );
                 }
             } else {
-                warn!("Cron job {} reached max retries (3), disabling", job.id);
+                warn!(
+                    "Cron job {} reached max retries (3); leaving it enabled for manual control",
+                    job.id
+                );
                 let _ = svc
                     .record_run_complete(&run_id, "failed", "", &err_str)
                     .await;
-                let _ = svc.disable_job(&job.id).await;
             }
         }
     }
@@ -444,18 +446,38 @@ async fn execute_cron_job(
     state: &Arc<AppState>,
     job: &crate::services::cron_job_service::CronJob,
 ) -> Result<String, GatewayError> {
+    let execution_started_at = chrono::Utc::now();
     let result =
         tokio::time::timeout(Duration::from_secs(60), execute_cron_job_inner(state, job)).await;
 
     match result {
         Ok(Ok(output)) => {
+            if looks_like_internal_error(&output) {
+                if let Some(persisted_output) =
+                    latest_cron_assistant_output(state, job, execution_started_at).await
+                {
+                    info!(
+                        "Cron job {} returned an internal-error-looking output, but a final \
+                         assistant response was persisted; recording run as success",
+                        job.id
+                    );
+                    let _ = notify_cron_result(state, job, "success", &persisted_output, "").await;
+                    return Ok(persisted_output);
+                }
+
+                let _ = notify_cron_result(state, job, "failed", "", &output).await;
+                return Err(GatewayError::internal(output));
+            }
+
             // Notify success
             let _ = notify_cron_result(state, job, "success", &output, "").await;
             Ok(output)
         }
         Ok(Err(e)) => {
             let err_str = e.to_string();
-            if let Some(output) = latest_cron_assistant_output(state, job).await {
+            if let Some(output) =
+                latest_cron_assistant_output(state, job, execution_started_at).await
+            {
                 info!(
                     "Cron job {} completion returned an error, but a final assistant response was \
                      persisted; recording run as success. error={}",
@@ -478,6 +500,7 @@ async fn execute_cron_job(
 async fn latest_cron_assistant_output(
     state: &Arc<AppState>,
     job: &crate::services::cron_job_service::CronJob,
+    since: chrono::DateTime<chrono::Utc>,
 ) -> Option<String> {
     let channel_id = format!("cron:{}", job.id);
     if let Some(processor) = state.message_processor.as_ref() {
@@ -493,11 +516,11 @@ async fn latest_cron_assistant_output(
                 .await
             {
                 Ok(history) => {
-                    if let Some(message) = history
-                        .into_iter()
-                        .rev()
-                        .find(|m| m.role == "assistant" && !looks_like_internal_error(&m.content))
-                    {
+                    if let Some(message) = history.into_iter().rev().find(|m| {
+                        m.role == "assistant"
+                            && m.timestamp >= since
+                            && !looks_like_internal_error(&m.content)
+                    }) {
                         return Some(message.content);
                     }
                 }
@@ -527,7 +550,7 @@ async fn latest_cron_assistant_output(
         };
 
         if let Some(message) = message {
-            if !looks_like_internal_error(&message.content) {
+            if message.created_at >= since && !looks_like_internal_error(&message.content) {
                 return Some(message.content);
             }
         }

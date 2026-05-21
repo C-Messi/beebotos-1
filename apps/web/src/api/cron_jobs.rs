@@ -128,21 +128,42 @@ impl CronJobApiService {
         Self { client }
     }
 
+    fn job_path(id: &str) -> String {
+        format!("/cron/jobs/{}", js_sys::encode_uri_component(id))
+    }
+
+    fn runs_path(id: &str) -> String {
+        format!("/cron/jobs/{}/runs", js_sys::encode_uri_component(id))
+    }
+
+    fn invalidate_jobs_cache(&self) {
+        self.client.invalidate_cache("GET:/cron/jobs");
+    }
+
+    fn invalidate_job_cache(&self, id: &str) {
+        self.client
+            .invalidate_cache(&format!("GET:{}", Self::job_path(id)));
+        self.client
+            .invalidate_cache(&format!("GET:{}", Self::runs_path(id)));
+        self.invalidate_jobs_cache();
+    }
+
     /// List all cron jobs
     pub async fn list_jobs(&self) -> Result<Vec<CronJob>, ApiError> {
+        self.invalidate_jobs_cache();
         self.client.get("/cron/jobs").await
     }
 
     /// Get a single job
     pub async fn get_job(&self, id: &str) -> Result<CronJob, ApiError> {
-        self.client
-            .get(&format!("/cron/jobs/{}", js_sys::encode_uri_component(id)))
-            .await
+        self.client.get(&Self::job_path(id)).await
     }
 
     /// Create a new job
     pub async fn create_job(&self, req: &CronJobRequest) -> Result<CronJobResponse, ApiError> {
-        self.client.post("/cron/jobs", req).await
+        let result = self.client.post("/cron/jobs", req).await;
+        self.invalidate_jobs_cache();
+        result
     }
 
     /// Update a job
@@ -151,48 +172,48 @@ impl CronJobApiService {
         id: &str,
         req: &CronJobRequest,
     ) -> Result<CronJobResponse, ApiError> {
-        self.client
-            .put(
-                &format!("/cron/jobs/{}", js_sys::encode_uri_component(id)),
-                req,
-            )
-            .await
+        let result = self.client.put(&Self::job_path(id), req).await;
+        self.invalidate_job_cache(id);
+        result
     }
 
     /// Delete a job
     pub async fn delete_job(&self, id: &str) -> Result<(), ApiError> {
-        self.client
-            .delete(&format!("/cron/jobs/{}", js_sys::encode_uri_component(id)))
-            .await
+        let result = self.client.delete(&Self::job_path(id)).await;
+        self.invalidate_job_cache(id);
+        result
     }
 
     /// Toggle enabled status
     pub async fn toggle_job(&self, id: &str) -> Result<ToggleResponse, ApiError> {
-        self.client
+        let result = self
+            .client
             .post(
                 &format!("/cron/jobs/{}/toggle", js_sys::encode_uri_component(id)),
                 &serde_json::json!({}),
             )
-            .await
+            .await;
+        self.invalidate_job_cache(id);
+        result
     }
 
     /// Manually trigger a job
     pub async fn run_job(&self, id: &str) -> Result<RunResponse, ApiError> {
-        self.client
+        let result = self
+            .client
             .post(
                 &format!("/cron/jobs/{}/run", js_sys::encode_uri_component(id)),
                 &serde_json::json!({}),
             )
-            .await
+            .await;
+        self.invalidate_job_cache(id);
+        result
     }
 
     /// List execution history
     pub async fn list_runs(&self, id: &str) -> Result<Vec<CronJobRun>, ApiError> {
-        self.client
-            .get(&format!(
-                "/cron/jobs/{}/runs",
-                js_sys::encode_uri_component(id)
-            ))
-            .await
+        let path = Self::runs_path(id);
+        self.client.invalidate_cache(&format!("GET:{}", path));
+        self.client.get(&path).await
     }
 }

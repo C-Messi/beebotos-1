@@ -7,7 +7,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}"
 PID_DIR="${PROJECT_ROOT}/data/run"
+LOG_DIR="${PROJECT_ROOT}/data/logs"
 mkdir -p "${PID_DIR}"
+mkdir -p "${LOG_DIR}"
 
 cd "${PROJECT_ROOT}"
 
@@ -32,25 +34,26 @@ print_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 print_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 # Service definitions
-# Format: name|build_cmd|binary_path|port|description
+# Format: name|package|build_cmd|binary_path|port|description
 SERVICES=(
-    "gateway|cargo build --release -p beebotos-gateway|target/release/beebotos-gateway|8000|API Gateway"
-    "web|cargo build --release --lib -p beebotos-web --target wasm32-unknown-unknown && wasm-pack build --target web --out-dir pkg apps/web/ && cargo build --release -p beebotos-web --features server --bin web-server|target/release/web-server|8090|Web Frontend Server"
-    "beehub|cargo build --release -p beebotos-beehub|target/release/beehub|8080|BeeHub Service"
-    "cli|cargo install --path apps/cli --force|||CLI Tool (install only)"
+    "gateway|beebotos-gateway|cargo build --release -p beebotos-gateway|target/release/beebotos-gateway|8000|API Gateway"
+    "web|beebotos-web||target/release/web-server|8090|Web Frontend Server"
+    "beehub|beebotos-beehub|cargo build --release -p beebotos-beehub|target/release/beehub|8080|BeeHub Service"
+    "cli||cargo install --path apps/cli --force||0|CLI Tool (install only)"
 )
 
 get_service_field() {
     local svc="$1"
     local idx="$2"
     for entry in "${SERVICES[@]}"; do
-        IFS='|' read -r name build_cmd binary port desc <<< "$entry"
+        IFS='|' read -r name package build_cmd binary port desc <<< "$entry"
         if [[ "$name" == "$svc" ]]; then
             case $idx in
-                1) echo "$build_cmd" ;;
-                2) echo "$binary" ;;
-                3) echo "$port" ;;
-                4) echo "$desc" ;;
+                1) echo "$package" ;;
+                2) echo "$build_cmd" ;;
+                3) echo "$binary" ;;
+                4) echo "$port" ;;
+                5) echo "$desc" ;;
             esac
             return
         fi
@@ -60,7 +63,7 @@ get_service_field() {
 service_names() {
     local names=()
     for entry in "${SERVICES[@]}"; do
-        IFS='|' read -r name _ _ _ _ <<< "$entry"
+        IFS='|' read -r name _ _ _ _ _ <<< "$entry"
         names+=("$name")
     done
     echo "${names[@]}"
@@ -74,18 +77,119 @@ is_valid_service() {
     return 1
 }
 
+get_target_args() {
+    local cargo_target="${1:-}"
+    if [[ -n "$cargo_target" ]]; then
+        echo "--target ${cargo_target}"
+    fi
+}
+
+get_release_dir() {
+    local cargo_target="${1:-}"
+    if [[ -n "$cargo_target" ]]; then
+        echo "${PROJECT_ROOT}/target/${cargo_target}/release"
+    else
+        echo "${PROJECT_ROOT}/target/release"
+    fi
+}
+
+get_binary_path() {
+    local binary_name="$1"
+    local cargo_target="${2:-}"
+    local suffix=""
+    if [[ "$cargo_target" == *windows* ]]; then
+        suffix=".exe"
+    fi
+    echo "$(get_release_dir "$cargo_target")/${binary_name}${suffix}"
+}
+
+copy_required_file() {
+    local source="$1"
+    local destination="$2"
+    if [[ ! -f "$source" ]]; then
+        print_error "Required file not found: $source"
+        return 1
+    fi
+    cp "$source" "$destination"
+}
+
 build_service() {
     local svc="$1"
-    local cmd=$(get_service_field "$svc" 1)
-    local desc=$(get_service_field "$svc" 4)
+    local cargo_target="${2:-}"
+    local package
+    local cmd
+    local desc
+    package=$(get_service_field "$svc" 1)
+    cmd=$(get_service_field "$svc" 2)
+    desc=$(get_service_field "$svc" 5)
 
     echo -e "${CYAN}----------------------------------------${NC}"
     echo -e "${CYAN}Building: ${desc} (${svc})${NC}"
     echo -e "${CYAN}----------------------------------------${NC}"
+    if [[ -n "$cargo_target" ]]; then
+        print_info "Cargo target: $cargo_target"
+    fi
 
-    if [[ -z "$cmd" ]]; then
+    if ! command -v cargo >/dev/null 2>&1; then
+        print_error "cargo not found in PATH. Please install Rust: https://rustup.rs"
+        return 1
+    fi
+
+    if [[ -z "$cmd" && "$svc" != "web" ]]; then
         print_warn "No build command for ${svc}, skipping."
         return 0
+    fi
+
+    if [[ "$svc" == "web" ]]; then
+        if ! command -v trunk >/dev/null 2>&1; then
+            print_error "trunk not found in PATH. Please install it: cargo install trunk"
+            return 1
+        fi
+
+        pushd "${PROJECT_ROOT}/apps/web" >/dev/null
+        local old_no_color="${NO_COLOR-}"
+        local had_no_color=0
+        if [[ -v NO_COLOR ]]; then
+            had_no_color=1
+        fi
+        if [[ "${NO_COLOR-}" == "1" ]]; then
+            export NO_COLOR=true
+        fi
+
+        if ! trunk build --release; then
+            if [[ "$had_no_color" -eq 1 ]]; then
+                export NO_COLOR="$old_no_color"
+            else
+                unset NO_COLOR
+            fi
+            popd >/dev/null
+            print_error "Build failed: web - trunk build failed"
+            return 1
+        fi
+
+        if [[ "$had_no_color" -eq 1 ]]; then
+            export NO_COLOR="$old_no_color"
+        else
+            unset NO_COLOR
+        fi
+        popd >/dev/null
+
+        if cargo build -p beebotos-web --bin web-server --features server --release $(get_target_args "$cargo_target"); then
+            print_success "Build completed: ${svc}"
+            return 0
+        fi
+
+        print_error "Build failed: web - cargo build web-server failed"
+        return 1
+    fi
+
+    if [[ -n "$package" ]]; then
+        if cargo build --release -p "$package" $(get_target_args "$cargo_target"); then
+            print_success "Build completed: ${svc}"
+            return 0
+        fi
+        print_error "Build failed: ${svc}"
+        return 1
     fi
 
     if eval "$cmd"; then
@@ -115,9 +219,9 @@ is_running() {
 
 start_service() {
     local svc="$1"
-    local binary=$(get_service_field "$svc" 2)
-    local port=$(get_service_field "$svc" 3)
-    local desc=$(get_service_field "$svc" 4)
+    local binary=$(get_service_field "$svc" 3)
+    local port=$(get_service_field "$svc" 4)
+    local desc=$(get_service_field "$svc" 5)
     local pid_file=$(get_pid_file "$svc")
 
     if [[ -z "$binary" ]]; then
@@ -141,23 +245,22 @@ start_service() {
     print_info "Port: $port"
 
     if [[ "$svc" == "web" ]]; then
-        # 准备临时静态目录，解决 CSS/favicon 软链接问题
-        local temp_static_dir="${PROJECT_ROOT}/data/run/web-static"
+        # 准备临时静态目录，使用 trunk 生成的 apps/web/dist
+        local temp_static_dir="${PROJECT_ROOT}/data/temp-web-static"
+        local dist_source="${PROJECT_ROOT}/apps/web/dist"
+        if [[ ! -d "$dist_source" ]]; then
+            print_error "Web dist directory not found: $dist_source"
+            print_info "Please build web first: ./beebotos-dev.sh build web"
+            return 1
+        fi
         rm -rf "$temp_static_dir"
         mkdir -p "$temp_static_dir"
-        cp -L "${PROJECT_ROOT}/apps/web/index.html" "$temp_static_dir/"
-        cp -rL "${PROJECT_ROOT}/apps/web/pkg" "$temp_static_dir/"
-        cp -rL "${PROJECT_ROOT}/apps/web/style" "$temp_static_dir/"
-        cp -L "${PROJECT_ROOT}/apps/web/style/main.css" "$temp_static_dir/style.css"
-        cp -L "${PROJECT_ROOT}/apps/web/style/components.css" "$temp_static_dir/components.css"
-        if [[ -f "${PROJECT_ROOT}/apps/web/public/favicon.svg" ]]; then
-            cp -L "${PROJECT_ROOT}/apps/web/public/favicon.svg" "$temp_static_dir/favicon.svg"
-        fi
+        cp -r "${dist_source}/." "$temp_static_dir/"
         print_info "Static path: $temp_static_dir"
         print_info "Gateway URL: http://localhost:8000"
-        nohup "$binary" --static-path "$temp_static_dir" --gateway-url http://localhost:8000 > "${PID_DIR}/${svc}.log" 2>&1 &
+        nohup "$binary" --static-path "$temp_static_dir" --gateway-url http://localhost:8000 > "${LOG_DIR}/${svc}.log" 2> "${LOG_DIR}/${svc}.err" &
     else
-        nohup "$binary" > "${PID_DIR}/${svc}.log" 2>&1 &
+        nohup "$binary" > "${LOG_DIR}/${svc}.log" 2> "${LOG_DIR}/${svc}.err" &
     fi
     local pid=$!
     echo $pid > "$pid_file"
@@ -166,7 +269,7 @@ start_service() {
     if kill -0 "$pid" 2>/dev/null; then
         print_success "${svc} started (PID: $pid)"
     else
-        print_error "${svc} failed to start. Check ${PID_DIR}/${svc}.log"
+        print_error "${svc} failed to start. Check ${LOG_DIR}/${svc}.log"
         rm -f "$pid_file"
         return 1
     fi
@@ -220,49 +323,81 @@ pack_release() {
     echo -e "${CYAN}Packing release for target: ${target}${NC}"
     echo -e "${CYAN}----------------------------------------${NC}"
 
+    local cargo_target="${BEEBOTOS_PACKAGE_TARGET:-}"
+    local archive_target="${cargo_target:-$(rustc -vV | awk '/^host:/ { print $2 }')}"
     local out_dir="${PROJECT_ROOT}/dist/beebotos"
-    local archive="${PROJECT_ROOT}/dist/beebotos-$(uname -m)-unknown-linux-gnu.tar.gz"
+    local archive="${PROJECT_ROOT}/dist/beebotos-${archive_target}.tar.gz"
+
+    if [[ -n "$cargo_target" ]]; then
+        print_info "Packaging cargo target: $cargo_target"
+        if ! rustup target list --installed | grep -Fxq "$cargo_target"; then
+            print_error "Rust target is not installed: $cargo_target"
+            print_info "Install it with: rustup target add $cargo_target"
+            return 1
+        fi
+    else
+        print_info "Packaging native Linux target: $archive_target"
+    fi
+
+    local build_list=()
+    if [[ "$target" == "all" ]]; then
+        build_list=(gateway web beehub)
+    else
+        build_list=("$target")
+    fi
+
+    local svc_name
+    for svc_name in "${build_list[@]}"; do
+        [[ "$svc_name" == "cli" ]] && continue
+        if ! build_service "$svc_name" "$cargo_target"; then
+            print_error "Cannot pack because build failed: $svc_name"
+            return 1
+        fi
+    done
 
     rm -rf "${out_dir}"
-    mkdir -p "${out_dir}/pkg"
+    mkdir -p "${out_dir}"
 
     # Copy binaries and assets
     if [[ "$target" == "all" || "$target" == "gateway" ]]; then
-        cp "${PROJECT_ROOT}/target/release/beebotos-gateway" "${out_dir}/"
+        copy_required_file "$(get_binary_path "beebotos-gateway" "$cargo_target")" "${out_dir}/" || return 1
         cp -r "${PROJECT_ROOT}/migrations_sqlite" "${out_dir}/"
     fi
     if [[ "$target" == "all" || "$target" == "web" ]]; then
-        if [[ ! -d "${PROJECT_ROOT}/apps/web/pkg" ]]; then
-            print_error "WASM package directory not found: ${PROJECT_ROOT}/apps/web/pkg"
-            print_info "Please build web service first: ./scripts/beebotos-dev.sh build web"
+        copy_required_file "$(get_binary_path "web-server" "$cargo_target")" "${out_dir}/" || return 1
+        local pkg_source="${PROJECT_ROOT}/apps/web/dist"
+        if [[ ! -d "$pkg_source" ]]; then
+            print_error "Web dist directory not found: $pkg_source"
+            print_info "Please build the web service first: ./beebotos-dev.sh build web"
+            rm -rf "${out_dir}"
             return 1
         fi
-        cp "${PROJECT_ROOT}/target/release/web-server" "${out_dir}/"
-        cp -r "${PROJECT_ROOT}/apps/web/pkg/." "${out_dir}/pkg/"
-
-        # 复制 web 入口页面和静态资源
-        cp "${PROJECT_ROOT}/apps/web/index.html" "${out_dir}/"
-        cp -rL "${PROJECT_ROOT}/apps/web/style" "${out_dir}/"
-        cp -r "${PROJECT_ROOT}/apps/web/public" "${out_dir}/"
-
-        # 复制根目录下的软链接文件（style.css -> style/main.css 等）
-        for link_file in style.css components.css favicon.svg; do
-            if [[ -L "${PROJECT_ROOT}/apps/web/${link_file}" ]]; then
-                cp -L "${PROJECT_ROOT}/apps/web/${link_file}" "${out_dir}/${link_file}"
-            fi
-        done
+        cp -r "${pkg_source}/." "${out_dir}/"
     fi
     if [[ "$target" == "all" || "$target" == "beehub" ]]; then
-        if [[ -f "${PROJECT_ROOT}/target/release/beehub" ]]; then
-            cp "${PROJECT_ROOT}/target/release/beehub" "${out_dir}/"
+        local beehub_path
+        beehub_path="$(get_binary_path "beehub" "$cargo_target")"
+        if [[ -f "$beehub_path" ]]; then
+            cp "$beehub_path" "${out_dir}/"
         else
-            print_warn "beehub binary not found, skipping"
+            print_warn "$(basename "$beehub_path") not found, skipping"
         fi
     fi
 
     # Copy configs if they exist
     if [[ -d "${PROJECT_ROOT}/config" ]]; then
         cp -r "${PROJECT_ROOT}/config" "${out_dir}/"
+        local prod_config="${out_dir}/config/web-server.toml"
+        if [[ -f "$prod_config" ]]; then
+            sed -i \
+                -e 's#path = "apps/web/dist"#path = "."#g' \
+                -e 's#path = "apps/web"#path = "."#g' \
+                "$prod_config"
+        fi
+    fi
+
+    if [[ -d "${PROJECT_ROOT}/skills" ]]; then
+        cp -r "${PROJECT_ROOT}/skills" "${out_dir}/"
     fi
 
     # Copy runner script
@@ -270,7 +405,7 @@ pack_release() {
     chmod +x "${out_dir}/beebotos-run.sh"
 
     # Create archive
-    tar czvf "${archive}" -C "${PROJECT_ROOT}/dist" beebotos
+    tar czf "${archive}" -C "${PROJECT_ROOT}/dist" beebotos
 
     print_success "Release packed: ${archive}"
     echo "Contents:"
@@ -283,7 +418,7 @@ show_status() {
     printf "%-12s %-10s %-8s %s\n" "Service" "Status" "PID" "Port"
     echo "----------------------------------------"
     for entry in "${SERVICES[@]}"; do
-        IFS='|' read -r name _ binary port desc <<< "$entry"
+        IFS='|' read -r name _ _ binary port desc <<< "$entry"
         if [[ -z "$binary" ]]; then
             printf "%-12s %-10s %-8s %s\n" "$name" "N/A" "-" "install-only"
             continue
