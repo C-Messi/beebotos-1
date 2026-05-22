@@ -14,7 +14,7 @@ use web_sys::MessageEvent;
 use crate::api::{create_client, create_webchat_service};
 use crate::state::{use_auth_state, use_webchat_state};
 use crate::utils::get_user_id;
-use crate::webchat::{ChatMessage, MessageRole, ToolCallEvent};
+use crate::webchat::{ChatMessage, MessageMetadata, MessageRole, ToolCallEvent};
 
 fn is_final_assistant(message: &ChatMessage) -> bool {
     message.role == MessageRole::Assistant && message.content.trim() != "🤖 正在思考，请稍候..."
@@ -25,6 +25,15 @@ fn latest_final_assistant(messages: &[ChatMessage]) -> Option<&ChatMessage> {
         .iter()
         .rev()
         .find(|message| is_final_assistant(message))
+}
+
+fn tool_calls_json(metadata: &MessageMetadata) -> String {
+    serde_json::to_string(&metadata.tool_calls).unwrap_or_default()
+}
+
+fn fetched_loses_tool_calls(current: &ChatMessage, fetched: &ChatMessage) -> bool {
+    current.content == fetched.content
+        && fetched.metadata.tool_calls.len() < current.metadata.tool_calls.len()
 }
 
 fn should_refresh_finished_stream(current: &[ChatMessage], fetched: &[ChatMessage]) -> bool {
@@ -38,8 +47,13 @@ fn should_refresh_finished_stream(current: &[ChatMessage], fetched: &[ChatMessag
 
     match latest_final_assistant(current) {
         Some(current_latest) => {
+            if fetched_loses_tool_calls(current_latest, fetched_latest) {
+                return false;
+            }
             current_latest.id != fetched_latest.id
                 || current_latest.content != fetched_latest.content
+                || tool_calls_json(&current_latest.metadata)
+                    != tool_calls_json(&fetched_latest.metadata)
         }
         None => true,
     }
@@ -201,6 +215,14 @@ pub fn use_websocket_chat() -> ReadSignal<WsConnectionStatus> {
                                                 vec![message],
                                             );
                                         }
+                                        let auth_state_ack = auth_state_msg.clone();
+                                        let msg_id_ack = msg_id.clone();
+                                        wasm_bindgen_futures::spawn_local(async move {
+                                            let client = create_client();
+                                            client.set_auth_token(auth_state_ack.get_token());
+                                            let service = create_webchat_service(client);
+                                            let _ = service.ack_message(&msg_id_ack).await;
+                                        });
                                         chat_state_msg.is_sending.set(false);
                                         chat_state_msg.is_streaming.set(false);
                                         chat_state_msg.streaming_tool_calls.set(Vec::new());
