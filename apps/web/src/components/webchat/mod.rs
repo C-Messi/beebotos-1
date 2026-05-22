@@ -29,6 +29,6 @@ pub use message_list::MessageList;
 pub use session_item::SessionItem;
 pub use session_list::SessionList;
 pub use side_panel::SidePanel;
-pub use streaming_message::{StreamingMessage, ToolCallList};
+pub use streaming_message::{StreamingMessage, ToolCallList, WaitingMessage};
 pub use usage_panel::UsagePanelComponent;
 pub use websocket_hook::use_websocket_chat;

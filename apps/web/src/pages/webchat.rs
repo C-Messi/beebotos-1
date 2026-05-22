@@ -395,6 +395,7 @@ pub fn WebchatPage() -> impl IntoView {
     let ui_state_side_show = ui_state.clone();
     let ui_state_side_toggle = ui_state.clone();
     let _ui_state_header = ui_state.clone();
+    let chat_state_messages = chat_state.clone();
 
     view! {
         <Title text="Chat - BeeBotOS" />
@@ -414,10 +415,16 @@ pub fn WebchatPage() -> impl IntoView {
                     <ChatHeader title=current_title />
                     {move || view! {
                         <MessageList
-                            messages=chat_state.current_messages.into()
-                            is_streaming=chat_state.is_streaming.into()
-                            streaming_content=chat_state.streaming_content.into()
-                            streaming_tool_calls=chat_state.streaming_tool_calls.into()
+                            messages=chat_state_messages.current_messages.into()
+                            is_streaming=chat_state_messages.is_streaming.into()
+                            is_waiting=Signal::derive({
+                                let chat_state = chat_state_messages.clone();
+                                move || {
+                                    chat_state.is_sending.get() && !chat_state.is_streaming.get()
+                                }
+                            })
+                            streaming_content=chat_state_messages.streaming_content.into()
+                            streaming_tool_calls=chat_state_messages.streaming_tool_calls.into()
                         />
                     }}
                     <MessageInput
