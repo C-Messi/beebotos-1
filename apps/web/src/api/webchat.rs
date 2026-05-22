@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::client::{ApiClient, ApiError};
-use crate::webchat::{ChatMessage, ChatSession, UsagePanel};
+use crate::webchat::{ChatMessage, ChatSession, MessageMetadata, ToolCallEvent, UsagePanel};
 
 /// 后端消息响应（用于兼容后端 JSON 格式）
 #[derive(Clone, Debug, Deserialize)]
@@ -28,8 +28,7 @@ impl From<BackendMessageResponse> for ChatMessage {
             _ => crate::webchat::MessageRole::Assistant,
         };
 
-        let metadata = serde_json::from_value::<crate::webchat::MessageMetadata>(resp.metadata)
-            .unwrap_or_default();
+        let metadata = parse_message_metadata(resp.metadata);
 
         let token_usage = resp
             .token_usage
@@ -44,6 +43,45 @@ impl From<BackendMessageResponse> for ChatMessage {
             metadata,
             token_usage,
         }
+    }
+}
+
+fn parse_message_metadata(value: serde_json::Value) -> MessageMetadata {
+    let mut metadata = serde_json::from_value::<MessageMetadata>(value.clone()).unwrap_or_default();
+    if metadata.tool_calls.is_empty() {
+        if let Some(calls) = value.get("tool_calls").and_then(|v| v.as_array()) {
+            metadata.tool_calls = calls.iter().map(ToolCallEvent::from_ws_event).collect();
+        }
+    }
+    metadata
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_tool_call_metadata_survives_missing_ui_fields() {
+        let message: ChatMessage = BackendMessageResponse {
+            id: "msg-1".to_string(),
+            role: "assistant".to_string(),
+            content: "Done".to_string(),
+            timestamp: "2026-05-22T00:00:00Z".to_string(),
+            metadata: serde_json::json!({
+                "tool_calls": [{
+                    "round": 1,
+                    "tool_name": "search",
+                    "reasoning": "lookup",
+                    "arguments": {"q": "BeeBotOS"},
+                    "status": "started"
+                }]
+            }),
+            token_usage: None,
+        }
+        .into();
+
+        assert_eq!(message.metadata.tool_calls.len(), 1);
+        assert_eq!(message.metadata.tool_calls[0].tool_name, "search");
     }
 }
 

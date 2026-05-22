@@ -1675,6 +1675,37 @@ body {
     margin-bottom: 4px;
 }
 
+.tool-call-summary {
+    width: fit-content;
+    border: 0;
+    padding: 2px 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+}
+
+.tool-call-summary:hover {
+    color: var(--primary-color);
+}
+
+.tool-call-chevron {
+    width: 12px;
+    color: var(--primary-color);
+    font-size: 14px;
+    line-height: 1;
+}
+
+.tool-call-items {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
 .tool-call-badge {
     display: flex;
     align-items: flex-start;

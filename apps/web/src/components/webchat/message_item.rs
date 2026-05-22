@@ -33,7 +33,7 @@ pub fn MessageItem(
                 }}
             </div>
             <div class="message-content-wrapper">
-                <ToolCallList tool_calls=message.metadata.tool_calls.clone() />
+                <ToolCallList tool_calls=message.metadata.tool_calls.clone() default_collapsed=true />
                 <ContentRenderer
                     content=message.content.clone()
                     attachments=message.attachments.clone()
