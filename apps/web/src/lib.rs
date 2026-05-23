@@ -54,10 +54,10 @@ use components::{AccessDenied, AuthGuard, ContentSecurityPolicy, GlobalErrorHand
 use i18n::{init_i18n, I18nContext};
 use leptos_router::hooks::use_location;
 use pages::{
-    AgentDetail, AgentsPage, AiCommercePage, ChannelsPage, DaoPage, Home, LlmConfigPage,
-    LlmSettingsPage, LoginPage, NotFound, RegisterPage, SettingsPage, SetupPage,
-    SkillInstancesPage, SkillsPage, TreasuryPage, TreasuryTransactionsPage, WorkflowDashboardPage,
-    WorkflowDetailPage,
+    AgentDetail, AgentsPage, AiCommercePage, AiStoreManagerPage, AiVideoMarketingPage,
+    ChannelsPage, DaoPage, Home, LlmConfigPage, LlmSettingsPage, LoginPage, NotFound, RegisterPage,
+    SettingsPage, SetupPage, SkillInstancesPage, SkillsPage, TreasuryPage,
+    TreasuryTransactionsPage, WorkflowDashboardPage, WorkflowDetailPage,
 };
 use state::provide_app_state;
 use utils::provide_theme;
@@ -72,6 +72,7 @@ fn PageTitle() -> impl IntoView {
         let path = location.pathname.get();
         match path.as_str() {
             p if p.starts_with("/agents") => i18n.t("nav-agents"),
+            p if p.starts_with("/ai-store-manager") => i18n.t("nav-ai-store-manager"),
             p if p.starts_with("/ai-commerce") => i18n.t("nav-ai-commerce"),
             p if p.starts_with("/channels") => i18n.t("nav-channels"),
             p if p.starts_with("/dao/treasury") => i18n.t("nav-treasury"),
@@ -251,6 +252,22 @@ pub fn App() -> impl IntoView {
                                     view=move || view! {
                                         <AuthGuard>
                                             <AiCommercePage />
+                                        </AuthGuard>
+                                    }
+                                />
+                                <Route
+                                    path=(StaticSegment("ai-store-manager"), StaticSegment("video-marketing"))
+                                    view=move || view! {
+                                        <AuthGuard>
+                                            <AiVideoMarketingPage />
+                                        </AuthGuard>
+                                    }
+                                />
+                                <Route
+                                    path=StaticSegment("ai-store-manager")
+                                    view=move || view! {
+                                        <AuthGuard>
+                                            <AiStoreManagerPage />
                                         </AuthGuard>
                                     }
                                 />

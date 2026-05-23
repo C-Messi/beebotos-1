@@ -5,6 +5,8 @@
 pub mod agent_detail;
 pub mod agents;
 pub mod ai_commerce;
+pub mod ai_store_manager;
+pub mod ai_video_marketing;
 pub mod browser;
 pub mod channels;
 pub mod cron_jobs;
@@ -27,6 +29,8 @@ pub mod workflows;
 pub use agent_detail::AgentDetail;
 pub use agents::AgentsPage;
 pub use ai_commerce::AiCommercePage;
+pub use ai_store_manager::AiStoreManagerPage;
+pub use ai_video_marketing::AiVideoMarketingPage;
 pub use browser::BrowserPage;
 pub use channels::ChannelsPage;
 pub use cron_jobs::CronJobsPage;
@@ -54,6 +58,8 @@ mod tests {
     fn test_page_exports() {
         // 验证页面组件正确导出
         let _ = Home;
+        let _ = AiStoreManagerPage;
+        let _ = AiVideoMarketingPage;
         let _ = AiCommercePage;
         let _ = AgentsPage;
         let _ = AgentDetail;

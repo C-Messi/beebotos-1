@@ -6,6 +6,7 @@
 //! - Gateway API 配置
 //! - 通用 API 客户端
 
+pub mod ai_store_manager;
 pub mod browser;
 pub mod client;
 pub mod cron_jobs;
@@ -14,6 +15,7 @@ pub mod services;
 pub mod webchat;
 
 // Re-export 浏览器 API
+pub use ai_store_manager::{AiStoreManagerService, CreateVideoTaskRequest, VideoTaskResponse};
 pub use browser::{
     BrowserApiService, ClickRequest, EvaluateResponse, InputRequest, NavigationResponse,
 };
@@ -69,6 +71,11 @@ pub fn create_browser_service(client: ApiClient) -> BrowserApiService {
 /// 创建 WebChat API 服务
 pub fn create_webchat_service(client: ApiClient) -> WebchatApiService {
     WebchatApiService::new(client)
+}
+
+/// 创建 AI 店长 API 服务
+pub fn create_ai_store_manager_service(client: ApiClient) -> AiStoreManagerService {
+    AiStoreManagerService::new(client)
 }
 
 #[cfg(test)]

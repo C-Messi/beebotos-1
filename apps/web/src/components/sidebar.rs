@@ -95,6 +95,12 @@ pub fn Sidebar() -> impl IntoView {
                             current_path=current_path
                         />
                         <NavItem
+                            href="/ai-store-manager"
+                            icon="🏪"
+                            label=move || i18n_stored.get_value().t("nav-ai-store-manager")
+                            current_path=current_path
+                        />
+                        <NavItem
                             href="/skill-instances"
                             icon="🤖"
                             label=move || i18n_stored.get_value().t("nav-skill-instances")
