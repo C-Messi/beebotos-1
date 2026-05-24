@@ -422,6 +422,10 @@ impl AgentKernelTask {
 
         let task_id = task.id.clone();
         let session_id = task.parameters.get("session_id").cloned();
+        let cancellation_generation = task
+            .parameters
+            .get("cancellation_generation")
+            .and_then(|value| value.parse::<u64>().ok());
         let timeout_secs = if timeout_secs == 0 {
             self.config.task_execution_timeout_secs
         } else {
@@ -432,8 +436,14 @@ impl AgentKernelTask {
         // has a timeout, but this is the one that keeps the serial kernel task
         // loop from getting stuck behind an abandoned request.
         let result = if let Some(session_id) = session_id.as_deref() {
-            if let Some(mut cancel_rx) = crate::session_cancellation::get_receiver(session_id).await
-            {
+            let cancel_rx = match cancellation_generation {
+                Some(generation) => {
+                    crate::session_cancellation::get_receiver_for_generation(session_id, generation)
+                        .await
+                }
+                None => crate::session_cancellation::get_receiver(session_id).await,
+            };
+            if let Some(mut cancel_rx) = cancel_rx {
                 if *cancel_rx.borrow() {
                     info!(
                         "Agent {} task {} interrupted before execution for session {}",

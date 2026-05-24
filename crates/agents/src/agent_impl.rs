@@ -3660,6 +3660,20 @@ impl Agent {
         cancel_rx.as_ref().map(|rx| *rx.borrow()).unwrap_or(false)
     }
 
+    async fn cancellation_receiver(
+        session_key: &str,
+        params: &HashMap<String, String>,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        if let Some(generation) = params
+            .get("cancellation_generation")
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            crate::session_cancellation::get_receiver_for_generation(session_key, generation).await
+        } else {
+            crate::session_cancellation::get_receiver(session_key).await
+        }
+    }
+
     async fn process_task_react(&self, task: &Task) -> Result<(String, Vec<Artifact>), AgentError> {
         let llm = self
             .llm_interface
@@ -3671,7 +3685,7 @@ impl Agent {
 
         let (input_text, mut extra_params, history, memory_context, weather_data, session_key) =
             self.extract_react_input(task);
-        let cancel_rx = crate::session_cancellation::get_receiver(&session_key).await;
+        let cancel_rx = Self::cancellation_receiver(&session_key, &extra_params).await;
         let tools = self.builtin_react_tools();
         let mut loop_messages = self
             .build_react_messages(
@@ -4557,7 +4571,7 @@ impl Agent {
                     })
             })
             .unwrap_or_else(|| task.id.clone());
-        let cancel_rx = crate::session_cancellation::get_receiver(&session_key).await;
+        let cancel_rx = Self::cancellation_receiver(&session_key, &task.parameters).await;
 
         // Step 5: Execute the ReAct loop
         let executor = crate::skills::UnifiedReActExecutor::new(llm).with_config(
@@ -6449,7 +6463,7 @@ impl Agent {
                 .or_else(|| extra_params.get("channel_id"))
                 .cloned()
                 .unwrap_or_else(|| task.id.clone());
-            let cancel_rx = crate::session_cancellation::get_receiver(&session_key).await;
+            let cancel_rx = Self::cancellation_receiver(&session_key, &extra_params).await;
             let run_id = Self::react_run_id(&task.id);
             extra_params.insert("agent_id".to_string(), self.config.id.clone());
             extra_params.insert("react_run_id".to_string(), run_id.clone());
