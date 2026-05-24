@@ -1142,6 +1142,15 @@ impl AgentRuntime for GatewayAgentRuntime {
             if let Some(user_id) = json.get("user_id").and_then(|v| v.as_str()) {
                 parameters.insert("user_id".to_string(), user_id.to_string());
             }
+            if let Some(value) = json.get("cancellation_generation") {
+                let generation = value
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| value.as_u64().map(|n| n.to_string()));
+                if let Some(generation) = generation {
+                    parameters.insert("cancellation_generation".to_string(), generation);
+                }
+            }
         }
 
         let agent_task = crate::Task {

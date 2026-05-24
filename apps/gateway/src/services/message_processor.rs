@@ -709,14 +709,6 @@ impl MessageProcessor {
             (None, None)
         };
 
-        let task = gateway::TaskConfig {
-            task_type: "llm_chat".to_string(),
-            input: task_input,
-            timeout_secs: 180,
-            priority: 5,
-            stream_tx,
-        };
-
         // 🟢 P2 FIX: 发送"正在思考..."占位消息（非 WebChat 平台）。
         // WebChat 平台通过流式输出提供实时反馈，不需要占位消息。
         if platform != PlatformType::WebChat {
@@ -745,6 +737,21 @@ impl MessageProcessor {
         let cancel_gen =
             beebotos_agents::session_cancellation::register(&db_session_id, cancel_tx).await;
 
+        if let Some(obj) = task_input.as_object_mut() {
+            obj.insert(
+                "cancellation_generation".to_string(),
+                serde_json::json!(cancel_gen.to_string()),
+            );
+        }
+
+        let task = gateway::TaskConfig {
+            task_type: "llm_chat".to_string(),
+            input: task_input,
+            timeout_secs: 180,
+            priority: 5,
+            stream_tx,
+        };
+
         let session_id = session.id.clone();
         let db_session_id_bg = db_session_id.clone();
         let user_id_bg = user_id.clone();
@@ -764,7 +771,7 @@ impl MessageProcessor {
             let channel_id_stream = channel_id_bg.clone();
             let processor_stream = Arc::clone(&processor);
             let tool_calls_stream = Arc::clone(&tool_calls);
-            tokio::spawn(async move {
+            let stream_handle = tokio::spawn(async move {
                 let mut rx = stream_rx;
                 let mut chunk_count = 0;
                 while let Some(chunk) = rx.recv().await {
@@ -852,6 +859,12 @@ impl MessageProcessor {
                 }
                 let _ = stream_count_tx.send(chunk_count);
             });
+            let _ = beebotos_agents::session_cancellation::set_abort_handle(
+                &db_session_id,
+                cancel_gen,
+                stream_handle.abort_handle(),
+            )
+            .await;
         } else {
             let _ = stream_count_tx.send(0);
         }
@@ -1282,7 +1295,9 @@ impl MessageProcessor {
         changed |= entries.len() != before_len;
 
         if changed {
-            memory.rewrite_entries(fact.file_type, &entries, None).await?;
+            memory
+                .rewrite_entries(fact.file_type, &entries, None)
+                .await?;
         }
 
         Ok(changed)
@@ -1573,9 +1588,11 @@ Rules:
 
     fn looks_sensitive(text: &str) -> bool {
         let lower = text.to_lowercase();
-        ["password", "passwd", "token", "api_key", "apikey", "secret", "私钥", "密码", "密钥"]
-            .iter()
-            .any(|needle| lower.contains(needle))
+        [
+            "password", "passwd", "token", "api_key", "apikey", "secret", "私钥", "密码", "密钥",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
     }
 
     /// 处理多模态内容
