@@ -27,6 +27,23 @@ pub fn StreamingMessage(
 }
 
 #[component]
+pub fn WaitingMessage() -> impl IntoView {
+    view! {
+        <div class="message assistant waiting">
+            <div class="message-avatar">"🤖"</div>
+            <div class="message-content thinking-message">
+                <span>"Thinking"</span>
+                <span class="thinking-dots" aria-hidden="true">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </span>
+            </div>
+        </div>
+    }
+}
+
+#[component]
 pub fn ToolCallList(tool_calls: Vec<ToolCallEvent>) -> impl IntoView {
     let calls = tool_calls.clone();
     if tool_calls.is_empty() {
