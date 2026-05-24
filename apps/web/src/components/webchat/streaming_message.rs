@@ -27,6 +27,10 @@ pub fn StreamingMessage(
 }
 
 #[component]
+pub fn ToolCallList(
+    tool_calls: Vec<ToolCallEvent>,
+    #[prop(default = false)] default_collapsed: bool,
+) -> impl IntoView {
 pub fn WaitingMessage() -> impl IntoView {
     view! {
         <div class="message assistant waiting">
@@ -46,19 +50,40 @@ pub fn WaitingMessage() -> impl IntoView {
 #[component]
 pub fn ToolCallList(tool_calls: Vec<ToolCallEvent>) -> impl IntoView {
     let calls = tool_calls.clone();
-    if tool_calls.is_empty() {
+    let count = calls.len();
+    if count == 0 {
         return view! { <div /> }.into_any();
     }
+    let expanded = RwSignal::new(!default_collapsed);
 
     view! {
             <div class="tool-call-list">
-                <For
-                    each=move || calls.clone()
-                    key=|call| call.id.clone()
-                    children=move |call| {
-                        view! { <ToolCallBadge call=call /> }
+                <button
+                    class="tool-call-summary"
+                    type="button"
+                    on:click=move |_| expanded.update(|value| *value = !*value)
+                >
+                    <span class="tool-call-chevron">{move || if expanded.get() { "⌄" } else { "›" }}</span>
+                    <span>{format!("Tool calls · {} steps", count)}</span>
+                </button>
+                {move || {
+                    if expanded.get() {
+                        let visible_calls = calls.clone();
+                        view! {
+                            <div class="tool-call-items">
+                                <For
+                                    each=move || visible_calls.clone()
+                                    key=|call| call.id.clone()
+                                    children=move |call| {
+                                        view! { <ToolCallBadge call=call /> }
+                                    }
+                                />
+                            </div>
+                        }.into_any()
+                    } else {
+                        view! { <div /> }.into_any()
                     }
-                />
+                }}
             </div>
     }
     .into_any()
