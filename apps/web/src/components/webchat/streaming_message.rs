@@ -27,10 +27,6 @@ pub fn StreamingMessage(
 }
 
 #[component]
-pub fn ToolCallList(
-    tool_calls: Vec<ToolCallEvent>,
-    #[prop(default = false)] default_collapsed: bool,
-) -> impl IntoView {
 pub fn WaitingMessage() -> impl IntoView {
     view! {
         <div class="message assistant waiting">
@@ -48,7 +44,10 @@ pub fn WaitingMessage() -> impl IntoView {
 }
 
 #[component]
-pub fn ToolCallList(tool_calls: Vec<ToolCallEvent>) -> impl IntoView {
+pub fn ToolCallList(
+    tool_calls: Vec<ToolCallEvent>,
+    #[prop(default = false)] default_collapsed: bool,
+) -> impl IntoView {
     let calls = tool_calls.clone();
     let count = calls.len();
     if count == 0 {
