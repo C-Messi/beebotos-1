@@ -147,21 +147,14 @@ impl MessageProcessor {
                     .unwrap_or_else(|| session.id.clone());
                 match svc.validate_session(&provided_sid, &user_id).await {
                     Ok(true) => provided_sid,
-                    _ => {
-                        match svc
-                            .get_or_create_channel_session(
-                                &user_id,
-                                &platform.to_string(),
-                                &user_id,
-                            )
-                            .await
-                        {
-                            Ok(sid) => sid,
-                            Err(e) => {
-                                warn!("Failed to get/create webchat session: {}", e);
-                                provided_sid
-                            }
-                        }
+                    Ok(false) => {
+                        return Err(GatewayError::not_found("Session", &provided_sid));
+                    }
+                    Err(e) => {
+                        return Err(GatewayError::Internal {
+                            message: format!("Failed to validate webchat session: {}", e),
+                            correlation_id: Uuid::new_v4().to_string(),
+                        });
                     }
                 }
             } else {
@@ -444,21 +437,14 @@ impl MessageProcessor {
                     .unwrap_or_else(|| session.id.clone());
                 match svc.validate_session(&provided_sid, &user_id).await {
                     Ok(true) => provided_sid,
-                    _ => {
-                        match svc
-                            .get_or_create_channel_session(
-                                &user_id,
-                                &platform.to_string(),
-                                &user_id,
-                            )
-                            .await
-                        {
-                            Ok(sid) => sid,
-                            Err(e) => {
-                                warn!("Failed to get/create webchat session: {}", e);
-                                provided_sid
-                            }
-                        }
+                    Ok(false) => {
+                        return Err(GatewayError::not_found("Session", &provided_sid));
+                    }
+                    Err(e) => {
+                        return Err(GatewayError::Internal {
+                            message: format!("Failed to validate webchat session: {}", e),
+                            correlation_id: Uuid::new_v4().to_string(),
+                        });
                     }
                 }
             } else {
@@ -723,14 +709,6 @@ impl MessageProcessor {
             (None, None)
         };
 
-        let task = gateway::TaskConfig {
-            task_type: "llm_chat".to_string(),
-            input: task_input,
-            timeout_secs: 180,
-            priority: 5,
-            stream_tx,
-        };
-
         // 🟢 P2 FIX: 发送"正在思考..."占位消息（非 WebChat 平台）。
         // WebChat 平台通过流式输出提供实时反馈，不需要占位消息。
         if platform != PlatformType::WebChat {
@@ -759,6 +737,21 @@ impl MessageProcessor {
         let cancel_gen =
             beebotos_agents::session_cancellation::register(&db_session_id, cancel_tx).await;
 
+        if let Some(obj) = task_input.as_object_mut() {
+            obj.insert(
+                "cancellation_generation".to_string(),
+                serde_json::json!(cancel_gen.to_string()),
+            );
+        }
+
+        let task = gateway::TaskConfig {
+            task_type: "llm_chat".to_string(),
+            input: task_input,
+            timeout_secs: 180,
+            priority: 5,
+            stream_tx,
+        };
+
         let session_id = session.id.clone();
         let db_session_id_bg = db_session_id.clone();
         let user_id_bg = user_id.clone();
@@ -778,7 +771,7 @@ impl MessageProcessor {
             let channel_id_stream = channel_id_bg.clone();
             let processor_stream = Arc::clone(&processor);
             let tool_calls_stream = Arc::clone(&tool_calls);
-            tokio::spawn(async move {
+            let stream_handle = tokio::spawn(async move {
                 let mut rx = stream_rx;
                 let mut chunk_count = 0;
                 while let Some(chunk) = rx.recv().await {
@@ -866,12 +859,21 @@ impl MessageProcessor {
                 }
                 let _ = stream_count_tx.send(chunk_count);
             });
+            let _ = beebotos_agents::session_cancellation::set_abort_handle(
+                &db_session_id,
+                cancel_gen,
+                stream_handle.abort_handle(),
+            )
+            .await;
         } else {
             let _ = stream_count_tx.send(0);
         }
 
         let db_session_id_cleanup = db_session_id.clone();
         let channel_id_cleanup = channel_id_bg.clone();
+        let session_id_cleanup = session_id.clone();
+        let processor_cleanup = Arc::clone(&processor);
+        let message_bg_cleanup = message_bg.clone();
         let work_handle = tokio::spawn(async move {
             info!("🤖 [BG] Agent {} 开始后台处理消息", agent_id_bg);
             let start = std::time::Instant::now();
@@ -919,28 +921,6 @@ impl MessageProcessor {
                 .add_message(&session_id, "assistant", &llm_response, false, vec![])
                 .await;
 
-            // 持久化 AI 回复
-            let tool_calls_snapshot = tool_calls_bg.lock().await.clone();
-            let mut saved_message_id: Option<String> = None;
-            if let Some(ref svc) = processor.webchat_service {
-                if let Ok(id) = svc
-                    .save_message(
-                        &db_session_id_bg,
-                        "assistant",
-                        &llm_response,
-                        Some(serde_json::json!({
-                            "platform": platform_bg.to_string(),
-                            "channel_id": channel_id_bg.clone(),
-                            "tool_calls": tool_calls_snapshot,
-                        })),
-                        None,
-                    )
-                    .await
-                {
-                    saved_message_id = Some(id);
-                }
-            }
-
             let stream_chunk_count = if platform_bg == PlatformType::WebChat {
                 match tokio::time::timeout(std::time::Duration::from_secs(2), &mut stream_count_rx)
                     .await
@@ -959,6 +939,32 @@ impl MessageProcessor {
                 0
             };
 
+            // Capture tool calls only after the stream consumer has finished
+            // draining the side-channel events, so the persisted message keeps
+            // the complete tool-call list.
+            let tool_calls_snapshot = tool_calls_bg.lock().await.clone();
+
+            // 持久化 AI 回复
+            let mut saved_message_id: Option<String> = None;
+            if let Some(ref svc) = processor.webchat_service {
+                if let Ok(id) = svc
+                    .save_message(
+                        &db_session_id_bg,
+                        "assistant",
+                        &llm_response,
+                        Some(serde_json::json!({
+                            "platform": platform_bg.to_string(),
+                            "channel_id": channel_id_bg.clone(),
+                            "tool_calls": tool_calls_snapshot.clone(),
+                        })),
+                        None,
+                    )
+                    .await
+                {
+                    saved_message_id = Some(id);
+                }
+            }
+
             // 🆕 STREAMING: For non-WebChat platforms, send the full reply directly.
             // For WebChat, stream chunks are preferred; if no chunks were produced
             // (for example approval-confirmation fast paths), send the full reply.
@@ -974,7 +980,10 @@ impl MessageProcessor {
                 }
             } else if completion_result.is_err() || stream_chunk_count == 0 {
                 let mut reply = message_bg.clone();
-                reply.id = Uuid::new_v4();
+                reply.id = saved_message_id
+                    .as_deref()
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                    .unwrap_or_else(Uuid::new_v4);
                 reply.content = llm_response.clone();
                 reply.metadata.clear();
                 if !tool_calls_snapshot.is_empty() {
@@ -997,12 +1006,17 @@ impl MessageProcessor {
                     warn!("[BG] Failed to send final WebChat reply: channel unavailable");
                 }
             }
-            // Mark as delivered for WebChat
+            // Mark non-WebChat deliveries after the response has been handed to
+            // the channel. WebChat delivery is acknowledged by the browser via
+            // /webchat/messages/:id/ack, so reconnect recovery is not defeated
+            // by a best-effort server-side broadcast.
             if let (Some(ref svc), Some(ref msg_id)) = (
                 processor.webchat_service.as_ref(),
                 saved_message_id.as_ref(),
             ) {
-                let _ = svc.mark_ws_delivered(msg_id).await;
+                if platform_bg != PlatformType::WebChat {
+                    let _ = svc.mark_ws_delivered(msg_id).await;
+                }
             }
 
             processor
@@ -1035,8 +1049,72 @@ impl MessageProcessor {
                         "[BG] Agent task interrupted for WebChat session {}",
                         channel_id_cleanup
                     );
+                    let interrupted_text = "⏹️ 已停止当前任务。".to_string();
+
+                    let _ = processor_cleanup
+                        .session_manager
+                        .add_message(
+                            &session_id_cleanup,
+                            "assistant",
+                            &interrupted_text,
+                            false,
+                            vec![],
+                        )
+                        .await;
+
+                    let mut saved_message_id: Option<String> = None;
+                    if let Some(ref svc) = processor_cleanup.webchat_service {
+                        if let Ok(id) = svc
+                            .save_message(
+                                &db_session_id_cleanup,
+                                "assistant",
+                                &interrupted_text,
+                                Some(serde_json::json!({
+                                    "platform": platform_bg.to_string(),
+                                    "channel_id": channel_id_cleanup.clone(),
+                                    "interrupted": true,
+                                })),
+                                None,
+                            )
+                            .await
+                        {
+                            saved_message_id = Some(id);
+                        }
+                    }
+
+                    let mut reply = message_bg_cleanup.clone();
+                    reply.id = saved_message_id
+                        .as_deref()
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                        .unwrap_or_else(Uuid::new_v4);
+                    reply.content = interrupted_text.clone();
+                    reply.metadata.clear();
+
+                    let mut delivered = false;
+                    if let Some(channel) = processor_cleanup
+                        .channel_registry
+                        .get_channel_by_platform(PlatformType::WebChat)
+                        .await
+                    {
+                        delivered = channel
+                            .read()
+                            .await
+                            .send(&channel_id_cleanup, &reply)
+                            .await
+                            .is_ok();
+                    }
+
+                    if let (Some(ref svc), Some(ref msg_id)) = (
+                        processor_cleanup.webchat_service.as_ref(),
+                        saved_message_id.as_ref(),
+                    ) {
+                        if delivered {
+                            let _ = svc.mark_ws_delivered(msg_id).await;
+                        }
+                    }
+
                     if let Some(tx) = completion_tx {
-                        let _ = tx.send(Err(GatewayError::internal("Agent task interrupted")));
+                        let _ = tx.send(Ok(interrupted_text));
                     }
                 }
                 Err(e) => {
@@ -1217,7 +1295,9 @@ impl MessageProcessor {
         changed |= entries.len() != before_len;
 
         if changed {
-            memory.rewrite_entries(fact.file_type, &entries, None).await?;
+            memory
+                .rewrite_entries(fact.file_type, &entries, None)
+                .await?;
         }
 
         Ok(changed)
@@ -1508,9 +1588,11 @@ Rules:
 
     fn looks_sensitive(text: &str) -> bool {
         let lower = text.to_lowercase();
-        ["password", "passwd", "token", "api_key", "apikey", "secret", "私钥", "密码", "密钥"]
-            .iter()
-            .any(|needle| lower.contains(needle))
+        [
+            "password", "passwd", "token", "api_key", "apikey", "secret", "私钥", "密码", "密钥",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
     }
 
     /// 处理多模态内容

@@ -13,6 +13,13 @@ pub struct AiCommerceShop {
 
 const AI_COMMERCE_SHOPS: [AiCommerceShop; 6] = [
     AiCommerceShop {
+        name: "云柑小店",
+        description: "面向自有业务的小店入口",
+        icon: "🍊",
+        tag: "待接入",
+        url: None,
+    },
+    AiCommerceShop {
         name: "抖店",
         description: "面向短视频与直播场景的商品发布入口",
         icon: "🎵",
@@ -23,13 +30,6 @@ const AI_COMMERCE_SHOPS: [AiCommerceShop; 6] = [
         name: "微店",
         description: "面向私域经营的商品发布入口",
         icon: "💬",
-        tag: "待接入",
-        url: None,
-    },
-    AiCommerceShop {
-        name: "云柑小店",
-        description: "面向自有业务的小店入口",
-        icon: "🍊",
         tag: "待接入",
         url: None,
     },
@@ -127,7 +127,7 @@ mod tests {
 
         assert_eq!(
             shops,
-            vec!["抖店", "微店", "云柑小店", "拼多多", "淘宝", "京东"]
+            vec!["云柑小店", "抖店", "微店", "拼多多", "淘宝", "京东"]
         );
     }
 }

@@ -14,7 +14,7 @@ use crate::components::webchat::{
     use_websocket_chat, MessageInput, MessageList, SessionList, SidePanel, UsagePanelComponent,
 };
 use crate::state::{use_auth_state, use_chat_ui_state, use_webchat_state};
-use crate::webchat::{ChatMessage, MessageRole};
+use crate::webchat::{ChatMessage, MessageMetadata, MessageRole};
 
 /// 获取或创建持久化的会话 ID（仅作本地缓存，后端为准）
 fn get_stored_session_id() -> Option<String> {
@@ -36,6 +36,15 @@ fn latest_assistant(messages: &[ChatMessage]) -> Option<&ChatMessage> {
         .find(|message| message.role == MessageRole::Assistant)
 }
 
+fn tool_calls_json(metadata: &MessageMetadata) -> String {
+    serde_json::to_string(&metadata.tool_calls).unwrap_or_default()
+}
+
+fn fetched_loses_tool_calls(current: &ChatMessage, fetched: &ChatMessage) -> bool {
+    current.content == fetched.content
+        && fetched.metadata.tool_calls.len() < current.metadata.tool_calls.len()
+}
+
 fn should_refresh_after_send(current: &[ChatMessage], fetched: &[ChatMessage]) -> bool {
     let Some(fetched_latest) = latest_assistant(fetched) else {
         return false;
@@ -46,8 +55,13 @@ fn should_refresh_after_send(current: &[ChatMessage], fetched: &[ChatMessage]) -
 
     match latest_assistant(current) {
         Some(current_latest) => {
+            if fetched_loses_tool_calls(current_latest, fetched_latest) {
+                return false;
+            }
             current_latest.id != fetched_latest.id
                 || current_latest.content != fetched_latest.content
+                || tool_calls_json(&current_latest.metadata)
+                    != tool_calls_json(&fetched_latest.metadata)
         }
         None => true,
     }
@@ -279,6 +293,7 @@ pub fn WebchatPage() -> impl IntoView {
         chat_state_for_stop.is_streaming.set(false);
         chat_state_for_stop.streaming_content.set(String::new());
         chat_state_for_stop.streaming_tool_calls.set(Vec::new());
+        chat_state_for_stop.finish_streaming();
         chat_state_for_stop.set_error(None);
 
         let chat_state_stop = chat_state_for_stop.clone();
@@ -395,6 +410,7 @@ pub fn WebchatPage() -> impl IntoView {
     let ui_state_side_show = ui_state.clone();
     let ui_state_side_toggle = ui_state.clone();
     let _ui_state_header = ui_state.clone();
+    let chat_state_messages = chat_state.clone();
 
     view! {
         <Title text="Chat - BeeBotOS" />
@@ -414,10 +430,16 @@ pub fn WebchatPage() -> impl IntoView {
                     <ChatHeader title=current_title />
                     {move || view! {
                         <MessageList
-                            messages=chat_state.current_messages.into()
-                            is_streaming=chat_state.is_streaming.into()
-                            streaming_content=chat_state.streaming_content.into()
-                            streaming_tool_calls=chat_state.streaming_tool_calls.into()
+                            messages=chat_state_messages.current_messages.into()
+                            is_streaming=chat_state_messages.is_streaming.into()
+                            is_waiting=Signal::derive({
+                                let chat_state = chat_state_messages.clone();
+                                move || {
+                                    chat_state.is_sending.get() && !chat_state.is_streaming.get()
+                                }
+                            })
+                            streaming_content=chat_state_messages.streaming_content.into()
+                            streaming_tool_calls=chat_state_messages.streaming_tool_calls.into()
                         />
                     }}
                     <MessageInput
