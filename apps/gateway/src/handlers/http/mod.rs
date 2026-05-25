@@ -6,6 +6,7 @@ pub mod admin_config;
 pub mod agent_logs;
 pub mod agents;
 pub mod agents_v2;
+pub mod ai_store_manager;
 pub mod auth;
 pub mod browser;
 pub mod chain;

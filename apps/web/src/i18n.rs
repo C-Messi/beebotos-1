@@ -19,6 +19,22 @@ impl Default for Locale {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_store_manager_has_navigation_labels() {
+        let i18n = init_i18n();
+
+        i18n.set_locale(Locale::ZhCN);
+        assert_eq!(i18n.t("nav-ai-store-manager"), "AI 店长");
+
+        i18n.set_locale(Locale::En);
+        assert_eq!(i18n.t("nav-ai-store-manager"), "AI Store Manager");
+    }
+}
+
 impl Locale {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -73,6 +89,7 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("nav-treasury", "金库");
     zh.insert("nav-skills", "技能市场");
     zh.insert("nav-ai-commerce", "ai电商");
+    zh.insert("nav-ai-store-manager", "AI 店长");
     zh.insert("nav-skill-instances", "实例管理");
     zh.insert("nav-workflows", "工作流");
     zh.insert("nav-cron-jobs", "定时任务");
@@ -281,6 +298,7 @@ pub fn init_i18n() -> I18nContext {
     en.insert("nav-treasury", "Treasury");
     en.insert("nav-skills", "Skills");
     en.insert("nav-ai-commerce", "AI Commerce");
+    en.insert("nav-ai-store-manager", "AI Store Manager");
     en.insert("nav-skill-instances", "Instances");
     en.insert("nav-workflows", "Workflows");
     en.insert("nav-cron-jobs", "Cron Jobs");
