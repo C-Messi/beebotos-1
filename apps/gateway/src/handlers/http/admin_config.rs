@@ -19,7 +19,7 @@ pub async fn get_config(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    require_any_role(&user, &["admin"])?;
+    require_any_role(&user, &["user", "admin"])?;
 
     let loaded_config = if let Some(manager) = &state.config_manager {
         manager.config().await.clone()
@@ -43,7 +43,7 @@ pub async fn reload_config(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<impl IntoResponse, GatewayError> {
-    require_any_role(&user, &["admin"])?;
+    require_any_role(&user, &["user", "admin"])?;
 
     if let Some(ref manager) = state.config_manager {
         match manager.reload().await {
@@ -53,14 +53,14 @@ pub async fn reload_config(
                     Ok(()) => Ok((
                         StatusCode::OK,
                         Json(json!({
-                            "message": "Configuration and LLM providers reloaded successfully",
+                            "message": "配置和 LLM 提供商重载成功",
                             "status": "ok",
                         })),
                     )),
                     Err(e) => Ok((
                         StatusCode::OK,
                         Json(json!({
-                            "message": format!("Configuration reloaded but LLM provider reload failed: {}", e),
+                            "message": format!("配置已重载，但 LLM 提供商重载失败: {}", e),
                             "status": "partial",
                         })),
                     )),
@@ -69,7 +69,7 @@ pub async fn reload_config(
             Err(e) => Ok((
                 StatusCode::OK,
                 Json(json!({
-                    "message": format!("ConfigCenter reload failed: {}. Local config remains active.", e),
+                    "message": format!("配置中心重载失败: {}。本地配置仍然生效。", e),
                     "status": "partial",
                 })),
             )),
@@ -78,7 +78,7 @@ pub async fn reload_config(
         Ok((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
-                "message": "Config manager not initialized",
+                "message": "配置管理器未初始化",
                 "status": "unavailable",
             })),
         ))

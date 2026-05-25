@@ -394,7 +394,7 @@ impl fmt::Display for GatewayError {
             } => {
                 write!(f, "Timeout after {}s to {}", timeout_secs, upstream)
             }
-            Self::Config { message } => write!(f, "Config error: {}", message),
+            Self::Config { message } => write!(f, "{}", message),
             Self::Upstream {
                 service, status, ..
             } => {

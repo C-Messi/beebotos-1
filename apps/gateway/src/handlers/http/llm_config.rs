@@ -185,29 +185,29 @@ pub async fn update_llm_global_config(
                 let current_config = manager.config().await.clone();
                 let llm_reload = state.llm_service.reload_config(current_config).await;
                 let msg = if changed {
-                    "Config updated and hot-reloaded"
+                    "配置已更新并重载"
                 } else {
-                    "Config updated (no changes detected on reload)"
+                    "配置已更新（重载时未检测到变更）"
                 };
                 match llm_reload {
                     Ok(()) => serde_json::json!({
-                        "message": msg,
+                        "message": "配置已保存并重载成功",
                         "status": "ok"
                     }),
                     Err(e) => serde_json::json!({
-                        "message": format!("Config saved but LLM service reload failed: {}", e),
+                        "message": format!("配置已保存，但 LLM 服务重载失败: {}", e),
                         "status": "partial"
                     }),
                 }
             }
             Err(e) => serde_json::json!({
-                "message": format!("Config saved but hot-reload failed: {}", e),
+                "message": format!("配置已保存，但热重载失败: {}", e),
                 "status": "partial"
             }),
         }
     } else {
         serde_json::json!({
-            "message": "Config saved but config manager not available for reload",
+            "message": "配置已保存，但配置管理器不可用，无法重载",
             "status": "partial"
         })
     };

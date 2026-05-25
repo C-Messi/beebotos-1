@@ -182,9 +182,8 @@ impl LlmService {
     fn validate_config(config: &BeeBotOSConfig) -> Result<(), GatewayError> {
         // Check if default provider is configured
         if config.models.default_provider.is_empty() {
-            return Err(GatewayError::Internal {
-                message: "Default LLM provider is not configured".to_string(),
-                correlation_id: uuid::Uuid::new_v4().to_string(),
+            return Err(GatewayError::Config {
+                message: "未配置默认 LLM 提供商".to_string(),
             });
         }
 
@@ -194,17 +193,32 @@ impl LlmService {
             .providers
             .contains_key(&config.models.default_provider)
         {
-            return Err(GatewayError::Internal {
+            return Err(GatewayError::Config {
                 message: format!(
-                    "Default provider '{}' has no configuration",
+                    "默认提供商 '{}' 没有配置信息",
                     config.models.default_provider
                 ),
-                correlation_id: uuid::Uuid::new_v4().to_string(),
             });
         }
 
-        // Validate each provider configuration
-        for (name, provider_config) in &config.models.providers {
+        // Collect providers that are actually used: default + fallback chain
+        let mut providers_to_validate: Vec<String> = Vec::new();
+        providers_to_validate.push(config.models.default_provider.clone());
+        for fallback in &config.models.fallback_chain {
+            if !providers_to_validate.contains(fallback) {
+                providers_to_validate.push(fallback.clone());
+            }
+        }
+
+        // Validate only providers that are actually used
+        for name in &providers_to_validate {
+            let provider_config = config
+                .models
+                .providers
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+
             // Check if provider name is supported
             let supported_providers = [
                 "kimi",
@@ -217,7 +231,7 @@ impl LlmService {
             ];
             if !supported_providers.contains(&name.as_str()) {
                 warn!(
-                    "Provider '{}' is not in the supported list: {:?}",
+                    "提供商 '{}' 不在支持列表中: {:?}",
                     name, supported_providers
                 );
             }
@@ -232,20 +246,19 @@ impl LlmService {
                 let has_env_key = std::env::var(format!("{}_API_KEY", name.to_uppercase())).is_ok();
 
                 if !has_api_key && !has_env_key {
-                    return Err(GatewayError::Internal {
+                    return Err(GatewayError::Config {
                         message: format!(
-                            "Provider '{}' is missing API key. Set {}_API_KEY environment \
-                             variable or configure in config file.",
+                            "提供商 '{}' 缺少 API 密钥。请设置 {}_API_KEY 环境变量 \
+                             或在配置文件中配置。",
                             name,
                             name.to_uppercase()
                         ),
-                        correlation_id: uuid::Uuid::new_v4().to_string(),
                     });
                 }
             }
         }
 
-        info!("LLM configuration validation passed");
+        info!("LLM 配置验证通过");
         Ok(())
     }
 
@@ -278,9 +291,8 @@ impl LlmService {
         }
 
         if providers_to_try.is_empty() {
-            return Err(GatewayError::Internal {
-                message: "No LLM provider configured".to_string(),
-                correlation_id: uuid::Uuid::new_v4().to_string(),
+            return Err(GatewayError::Config {
+                message: "未配置 LLM 提供商".to_string(),
             });
         }
 
@@ -304,21 +316,19 @@ impl LlmService {
                 Err(e) => {
                     warn!("Failed to initialize provider '{}': {}", provider_name, e);
                     if idx == 0 {
-                        return Err(GatewayError::Internal {
+                        return Err(GatewayError::Config {
                             message: format!(
-                                "Primary provider '{}' failed to initialize: {}",
+                                "主提供商 '{}' 初始化失败: {}",
                                 provider_name, e
                             ),
-                            correlation_id: uuid::Uuid::new_v4().to_string(),
                         });
                     }
                 }
             }
         }
 
-        let primary = primary.ok_or_else(|| GatewayError::Internal {
-            message: "No primary LLM provider available".to_string(),
-            correlation_id: uuid::Uuid::new_v4().to_string(),
+        let primary = primary.ok_or_else(|| GatewayError::Config {
+            message: "没有可用的主 LLM 提供商".to_string(),
         })?;
 
         // Build failover provider
@@ -330,9 +340,8 @@ impl LlmService {
             builder = builder.fallback(fallback);
         }
 
-        builder.build().map_err(|e| GatewayError::Internal {
-            message: format!("Failed to build failover provider: {}", e),
-            correlation_id: uuid::Uuid::new_v4().to_string(),
+        builder.build().map_err(|e| GatewayError::Config {
+            message: format!("构建故障转移提供商失败: {}", e),
         })
     }
 
@@ -350,7 +359,7 @@ impl LlmService {
 
         let api_key = Self::get_api_key(name, &provider_config);
         if api_key.is_none() && name != "ollama" {
-            return Err(format!("API key not set for provider '{}'", name));
+            return Err(format!("提供商 '{}' 未设置 API 密钥", name));
         }
 
         let timeout_secs = config.models.request_timeout;

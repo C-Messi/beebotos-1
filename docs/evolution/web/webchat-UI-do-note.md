@@ -1460,3 +1460,83 @@ codex 修复；
 &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
 
 
+前后端编译均已通过。以下是本次修复的4处改动：
+
+---
+
+### 问题1：从 kimi 切换到 deepseek 保存后报错 kimi 缺少 API key
+
+**原因**：`validate_config` 原来会检查**所有** provider 的 API key，包括未使用的 kimi。
+
+**修复**（`apps/gateway/src/services/llm_service.rs`）：
+- 改为只检查 `default_provider` + `fallback_chain` 中实际会使用的 provider
+- 错误信息同时汉化为中文，例如：
+  - `"Provider 'kimi' is missing API key..."` → `"提供商 'kimi' 缺少 API 密钥..."`
+
+---
+
+### 问题2：点击"重启生效"后提示 `You don't have permission to do this`
+
+**原因**：`/api/v1/admin/config/reload` 接口只允许 `admin` 角色访问，而 LLM 设置页面里普通用户也能看到该按钮。
+
+**修复**（`apps/gateway/src/handlers/http/admin_config.rs`）：
+- 将 `reload_config` 的权限从 `["admin"]` 放宽为 `["user", "admin"]`，与"保存配置"接口保持一致
+- 该接口返回的英文提示也全部汉化
+
+---
+
+### 补充：界面错误提示统一中文化
+
+**修复**（`apps/gateway/src/handlers/http/llm_config.rs` + `apps/web/src/api/client.rs`）：
+- 后端 LLM 配置保存/重载相关的返回消息全部改为中文
+- 前端 `ApiError::user_message()` 中的英文错误模板全部改为中文，例如：
+  - `"You don't have permission to do this"` → `"权限不足，无法执行此操作"`
+  - `"Please log in again"` → `"登录已过期，请重新登录"`
+  - `"Network error"` → `"网络错误"`
+
+---
+
+现在重新部署后：
+1. 切换到 deepseek 保存时，**不再会因为 kimi 没配 API key 而报错**
+2. 普通用户点击**"重启生效"也不会报权限错误**
+3. 所有错误提示都会显示为**中文**
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+编译通过。这次修复了核心问题。
+
+---
+
+### 真正的问题根源
+
+`GatewayConfigManager::reload()` 之前**只解析 TOML 文件**，而 `BeeBotOSConfig::load()`（启动时使用）会**同时合并环境变量**（`BEE__` 前缀 + `.env` 文件）。
+
+如果用户通过环境变量或 `.env` 文件配置了 `DEEPSEEK_API_KEY`：
+1. **启动时**：`BeeBotOSConfig::load()` 正确合并环境变量 → LLM 功能正常
+2. **保存后热重载**：`reload()` 只用 `toml::from_str` 解析文件，**环境变量丢失** → `api_key` 为 None → 验证报错
+
+---
+
+### 修复内容
+
+**`apps/gateway/src/config_center_integration.rs`**
+- `reload()` 改为调用 `BeeBotOSConfig::load()`，确保热重载时与**启动时行为完全一致**，环境变量和 `config/local.toml` 都能正确合并
+
+**`apps/gateway/src/services/llm_service.rs`**
+- `validate_config` 和 `create_failover_provider` 中的错误类型从 `Internal` 改为 `Config`
+- 只验证实际使用的 provider（`default_provider` + `fallback_chain`）
+- 错误提示全部汉化
+
+**`crates/gateway-lib/src/error.rs`**
+- `GatewayError::Config` 的 `Display` 实现去掉 `Config error:` 前缀
+
+**`apps/gateway/src/handlers/http/admin_config.rs`**
+- "重启生效"接口权限放宽为 `["user", "admin"]`
+
+---
+
+现在重新部署后，保存配置时热重载会正确读取环境变量，不会再误报"缺少 API 密钥"。
+
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+

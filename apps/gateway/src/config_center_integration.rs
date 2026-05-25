@@ -52,13 +52,25 @@ impl GatewayConfigManager {
 
         info!("Reloading configuration from {:?}...", path);
 
-        // Re-read the TOML file
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| ConfigError::Io(e.to_string()))?;
-
-        let new_config: crate::config::BeeBotOSConfig =
-            toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        // Use the same loading logic as startup (BeeBotOSConfig::load)
+        // to ensure environment variables are merged correctly.
+        // Temporarily set the working directory to the config file's parent
+        // so BeeBotOSConfig::load() finds the correct file.
+        let new_config = {
+            let config_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let _guard = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| {
+                    std::env::set_current_dir(&cwd.join(config_dir)).ok();
+                    Some(cwd)
+                });
+            let result = crate::config::BeeBotOSConfig::load()
+                .map_err(|e| ConfigError::Parse(e.to_string()))?;
+            if let Some(original_cwd) = _guard {
+                let _ = std::env::set_current_dir(original_cwd);
+            }
+            result
+        };
 
         let mut config = self.config.write().await;
 

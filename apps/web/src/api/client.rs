@@ -594,20 +594,20 @@ impl ApiError {
     /// Get user-friendly error message
     pub fn user_message(&self) -> String {
         match self {
-            ApiError::Network(msg) => format!("Network error: {}", msg),
-            ApiError::Unauthorized => "Please log in again".to_string(),
-            ApiError::Forbidden => "You don't have permission to do this".to_string(),
-            ApiError::NotFound => "Resource not found".to_string(),
-            ApiError::Timeout => "Request timed out, please try again".to_string(),
+            ApiError::Network(msg) => format!("网络错误: {}", msg),
+            ApiError::Unauthorized => "登录已过期，请重新登录".to_string(),
+            ApiError::Forbidden => "权限不足，无法执行此操作".to_string(),
+            ApiError::NotFound => "请求的资源不存在".to_string(),
+            ApiError::Timeout => "请求超时，请稍后重试".to_string(),
             ApiError::ServerError(code, msg) => msg
                 .clone()
-                .unwrap_or_else(|| format!("Server error ({}), please try again later", code)),
+                .unwrap_or_else(|| format!("服务器错误 ({}), 请稍后重试", code)),
             ApiError::ClientError(code, msg) => msg
                 .clone()
-                .unwrap_or_else(|| format!("Request failed ({})", code)),
-            ApiError::Serialization(msg) => format!("Failed to parse response: {}", msg),
-            ApiError::Cancelled => "Request was cancelled".to_string(),
-            ApiError::Unknown => "An unexpected error occurred".to_string(),
+                .unwrap_or_else(|| format!("请求失败 ({})", code)),
+            ApiError::Serialization(msg) => format!("响应解析失败: {}", msg),
+            ApiError::Cancelled => "请求已取消".to_string(),
+            ApiError::Unknown => "发生未知错误".to_string(),
         }
     }
 }
