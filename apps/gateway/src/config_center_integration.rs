@@ -65,12 +65,10 @@ impl GatewayConfigManager {
                 .parent()
                 .and_then(|p| p.parent())
                 .unwrap_or_else(|| std::path::Path::new("."));
-            let _guard = std::env::current_dir()
-                .ok()
-                .and_then(|cwd| {
-                    std::env::set_current_dir(&cwd.join(config_dir)).ok();
-                    Some(cwd)
-                });
+            let _guard = std::env::current_dir().ok().and_then(|cwd| {
+                std::env::set_current_dir(&cwd.join(config_dir)).ok();
+                Some(cwd)
+            });
             let result = crate::config::BeeBotOSConfig::load()
                 .map_err(|e| ConfigError::Parse(e.to_string()))?;
             if let Some(original_cwd) = _guard {

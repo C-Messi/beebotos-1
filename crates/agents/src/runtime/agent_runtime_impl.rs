@@ -416,11 +416,15 @@ impl GatewayAgentRuntime {
                     .iter()
                     .map(|m| format!("- {} ({}): {}", m.id, m.category, m.description))
                     .collect();
-                // Also include skills from registry (includes MCP skills)
+                // Also include non-MCP skills from registry. MCP tools are
+                // exposed through mcp_tool_search, not as skill catalog entries.
                 if let Some(ref registry) = self.skill_registry {
                     let registered = registry.list_all().await;
                     for r in &registered {
                         let id = &r.skill.id;
+                        if id.starts_with("mcp:") {
+                            continue;
+                        }
                         let desc = &r.skill.manifest.description;
                         if !lines.iter().any(|l| l.starts_with(&format!("- {} ", id))) {
                             lines.push(format!("- {} ({}): {}", id, r.category, desc));
@@ -932,11 +936,15 @@ impl AgentRuntime for GatewayAgentRuntime {
                         .iter()
                         .map(|m| format!("- {} ({}): {}", m.id, m.category, m.description))
                         .collect();
-                    // Also include skills from registry (includes MCP skills)
+                    // Also include non-MCP skills from registry. MCP tools are
+                    // exposed through mcp_tool_search, not as skill catalog entries.
                     if let Some(ref registry) = self.skill_registry {
                         let registered = registry.list_all().await;
                         for r in &registered {
                             let id = &r.skill.id;
+                            if id.starts_with("mcp:") {
+                                continue;
+                            }
                             let desc = &r.skill.manifest.description;
                             if !lines.iter().any(|l| l.starts_with(&format!("- {} ", id))) {
                                 lines.push(format!("- {} ({}): {}", id, r.category, desc));

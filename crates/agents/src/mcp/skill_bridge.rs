@@ -404,36 +404,9 @@ fn types_compatible(expected: &str, actual: &str) -> bool {
     false
 }
 
-/// Parse an MCP skill ID into (server_name, tool_name).
-///
-/// Format: `mcp:{server_name}/{tool_name}`
-///
-/// Examples:
-/// - `mcp:filesystem/read_file` → ("filesystem", "read_file")
-/// - `mcp:github/create_issue` → ("github", "create_issue")
-pub fn parse_mcp_skill_id(skill_id: &str) -> Option<(&str, &str)> {
-    let stripped = skill_id.strip_prefix("mcp:")?;
-    let slash_pos = stripped.find('/')?;
-    Some((&stripped[..slash_pos], &stripped[slash_pos + 1..]))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_mcp_skill_id() {
-        assert_eq!(
-            parse_mcp_skill_id("mcp:filesystem/read_file"),
-            Some(("filesystem", "read_file"))
-        );
-        assert_eq!(
-            parse_mcp_skill_id("mcp:github/create_issue"),
-            Some(("github", "create_issue"))
-        );
-        assert_eq!(parse_mcp_skill_id("filesystem/read_file"), None);
-        assert_eq!(parse_mcp_skill_id("mcp:invalid"), None);
-    }
 
     #[test]
     fn test_validate_tool_arguments_ok() {

@@ -572,18 +572,6 @@ impl AppState {
             None
         };
 
-        // ── Bridge MCP tools to SkillRegistry ──
-        if let Some(ref manager) = mcp_manager {
-            if let Err(e) = beebotos_agents::mcp::skill_bridge::McpSkillBridge::bridge_all(
-                manager,
-                &skill_registry,
-            )
-            .await
-            {
-                warn!("⚠️ MCP Skill Bridge failed: {}", e);
-            }
-        }
-
         let (cron_registration_tx, cron_registration_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::services::cron_job_service::CronJob>();
 
@@ -892,43 +880,6 @@ impl AppState {
             )
             .with_channel_binding_store(channel_binding_store.clone()),
         );
-
-        // ── On-chain skill registration extension point ──
-        // If blockchain is enabled and SkillNFT contract is configured,
-        // register MCP skills on-chain for marketplace compatibility.
-        if config.blockchain.enabled {
-            if let Some(ref _chain) = chain_service {
-                let mcp_skills: Vec<_> = {
-                    let all = skill_registry.list_all().await;
-                    all.into_iter()
-                        .filter(|s| s.skill.id.starts_with("mcp:"))
-                        .collect()
-                };
-                if !mcp_skills.is_empty() {
-                    info!(
-                        "🔗 Blockchain enabled: registering {} MCP skill(s) on-chain (extension \
-                         point)",
-                        mcp_skills.len()
-                    );
-                    for skill in mcp_skills {
-                        // Phase 6 EXTENSION POINT:
-                        // When ChainService SkillNFT methods are implemented,
-                        // replace this log with actual on-chain registration:
-                        // chain.register_skill_nft(&skill.skill.id, &skill.skill.name, ...).await
-                        info!(
-                            "  📌 MCP skill '{}' ready for on-chain registration (token mint \
-                             placeholder)",
-                            skill.skill.id
-                        );
-                    }
-                }
-            } else {
-                warn!(
-                    "⚠️ Blockchain enabled but ChainService not available; skipping MCP on-chain \
-                     registration"
-                );
-            }
-        }
 
         Ok(Self {
             config,

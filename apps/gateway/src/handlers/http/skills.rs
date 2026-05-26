@@ -332,7 +332,7 @@ pub async fn install_skill(
 
 /// List installed skills or search from hub
 pub async fn list_skills(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Query(query): Query<ListSkillsQuery>,
 ) -> Result<Json<Vec<SkillInfoResponse>>, GatewayError> {
     let hub_type = query.hub.as_deref().and_then(|h| h.parse::<HubType>().ok());
@@ -401,38 +401,14 @@ pub async fn list_skills(
         return Ok(Json(responses));
     }
 
-    // Otherwise, list locally installed skills + MCP bridged skills
-    let mut skills = list_installed_skills()
+    // Otherwise, list locally installed skills. MCP tools are discovered via
+    // mcp_tool_search and are no longer exposed as skills.
+    let skills = list_installed_skills()
         .await
         .map_err(|e| GatewayError::Internal {
             message: format!("Failed to list installed skills: {}", e),
             correlation_id: uuid::Uuid::new_v4().to_string(),
         })?;
-
-    // Merge MCP skills from SkillRegistry
-    if let Some(ref registry) = state.skill_registry {
-        for registered in registry.list_all().await {
-            if registered.skill.id.starts_with("mcp:") {
-                skills.push(SkillInfoResponse {
-                    id: registered.skill.id.clone(),
-                    name: registered.skill.name.clone(),
-                    version: registered.skill.version.to_string(),
-                    description: registered.skill.manifest.description.clone(),
-                    author: registered.skill.manifest.author.clone(),
-                    license: registered.skill.manifest.license.clone(),
-                    installed: true,
-                    capabilities: registered.skill.manifest.capabilities.clone(),
-                    tags: registered.tags.clone(),
-                    downloads: registered.usage_count,
-                    rating: 0.0,
-                    source: Some("mcp".to_string()),
-                    price: Some("0".to_string()),
-                    royalty_percent: Some(0),
-                    nft_token_id: None,
-                });
-            }
-        }
-    }
 
     Ok(Json(skills))
 }
@@ -1195,30 +1171,7 @@ async fn get_skill_info(
     skill_id: &str,
     registry: Option<&beebotos_agents::skills::SkillRegistry>,
 ) -> Result<SkillInfoResponse, Box<dyn std::error::Error>> {
-    // Check SkillRegistry first for MCP skills
-    if skill_id.starts_with("mcp:") {
-        if let Some(reg) = registry {
-            if let Some(registered) = reg.get(skill_id).await {
-                return Ok(SkillInfoResponse {
-                    id: registered.skill.id.clone(),
-                    name: registered.skill.name.clone(),
-                    version: registered.skill.version.to_string(),
-                    description: registered.skill.manifest.description.clone(),
-                    author: registered.skill.manifest.author.clone(),
-                    license: registered.skill.manifest.license.clone(),
-                    installed: true,
-                    capabilities: registered.skill.manifest.capabilities.clone(),
-                    tags: registered.tags.clone(),
-                    downloads: registered.usage_count,
-                    rating: 0.0,
-                    source: Some("mcp".to_string()),
-                    price: Some("0".to_string()),
-                    royalty_percent: Some(0),
-                    nft_token_id: None,
-                });
-            }
-        }
-    }
+    let _ = registry;
 
     let skill_dir = get_skill_install_path(skill_id);
     let manifest_path = skill_dir.join("skill.yaml");

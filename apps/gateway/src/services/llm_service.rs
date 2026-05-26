@@ -317,10 +317,7 @@ impl LlmService {
                     warn!("Failed to initialize provider '{}': {}", provider_name, e);
                     if idx == 0 {
                         return Err(GatewayError::Config {
-                            message: format!(
-                                "主提供商 '{}' 初始化失败: {}",
-                                provider_name, e
-                            ),
+                            message: format!("主提供商 '{}' 初始化失败: {}", provider_name, e),
                         });
                     }
                 }
