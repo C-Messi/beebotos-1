@@ -2,21 +2,11 @@
 pip install metatrader-mcp-server
 
 
-在web后台添加MCP客户端配置
-{
-  "mcpServers": {
-    "metatrader": {
-      "command": "metatrader-mcp-server",
-      "args": [
-        "--login",     "YOUR_MT5_LOGIN",
-        "--password",  "YOUR_MT5_PASSWORD",
-        "--server",    "YOUR_MT5_SERVER",
-        "--transport", "stdio",
-        "--path",      "C:\\Program Files\\MetaTrader 5\\terminal64.exe"
-      ]
-    }
-  }
-}
+在 BeeBotOS 的 TOML 配置中添加 MCP 客户端配置
+参考 docs/MT5/MCP-toml-config.md。
+
+config/beebotos.toml 中已经保留了注释形式的 MT5 MCP server 示例。
+实际使用时请复制到 config/local.toml 或取消注释后填入当前环境的登录账号、密码、券商服务器和 MT5 terminal64.exe 路径。
 
 测试提示词
 

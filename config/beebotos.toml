@@ -57,6 +57,21 @@ enforce_tls = true
 retry_count = 3
 timeout_ms = 60000
 
+# MT5 MCP server example. Keep this disabled until each deployment fills in its
+# own login, password, broker server, and terminal path.
+#
+# [[mcp.servers]]
+# name = "metatrader"
+# transport = "stdio"
+# command = "metatrader-mcp-server"
+# args = [
+#     "--login", "YOUR_MT5_LOGIN",
+#     "--password", "YOUR_MT5_PASSWORD",
+#     "--server", "YOUR_MT5_SERVER",
+#     "--transport", "stdio",
+#     "--path", "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
+# ]
+
 [models]
 default_provider = "deepseek"
 fallback_chain = []
