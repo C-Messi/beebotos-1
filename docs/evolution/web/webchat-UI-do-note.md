@@ -1540,3 +1540,44 @@ codex 修复；
 
 &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
 
+已定位并修复问题。
+
+## 根因
+
+配置保存只写入了 `config/beebotos.toml`，但项目里同时存在 `config/local.toml`，其内容为：
+
+```toml
+[models]
+default_provider = "kimi"
+```
+
+BeeBotOS 的配置加载顺序是：**`beebotos.toml` → `local.toml` → 环境变量**，后者优先级更高。因此刷新页面后，`local.toml` 中的 `default_provider = "kimi"` 把你在 UI 里保存的设置覆盖掉了，导致回到 kimi。
+
+## 修复内容
+
+修改了 `apps/gateway/src/handlers/http/llm_config.rs` 中的 `update_llm_global_config` 接口：
+
+保存配置时，如果检测到同级目录存在 `local.toml`，会**同步更新**其中的 `default_provider` 以及对应 provider 的 `model`、`temperature`、`thinking`、`reasoning_effort` 等字段，确保两个文件保持一致，不再出现覆盖回退。
+
+```diff
+@@
+     // Write back to file
+     tokio::fs::write(&path, new_content).await ...;
+
++    // Sync changes to local.toml if it exists (local.toml overrides beebotos.toml)
++    if let Some(parent) = path.parent() {
++        let local_path = parent.join("local.toml");
++        if local_path.exists() {
++            ...
++        }
++    }
++
+     // Hot-reload configuration
+```
+
+## 下一步
+
+代码已通过编译检查（`cargo check -p beebotos-gateway`）。你需要重新构建并部署 Gateway 服务，然后再次在页面上保存 deepseek 配置并刷新，设置就会正确持久化。
+
+
+

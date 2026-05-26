@@ -119,7 +119,7 @@ pub async fn update_llm_global_config(
     if let Some(models) = doc.get_mut("models") {
         if let Some(provider) = models.get_mut(&req.provider) {
             if let Some(table) = provider.as_table_mut() {
-                table.insert("model".to_string(), toml::Value::String(req.model));
+                table.insert("model".to_string(), toml::Value::String(req.model.clone()));
                 // Use string round-trip to clean up f32→f64 precision artifacts
                 let temp: f64 = format!("{}", req.temperature)
                     .parse()
@@ -177,6 +177,66 @@ pub async fn update_llm_global_config(
     tokio::fs::write(&path, new_content)
         .await
         .map_err(|e| GatewayError::internal(format!("Failed to write config file: {}", e)))?;
+
+    // Sync changes to local.toml if it exists (local.toml overrides beebotos.toml)
+    if let Some(parent) = path.parent() {
+        let local_path = parent.join("local.toml");
+        if local_path.exists() {
+            if let Ok(local_content) = tokio::fs::read_to_string(&local_path).await {
+                if let Ok(mut local_doc) = toml::from_str::<toml::Value>(&local_content) {
+                    let mut needs_write = false;
+                    if let Some(models) = local_doc.get_mut("models") {
+                        if let Some(models_table) = models.as_table_mut() {
+                            if req.set_default.unwrap_or(true) {
+                                models_table.insert(
+                                    "default_provider".to_string(),
+                                    toml::Value::String(req.provider.clone()),
+                                );
+                                needs_write = true;
+                            }
+                            if let Some(provider) = models.get_mut(&req.provider) {
+                                if let Some(table) = provider.as_table_mut() {
+                                    table.insert(
+                                        "model".to_string(),
+                                        toml::Value::String(req.model.clone()),
+                                    );
+                                    let temp: f64 = format!("{}", req.temperature)
+                                        .parse()
+                                        .unwrap_or(req.temperature as f64);
+                                    table.insert(
+                                        "temperature".to_string(),
+                                        toml::Value::Float(temp),
+                                    );
+                                    if let Some(thinking) = &req.thinking {
+                                        table.insert(
+                                            "thinking".to_string(),
+                                            toml::Value::String(thinking.clone()),
+                                        );
+                                    } else {
+                                        table.remove("thinking");
+                                    }
+                                    if let Some(reasoning_effort) = &req.reasoning_effort {
+                                        table.insert(
+                                            "reasoning_effort".to_string(),
+                                            toml::Value::String(reasoning_effort.clone()),
+                                        );
+                                    } else {
+                                        table.remove("reasoning_effort");
+                                    }
+                                    needs_write = true;
+                                }
+                            }
+                        }
+                    }
+                    if needs_write {
+                        if let Ok(new_local_content) = toml::to_string_pretty(&local_doc) {
+                            let _ = tokio::fs::write(&local_path, new_local_content).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Hot-reload configuration
     let reload_result = if let Some(ref manager) = state.config_manager {

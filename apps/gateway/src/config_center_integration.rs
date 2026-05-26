@@ -57,7 +57,14 @@ impl GatewayConfigManager {
         // Temporarily set the working directory to the config file's parent
         // so BeeBotOSConfig::load() finds the correct file.
         let new_config = {
-            let config_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            // BeeBotOSConfig::load() expects the current directory to be the
+            // project root (it looks for "config/beebotos.toml"). Since `path`
+            // is "config/beebotos.toml", we need to switch to its grandparent
+            // (i.e. the directory that contains the "config" folder).
+            let config_dir = path
+                .parent()
+                .and_then(|p| p.parent())
+                .unwrap_or_else(|| std::path::Path::new("."));
             let _guard = std::env::current_dir()
                 .ok()
                 .and_then(|cwd| {
