@@ -205,7 +205,7 @@ fn default_cooldown_seconds() -> u64 {
     60
 }
 fn default_default_provider() -> String {
-    "kimi".to_string()
+    "deepseek".to_string()
 }
 fn default_max_tokens() -> u32 {
     4096
@@ -357,7 +357,7 @@ impl std::fmt::Debug for JwtConfig {
 }
 
 /// Models/LLM configuration
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelsConfig {
     #[serde(default = "default_default_provider")]
     pub default_provider: String,
@@ -373,6 +373,35 @@ pub struct ModelsConfig {
     pub request_timeout: u64,
     #[serde(flatten)]
     pub providers: HashMap<String, ModelProviderConfig>,
+}
+
+impl Default for ModelsConfig {
+    fn default() -> Self {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "deepseek".to_string(),
+            ModelProviderConfig {
+                api_key: None,
+                model: Some("deepseek-v4-flash".to_string()),
+                base_url: Some("https://api.deepseek.com/v1".to_string()),
+                temperature: 0.7,
+                deployment: None,
+                context_window: Some(8192),
+                thinking: Some("enabled".to_string()),
+                reasoning_effort: Some("high".to_string()),
+            },
+        );
+
+        Self {
+            default_provider: default_default_provider(),
+            fallback_chain: Vec::new(),
+            cost_optimization: false,
+            max_tokens: default_max_tokens(),
+            system_prompt: default_system_prompt(),
+            request_timeout: default_request_timeout(),
+            providers,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -895,6 +924,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_llm_provider_is_deepseek() {
+        let config = BeeBotOSConfig::default();
+
+        assert_eq!(config.models.default_provider, "deepseek");
+        assert!(config.models.providers.contains_key("deepseek"));
+    }
+
+    #[test]
     fn test_config_structure() {
         let config = BeeBotOSConfig {
             system_name: "BeeBotOS".to_string(),
@@ -928,8 +965,8 @@ mod tests {
                 audience: "api".to_string(),
             },
             models: ModelsConfig {
-                default_provider: "kimi".to_string(),
-                fallback_chain: vec!["openai".to_string()],
+                default_provider: "deepseek".to_string(),
+                fallback_chain: Vec::new(),
                 request_timeout: default_request_timeout(),
                 cost_optimization: false,
                 max_tokens: 4096,
@@ -937,16 +974,16 @@ mod tests {
                 providers: {
                     let mut map = HashMap::new();
                     map.insert(
-                        "kimi".to_string(),
+                        "deepseek".to_string(),
                         ModelProviderConfig {
                             api_key: Some("test-key".to_string()),
-                            base_url: Some("https://api.moonshot.cn".to_string()),
-                            model: Some("moonshot-v1-8k".to_string()),
+                            base_url: Some("https://api.deepseek.com/v1".to_string()),
+                            model: Some("deepseek-v4-flash".to_string()),
                             temperature: 0.7,
                             deployment: None,
                             context_window: Some(8192),
-                            thinking: None,
-                            reasoning_effort: None,
+                            thinking: Some("enabled".to_string()),
+                            reasoning_effort: Some("high".to_string()),
                         },
                     );
                     map

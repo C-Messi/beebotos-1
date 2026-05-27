@@ -37,6 +37,7 @@ pub fn MessageItem(
                 <ContentRenderer
                     content=message.content.clone()
                     attachments=message.attachments.clone()
+                    sanitize_internal_errors=!is_user
                 />
                 <div class="message-meta">
                     <span class="message-time">{format_timestamp(&message.timestamp)}</span>

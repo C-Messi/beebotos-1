@@ -1,36 +1,33 @@
-//! MCP Server API Service
-//!
-//! Manages MCP (Model Context Protocol) client configurations locally.
+//! MCP server API service.
 
-use gloo_storage::{LocalStorage, Storage};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 use super::client::{ApiClient, ApiError};
 
-/// MCP Server transport configuration
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "transport", rename_all = "lowercase")]
 pub enum McpTransport {
-    #[serde(rename = "stdio")]
     Stdio {
         command: String,
         #[serde(default)]
         args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        env: Option<HashMap<String, String>>,
+        working_dir: Option<String>,
     },
-    #[serde(rename = "sse")]
-    Sse {
+    Http {
         url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        headers: Option<HashMap<String, String>>,
-    },
-    #[serde(rename = "websocket")]
-    Websocket {
-        url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        headers: Option<HashMap<String, String>>,
+        auth_token: Option<String>,
+        #[serde(default)]
+        auth_token_set: bool,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        #[serde(default)]
+        use_sse: bool,
     },
 }
 
@@ -39,40 +36,40 @@ impl Default for McpTransport {
         McpTransport::Stdio {
             command: String::new(),
             args: Vec::new(),
-            env: None,
+            env: HashMap::new(),
+            working_dir: None,
         }
     }
 }
 
-/// MCP Server configuration
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct McpServerConfig {
-    pub key: String,
     pub name: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
+    #[serde(flatten)]
     pub transport: McpTransport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_count: Option<u32>,
 }
 
-fn default_true() -> bool {
-    true
+impl McpServerConfig {
+    pub fn key(&self) -> &str {
+        &self.name
+    }
 }
 
 impl Default for McpServerConfig {
     fn default() -> Self {
         Self {
-            key: String::new(),
             name: String::new(),
-            enabled: true,
             transport: McpTransport::default(),
-            description: None,
+            timeout_ms: None,
+            retry_count: None,
         }
     }
 }
 
-/// MCP Server runtime status
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum McpServerStatus {
     #[default]
@@ -82,36 +79,60 @@ pub enum McpServerStatus {
     Connecting,
 }
 
-/// MCP Server with runtime info
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct McpServer {
+    pub name: String,
+    pub connected: bool,
     pub config: McpServerConfig,
-    #[serde(default)]
-    pub status: McpServerStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<McpTool>>,
 }
 
-/// MCP Tool info
+impl McpServer {
+    pub fn status(&self) -> McpServerStatus {
+        if self.connected {
+            McpServerStatus::Connected
+        } else if self.error_message.is_some() {
+            McpServerStatus::Error
+        } else {
+            McpServerStatus::Disconnected
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct McpTool {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "input_schema")]
     pub parameters: serde_json::Value,
 }
 
-/// Import MCP config request format
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct McpImportConfig {
-    #[serde(default, rename = "mcpServers")]
-    pub mcp_servers: Option<HashMap<String, McpServerEntry>>,
+pub struct McpListToolsResponse {
+    pub server: String,
+    pub tools: Vec<McpTool>,
 }
 
-/// Single MCP server entry in import format
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct McpCallToolRequest {
+    #[serde(default)]
+    pub arguments: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct McpCallToolResponse {
+    pub success: bool,
+    pub output: String,
+    pub is_error: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct McpMutationResponse {
+    pub server: McpServer,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpServerEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,223 +140,203 @@ pub struct McpServerEntry {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
-const MCP_STORAGE_KEY: &str = "beebotos_mcp_servers";
-
-/// MCP Server Service
-///
-/// Manages MCP server configurations via local storage.
 #[derive(Clone)]
 pub struct McpServerService {
-    _client: ApiClient,
+    client: ApiClient,
 }
 
 impl McpServerService {
     pub fn new(client: ApiClient) -> Self {
-        Self { _client: client }
+        Self { client }
     }
 
-    /// Load all MCP servers from local storage
-    pub fn list(&self) -> Result<Vec<McpServer>, ApiError> {
-        let stored: Result<Vec<McpServerConfig>, _> = LocalStorage::get(MCP_STORAGE_KEY);
-        let configs = stored.unwrap_or_default();
-        Ok(configs
-            .into_iter()
-            .map(|config| McpServer {
-                status: if config.enabled {
-                    // In a real implementation, this would check actual connection status
-                    // For demo, we simulate based on a stored status
-                    McpServerStatus::Disconnected
-                } else {
-                    McpServerStatus::Disconnected
-                },
-                error_message: None,
-                tools: None,
-                config,
-            })
-            .collect())
+    pub async fn list(&self) -> Result<Vec<McpServer>, ApiError> {
+        self.client.get("/mcp/servers").await
     }
 
-    /// Get a single MCP server by key
-    pub fn get(&self, key: &str) -> Result<Option<McpServer>, ApiError> {
-        let servers = self.list()?;
-        Ok(servers.into_iter().find(|s| s.config.key == key))
-    }
-
-    /// Save or update an MCP server
-    pub fn save(&self, server: McpServerConfig) -> Result<McpServerConfig, ApiError> {
-        let mut configs: Vec<McpServerConfig> =
-            LocalStorage::get(MCP_STORAGE_KEY).unwrap_or_default();
-
-        let key = server.key.clone();
-        // Update existing or add new
-        let pos = configs.iter().position(|c| c.key == key);
-        match pos {
-            Some(idx) => configs[idx] = server,
-            None => configs.push(server),
-        }
-
-        LocalStorage::set(MCP_STORAGE_KEY, &configs).map_err(|e| {
-            ApiError::Network(format!("Failed to save MCP config: {}", e))
-        })?;
-
-        Ok(configs
-            .into_iter()
-            .find(|c| c.key == key)
-            .unwrap_or_default())
-    }
-
-    /// Delete an MCP server by key
-    pub fn delete(&self, key: &str) -> Result<(), ApiError> {
-        let mut configs: Vec<McpServerConfig> =
-            LocalStorage::get(MCP_STORAGE_KEY).unwrap_or_default();
-        configs.retain(|c| c.key != key);
-        LocalStorage::set(MCP_STORAGE_KEY, &configs).map_err(|e| {
-            ApiError::Network(format!("Failed to delete MCP config: {}", e))
-        })?;
-        Ok(())
-    }
-
-    /// Import MCP servers from JSON config
-    pub fn import_config(&self, json: &str) -> Result<Vec<McpServerConfig>, ApiError> {
-        let value: serde_json::Value = serde_json::from_str(json)
-            .map_err(|e| ApiError::Serialization(format!("Invalid JSON: {}", e)))?;
-
-        let mut imported = Vec::new();
-
-        if let Some(servers) = value.get("mcpServers").and_then(|v| v.as_object()) {
-            for (key, entry) in servers {
-                if let Ok(entry) = serde_json::from_value::<McpServerEntry>(entry.clone()) {
-                    let config = McpServerConfig {
-                        key: key.clone(),
-                        name: entry.name.clone().unwrap_or_else(|| key.clone()),
-                        enabled: true,
-                        transport: McpTransport::Stdio {
-                            command: entry.command,
-                            args: entry.args,
-                            env: entry.env,
-                        },
-                        description: None,
-                    };
-                    imported.push(config);
-                }
-            }
-        } else if let Ok(entry) = serde_json::from_value::<McpServerEntry>(value.clone()) {
-            // Single config format - try to extract key from the value
-            let key = value
-                .get("key")
-                .and_then(|v| v.as_str())
-                .unwrap_or("imported")
-                .to_string();
-            let config = McpServerConfig {
-                key: key.clone(),
-                name: entry.name.clone().unwrap_or_else(|| key.clone()),
-                enabled: true,
-                transport: McpTransport::Stdio {
-                    command: entry.command,
-                    args: entry.args,
-                    env: entry.env,
-                },
-                description: None,
-            };
-            imported.push(config);
-        }
-
-        if imported.is_empty() {
+    pub async fn save(&self, server: McpServerConfig) -> Result<McpServerConfig, ApiError> {
+        let response: McpMutationResponse = if server.name.trim().is_empty() {
             return Err(ApiError::Serialization(
-                "No valid MCP servers found in config".to_string(),
+                "MCP server name is required".to_string(),
             ));
-        }
+        } else {
+            match self
+                .client
+                .put(&format!("/mcp/servers/{}", server.name), &server)
+                .await
+            {
+                Ok(response) => response,
+                Err(ApiError::NotFound) => self.client.post("/mcp/servers", &server).await?,
+                Err(e) => return Err(e),
+            }
+        };
+        Ok(response.server.config)
+    }
 
-        // Merge with existing configs
-        let mut configs: Vec<McpServerConfig> =
-            LocalStorage::get(MCP_STORAGE_KEY).unwrap_or_default();
-        for new_config in &imported {
-            let pos = configs.iter().position(|c| c.key == new_config.key);
-            match pos {
-                Some(idx) => configs[idx] = new_config.clone(),
-                None => configs.push(new_config.clone()),
+    pub async fn delete(&self, key: &str) -> Result<(), ApiError> {
+        self.client.delete(&format!("/mcp/servers/{}", key)).await
+    }
+
+    pub async fn import_config(&self, json: &str) -> Result<Vec<McpServerConfig>, ApiError> {
+        let configs = parse_import_config(json)?;
+        let mut saved = Vec::new();
+        for config in configs {
+            saved.push(self.save(config).await?);
+        }
+        Ok(saved)
+    }
+
+    pub async fn connect(&self, key: &str) -> Result<McpServer, ApiError> {
+        let response: McpMutationResponse = self
+            .client
+            .post(
+                &format!("/mcp/servers/{}/connect", key),
+                &serde_json::json!({}),
+            )
+            .await?;
+        Ok(response.server)
+    }
+
+    pub async fn disconnect(&self, key: &str) -> Result<McpServer, ApiError> {
+        let response: McpMutationResponse = self
+            .client
+            .post(
+                &format!("/mcp/servers/{}/disconnect", key),
+                &serde_json::json!({}),
+            )
+            .await?;
+        Ok(response.server)
+    }
+
+    pub async fn list_tools(&self, key: &str) -> Result<Vec<McpTool>, ApiError> {
+        let response: McpListToolsResponse = self
+            .client
+            .get(&format!("/mcp/servers/{}/tools", key))
+            .await?;
+        Ok(response.tools)
+    }
+
+    pub async fn call_tool(
+        &self,
+        key: &str,
+        tool: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<McpCallToolResponse, ApiError> {
+        self.client
+            .post(
+                &format!("/mcp/servers/{}/tools/{}/call", key, tool),
+                &McpCallToolRequest { arguments },
+            )
+            .await
+    }
+}
+
+pub fn parse_import_config(json: &str) -> Result<Vec<McpServerConfig>, ApiError> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| ApiError::Serialization(format!("Invalid JSON: {}", e)))?;
+
+    let mut imported = Vec::new();
+    if let Some(servers) = value.get("mcpServers").and_then(|v| v.as_object()) {
+        for (key, entry) in servers {
+            if let Ok(entry) = serde_json::from_value::<McpServerEntry>(entry.clone()) {
+                imported.push(McpServerConfig {
+                    name: entry.name.unwrap_or_else(|| key.clone()),
+                    transport: McpTransport::Stdio {
+                        command: entry.command,
+                        args: entry.args,
+                        env: entry.env,
+                        working_dir: None,
+                    },
+                    timeout_ms: None,
+                    retry_count: None,
+                });
             }
         }
-
-        LocalStorage::set(MCP_STORAGE_KEY, &configs).map_err(|e| {
-            ApiError::Network(format!("Failed to import MCP config: {}", e))
-        })?;
-
-        Ok(imported)
-    }
-
-    /// Simulate connecting to an MCP server
-    pub async fn connect(&self, key: &str) -> Result<McpServer, ApiError> {
-        // Simulate connection delay
-        #[cfg(target_arch = "wasm32")]
-        {
-            use gloo_timers::future::TimeoutFuture;
-            TimeoutFuture::new(1000).await;
-        }
-
-        let mut servers = self.list()?;
-        if let Some(server) = servers.iter_mut().find(|s| s.config.key == key) {
-            // Simulate random success/failure for demo
-            server.status = McpServerStatus::Connected;
-            server.error_message = None;
-            Ok(server.clone())
-        } else {
-            Err(ApiError::NotFound)
-        }
-    }
-
-    /// Simulate disconnecting from an MCP server
-    pub async fn disconnect(&self, key: &str) -> Result<McpServer, ApiError> {
-        let mut servers = self.list()?;
-        if let Some(server) = servers.iter_mut().find(|s| s.config.key == key) {
-            server.status = McpServerStatus::Disconnected;
-            server.error_message = None;
-            Ok(server.clone())
-        } else {
-            Err(ApiError::NotFound)
-        }
-    }
-
-    /// Get tools for an MCP server
-    pub async fn list_tools(&self, key: &str) -> Result<Vec<McpTool>, ApiError> {
-        let server = self
-            .get(key)?
-            .ok_or_else(|| ApiError::NotFound)?;
-
-        if server.status != McpServerStatus::Connected {
-            return Err(ApiError::Network(
-                "MCP client not connected".to_string(),
-            ));
-        }
-
-        // Return demo tools for connected servers
-        Ok(vec![
-            McpTool {
-                name: "execute_command".to_string(),
-                description: Some("Execute a shell command".to_string()),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "Command to execute" }
-                    },
-                    "required": ["command"]
-                }),
+    } else if let Ok(config) = serde_json::from_value::<McpServerConfig>(value.clone()) {
+        imported.push(config);
+    } else if let Ok(entry) = serde_json::from_value::<McpServerEntry>(value.clone()) {
+        let name = value
+            .get("name")
+            .or_else(|| value.get("key"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("imported")
+            .to_string();
+        imported.push(McpServerConfig {
+            name,
+            transport: McpTransport::Stdio {
+                command: entry.command,
+                args: entry.args,
+                env: entry.env,
+                working_dir: None,
             },
-            McpTool {
-                name: "read_file".to_string(),
-                description: Some("Read file contents".to_string()),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "File path" }
-                    },
-                    "required": ["path"]
-                }),
-            },
-        ])
+            timeout_ms: None,
+            retry_count: None,
+        });
+    }
+
+    if imported.is_empty() {
+        return Err(ApiError::Serialization(
+            "No valid MCP servers found in config".to_string(),
+        ));
+    }
+    Ok(imported)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_import_config_accepts_claude_style_mcp_servers() {
+        let configs = parse_import_config(
+            r#"{
+                "mcpServers": {
+                    "filesystem": {
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+                        "env": { "ROOT": "/tmp" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "filesystem");
+        match &configs[0].transport {
+            McpTransport::Stdio {
+                command, args, env, ..
+            } => {
+                assert_eq!(command, "npx");
+                assert_eq!(args[1], "@modelcontextprotocol/server-filesystem");
+                assert_eq!(env.get("ROOT").map(String::as_str), Some("/tmp"));
+            }
+            _ => panic!("expected stdio transport"),
+        }
+    }
+
+    #[test]
+    fn call_tool_payload_matches_gateway_shape() {
+        let request = McpCallToolRequest {
+            arguments: serde_json::json!({
+                "path": "/tmp/hello.txt"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(json, r#"{"arguments":{"path":"/tmp/hello.txt"}}"#);
+
+        let response: McpCallToolResponse =
+            serde_json::from_str(r#"{"success":true,"output":"ok","is_error":false}"#).unwrap();
+        assert!(response.success);
+        assert_eq!(response.output, "ok");
+        assert!(!response.is_error);
     }
 }

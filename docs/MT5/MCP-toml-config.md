@@ -16,10 +16,9 @@ args = [
     "--transport", "stdio",
     "--path", "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
 ]
+
 ```
-
 字段对应关系：
-
 | JSON 字段 | BeeBotOS TOML 字段 |
 | --- | --- |
 | `mcpServers.metatrader` | `[[mcp.servers]]` + `name = "metatrader"` |
@@ -28,7 +27,6 @@ args = [
 | `--transport stdio` | `transport = "stdio"` 与 `args` 中的 MCP server 参数 |
 
 注意事项：
-
 - 先安装 MCP server：`pip install metatrader-mcp-server`。
 - Windows 路径中的反斜杠需要写成 `\\`，例如 `C:\\Program Files\\MetaTrader 5\\terminal64.exe`。
 - `config/local.toml` 会覆盖 `config/beebotos.toml` 的同名配置，适合放本机或部署环境参数。

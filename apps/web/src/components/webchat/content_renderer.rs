@@ -30,7 +30,10 @@ pub fn ContentRenderer(
     /// 附件列表
     #[prop(optional)]
     attachments: Vec<Attachment>,
+    #[prop(optional)]
+    sanitize_internal_errors: bool,
 ) -> impl IntoView {
+    let content = display_content(&content, sanitize_internal_errors);
     let content_type = detect_content_type(&content);
 
     view! {
@@ -68,6 +71,22 @@ pub fn ContentRenderer(
             }}
         </div>
     }
+}
+
+fn display_content(content: &str, sanitize_internal_errors: bool) -> String {
+    if sanitize_internal_errors && is_llm_internal_error(content) {
+        "大模型服务暂时不可用，请稍后重试。默认模型提供商为 DeepSeek。".to_string()
+    } else {
+        content.to_string()
+    }
+}
+
+fn is_llm_internal_error(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("llm")
+        && (lower.contains("provider error")
+            || lower.contains("all providers failed")
+            || lower.contains("correlation_id"))
 }
 
 /// 纯文本视图（保留换行和缩进，安全渲染）
@@ -183,4 +202,28 @@ fn format_file_size(size: u64) -> String {
     }
 
     format!("{:.1} {}", size, UNITS[unit_idx])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llm_internal_error_is_not_rendered_raw() {
+        let raw = "Execution error: LLM ReAct turn failed: Execution error: LLM call failed: Internal error: LLM request failed: Provider error: All providers failed or are unavailable (correlation_id: ddcde277-e26c-452f-afb5-fdb844e03a0f)";
+
+        let display = display_content(raw, true);
+
+        assert_eq!(
+            display,
+            "大模型服务暂时不可用，请稍后重试。默认模型提供商为 DeepSeek。"
+        );
+    }
+
+    #[test]
+    fn user_content_keeps_raw_error_text() {
+        let raw = "LLM request failed: Provider error: All providers failed";
+
+        assert_eq!(display_content(raw, false), raw);
+    }
 }
