@@ -11,6 +11,7 @@ pub mod browser;
 pub mod client;
 pub mod cron_jobs;
 pub mod gateway;
+pub mod mcp_server;
 pub mod services;
 pub mod webchat;
 
@@ -25,6 +26,10 @@ pub use client::{
     RequestInterceptor, ResponseInterceptor,
 };
 // Re-export Gateway API
+pub use mcp_server::{
+    McpImportConfig, McpServer, McpServerConfig, McpServerEntry, McpServerService,
+    McpServerStatus, McpTool, McpTransport,
+};
 pub use gateway::{
     AgentStatusInfo, ApiEndpoints, GatewayApiConfig, GatewayAuthConfig, GatewayService,
     HealthResponse, StatusResponse,

@@ -88,6 +88,7 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("nav-dao", "DAO 治理");
     zh.insert("nav-treasury", "金库");
     zh.insert("nav-skills", "技能市场");
+    zh.insert("nav-mcp-server", "MCP Server");
     zh.insert("nav-ai-commerce", "ai电商");
     zh.insert("nav-ai-store-manager", "AI 店长");
     zh.insert("nav-skill-instances", "实例管理");
@@ -297,6 +298,7 @@ pub fn init_i18n() -> I18nContext {
     en.insert("nav-dao", "DAO");
     en.insert("nav-treasury", "Treasury");
     en.insert("nav-skills", "Skills");
+    en.insert("nav-mcp-server", "MCP Server");
     en.insert("nav-ai-commerce", "AI Commerce");
     en.insert("nav-ai-store-manager", "AI Store Manager");
     en.insert("nav-skill-instances", "Instances");

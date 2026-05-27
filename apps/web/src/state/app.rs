@@ -12,8 +12,8 @@ use leptos::prelude::*;
 
 use crate::api::{
     AgentService, ApiClient, AuthService, BrowserApiService, CompositionService, DaoService,
-    LlmConfigService, SettingsService, SkillService, TreasuryService, WebchatApiService,
-    WorkflowService,
+    LlmConfigService, McpServerService, SettingsService, SkillService, TreasuryService,
+    WebchatApiService, WorkflowService,
 };
 use crate::state::agent::{provide_agent_state, AgentState};
 use crate::state::auth::AuthState;
@@ -173,6 +173,11 @@ impl AppState {
     /// Get composition service
     pub fn composition_service(&self) -> CompositionService {
         CompositionService::new(self.api_client())
+    }
+
+    /// Get MCP server service
+    pub fn mcp_server_service(&self) -> McpServerService {
+        McpServerService::new(self.api_client())
     }
 
     /// Get cron job service

@@ -55,7 +55,7 @@ use i18n::{init_i18n, I18nContext};
 use leptos_router::hooks::use_location;
 use pages::{
     AgentDetail, AgentsPage, AiCommercePage, AiStoreManagerPage, AiVideoMarketingPage,
-    ChannelsPage, DaoPage, Home, LlmConfigPage, LlmSettingsPage, LoginPage, NotFound, RegisterPage,
+    ChannelsPage, DaoPage, Home, LlmConfigPage, LlmSettingsPage, LoginPage, McpServerPage, NotFound, RegisterPage,
     SettingsPage, SetupPage, SkillInstancesPage, SkillsPage, TreasuryPage,
     TreasuryTransactionsPage, WorkflowDashboardPage, WorkflowDetailPage,
 };
@@ -79,6 +79,7 @@ fn PageTitle() -> impl IntoView {
             p if p.starts_with("/dao") => i18n.t("nav-dao"),
             p if p.starts_with("/skill-instances") => i18n.t("nav-skill-instances"),
             p if p.starts_with("/skills") => i18n.t("nav-skills"),
+            p if p.starts_with("/mcp-server") => i18n.t("nav-mcp-server"),
             p if p.starts_with("/settings") => i18n.t("nav-settings"),
             p if p.starts_with("/llm-settings") => i18n.t("nav-llm-settings"),
             p if p.starts_with("/llm-config") => i18n.t("nav-llm-config"),
@@ -224,6 +225,14 @@ pub fn App() -> impl IntoView {
                                     view=move || view! {
                                         <AuthGuard>
                                             <SkillsPage />
+                                        </AuthGuard>
+                                    }
+                                />
+                                <Route
+                                    path=StaticSegment("mcp-server")
+                                    view=move || view! {
+                                        <AuthGuard>
+                                            <McpServerPage />
                                         </AuthGuard>
                                     }
                                 />
