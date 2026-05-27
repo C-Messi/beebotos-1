@@ -95,6 +95,18 @@ impl MCPManager {
         clients.insert(name.into(), client);
     }
 
+    /// Remove a client by name and close it if present.
+    pub async fn remove_client(&self, name: &str) -> Option<Arc<MCPClient>> {
+        let client = {
+            let mut clients = self.clients.write().await;
+            clients.remove(name)
+        };
+        if let Some(client) = &client {
+            let _ = client.close().await;
+        }
+        client
+    }
+
     /// Register a server
     pub async fn register_server(&self, name: impl Into<String>, server: Arc<MCPServer>) {
         let mut servers = self.servers.write().await;

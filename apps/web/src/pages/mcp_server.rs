@@ -29,68 +29,30 @@ pub fn McpServerPage() -> impl IntoView {
     };
     let service = StoredValue::new(service);
 
-    // Load servers from local storage
     let servers = RwSignal::new(Vec::<McpServer>::new());
 
     let load_servers = {
         let servers = servers.clone();
-        move || match service.with_value(|s| s.list()) {
-            Ok(data) => {
-                servers.set(data);
-            }
-            Err(e) => {
-                app_state.notify(
-                    crate::state::notification::NotificationType::Error,
-                    "Load Failed",
-                    format!("Failed to load MCP servers: {}", e),
-                );
-            }
+        move || {
+            let service = service.get_value();
+            leptos::task::spawn_local(async move {
+                match service.list().await {
+                    Ok(data) => servers.set(data),
+                    Err(e) => {
+                        use_app_state().notify(
+                            crate::state::notification::NotificationType::Error,
+                            "Load Failed",
+                            format!("Failed to load MCP servers: {}", e),
+                        );
+                    }
+                }
+            });
         }
     };
     let load_servers = StoredValue::new(load_servers);
 
     // Initial load
     load_servers.with_value(|f| f());
-
-    // Demo data initialization: if empty, add sample MCP servers
-    {
-        let servers_val = servers.get_untracked();
-        if servers_val.is_empty() {
-            let demo1 = McpServerConfig {
-                key: "metatrader".to_string(),
-                name: "metatrader".to_string(),
-                enabled: true,
-                transport: McpTransport::Stdio {
-                    command: "metatrader-mcp-server".to_string(),
-                    args: vec![
-                        "--login".to_string(),
-                        "5050937026".to_string(),
-                        "--password".to_string(),
-                        "Mk*rw1Cg".to_string(),
-                        "--server".to_string(),
-                        "MetaQuotes-Demo".to_string(),
-                        "--transport".to_string(),
-                        "stdio".to_string(),
-                        "--path".to_string(),
-                        "D:\\Program\\MetaTrader 5\\terminal64.exe".to_string(),
-                    ],
-                    env: None,
-                },
-                description: None,
-            };
-            let _ = service.with_value(|s| s.save(demo1));
-            load_servers.with_value(|f| f());
-
-            // Set demo states: metatrader as connected
-            servers.update(|list| {
-                for s in list.iter_mut() {
-                    if s.config.key == "metatrader" {
-                        s.status = McpServerStatus::Connected;
-                    }
-                }
-            });
-        }
-    }
 
     let filtered_servers = Signal::derive(move || {
         let search = search_input.get().to_lowercase();
@@ -101,9 +63,8 @@ pub fn McpServerPage() -> impl IntoView {
                 if search.is_empty() {
                     true
                 } else {
-                    s.config.key.to_lowercase().contains(&search)
-                        || s.config.name.to_lowercase().contains(&search)
-                        || format!("{:?}", s.status).to_lowercase().contains(&search)
+                    s.config.name.to_lowercase().contains(&search)
+                        || format!("{:?}", s.status()).to_lowercase().contains(&search)
                         || transport_display(&s.config.transport)
                             .to_lowercase()
                             .contains(&search)
@@ -111,6 +72,8 @@ pub fn McpServerPage() -> impl IntoView {
             })
             .collect::<Vec<_>>()
     });
+
+    let summary = Signal::derive(move || server_summary(&servers.get()));
 
     let handle_refresh = {
         move || {
@@ -124,8 +87,8 @@ pub fn McpServerPage() -> impl IntoView {
             // Page Header
             <div class="page-header">
                 <div>
-                    <h1>"MCP 客户端"</h1>
-                    <p class="page-description">"管理当前用户可用的 Model Context Protocol 客户端。"</p>
+                    <h1>"MCP Server"</h1>
+                    <p class="page-description">"管理当前可用的 Model Context Protocol 服务。"</p>
                 </div>
                 <div class="page-header-actions">
                     <button
@@ -143,12 +106,19 @@ pub fn McpServerPage() -> impl IntoView {
                 </div>
             </div>
 
+            <div class="mcp-summary-grid">
+                <McpSummaryItem label="总数" value=move || summary.get().total />
+                <McpSummaryItem label="已连接" value=move || summary.get().connected />
+                <McpSummaryItem label="异常" value=move || summary.get().error />
+                <McpSummaryItem label="未连接" value=move || summary.get().disconnected />
+            </div>
+
             // Search Bar
             <div class="mcp-search-bar">
                 <span class="search-icon">"🔍"</span>
                 <input
                     type="text"
-                    placeholder="搜索 key、名称、状态或地址..."
+                    placeholder="搜索名称、状态或传输方式..."
                     prop:value=search_input
                     on:input=move |e| search_input.set(event_target_value(&e))
                 />
@@ -164,7 +134,7 @@ pub fn McpServerPage() -> impl IntoView {
                         view! {
                             <div class="mcp-server-grid">
                                 {list.into_iter().map(|server| {
-                                    let key = server.config.key.clone();
+                                    let key = server.config.name.clone();
                                     let config_clone = server.config.clone();
                                     let is_connecting = {
                                         let key = key.clone();
@@ -254,13 +224,16 @@ pub fn McpServerPage() -> impl IntoView {
                                         let load_servers = load_servers.clone();
                                         let service = service.clone();
                                         move |_| {
+                                            if !confirm_delete(&key) {
+                                                return;
+                                            }
                                             deleting_key.set(Some(key.clone()));
                                             let key2 = key.clone();
                                             let deleting_key2 = deleting_key.clone();
                                             let load_servers = load_servers.clone();
                                             let service = service.clone();
                                             leptos::task::spawn_local(async move {
-                                                match service.get_value().delete(&key2) {
+                                                match service.get_value().delete(&key2).await {
                                                     Ok(()) => {
                                                         use_app_state().notify(
                                                             crate::state::notification::NotificationType::Success,
@@ -368,6 +341,27 @@ pub fn McpServerPage() -> impl IntoView {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct McpServerSummary {
+    total: usize,
+    connected: usize,
+    error: usize,
+    disconnected: usize,
+}
+
+#[component]
+fn McpSummaryItem<F>(label: &'static str, value: F) -> impl IntoView
+where
+    F: Fn() -> usize + Copy + Send + Sync + 'static,
+{
+    view! {
+        <div class="mcp-summary-item">
+            <span>{label}</span>
+            <strong>{move || value().to_string()}</strong>
+        </div>
+    }
+}
+
 #[component]
 fn McpServerCard(
     server: McpServer,
@@ -380,45 +374,29 @@ fn McpServerCard(
     #[prop(into)] is_disconnecting: Signal<bool>,
     #[prop(into)] is_deleting: Signal<bool>,
 ) -> impl IntoView {
-    let status_class = match server.status {
-        McpServerStatus::Connected => "mcp-status-bar connected",
-        McpServerStatus::Error => "mcp-status-bar error",
-        _ => "mcp-status-bar disconnected",
-    };
-
-    let status_text = match server.status {
+    let status = server.status();
+    let status_text = match status {
         McpServerStatus::Connected => "已连接",
         McpServerStatus::Error => "错误",
         McpServerStatus::Connecting => "连接中...",
         McpServerStatus::Disconnected => "未连接",
     };
 
-    let status_dot_class = match server.status {
-        McpServerStatus::Connected => "status-dot connected",
-        McpServerStatus::Error => "status-dot error",
-        _ => "status-dot disconnected",
+    let status_badge_class = match status {
+        McpServerStatus::Connected => "mcp-status-badge connected",
+        McpServerStatus::Error => "mcp-status-badge error",
+        _ => "mcp-status-badge disconnected",
     };
 
-    let enabled_text = if server.config.enabled {
-        "启用"
-    } else {
-        "禁用"
-    };
     let transport_text = transport_display(&server.config.transport);
     let args_text = transport_args_display(&server.config.transport);
+    let endpoint_label = transport_endpoint_display(&server.config.transport);
 
-    let is_connected = server.status == McpServerStatus::Connected;
-    let has_error = server.status == McpServerStatus::Error;
+    let is_connected = status == McpServerStatus::Connected;
+    let has_error = status == McpServerStatus::Error;
 
     view! {
         <div class="mcp-server-card">
-            // Status bar
-            <div class=status_class>
-                <span>{server.config.name.clone()}</span>
-                <span class="status-text">{status_text}</span>
-            </div>
-
-            // Card body
             <div class="mcp-card-body">
                 <div class="mcp-card-header">
                     <div class="mcp-card-icon">
@@ -426,9 +404,9 @@ fn McpServerCard(
                     </div>
                     <div class="mcp-card-info">
                         <div class="mcp-card-title">{server.config.name.clone()}</div>
-                        <div class="mcp-card-subtitle">{server.config.key.clone()}</div>
+                        <div class="mcp-card-subtitle">{endpoint_label}</div>
                     </div>
-                    <div class=status_dot_class>
+                    <div class=status_badge_class>
                         <span>{status_text}</span>
                     </div>
                 </div>
@@ -439,17 +417,16 @@ fn McpServerCard(
                         <span class="mcp-detail-value">{transport_text}</span>
                     </div>
                     <div class="mcp-detail-row">
-                        <span class="mcp-detail-label">"Enabled"</span>
-                        <span class="mcp-detail-value">{enabled_text}</span>
+                        <span class="mcp-detail-label">"Runtime"</span>
+                        <span class="mcp-detail-value">{status_text}</span>
                     </div>
                 </div>
 
-                // Command args block
-                <div class="mcp-command-block">
+                <details class="mcp-command-details">
+                    <summary>"配置摘要"</summary>
                     <pre>{args_text}</pre>
-                </div>
+                </details>
 
-                // Error message
                 {if has_error {
                     if let Some(ref err) = server.error_message {
                         view! {
@@ -462,9 +439,12 @@ fn McpServerCard(
                     view! { <></> }.into_any()
                 }}
 
-                // Actions
                 <div class="mcp-card-actions">
-                    <button class="btn btn-secondary btn-sm" on:click=move |_| on_tools.run(())>
+                    <button
+                        class="btn btn-secondary btn-sm"
+                        disabled=!is_connected
+                        on:click=move |_| on_tools.run(())
+                    >
                         "工具"
                     </button>
                     <button class="btn btn-secondary btn-sm" on:click=move |_| on_edit.run(())>
@@ -509,8 +489,8 @@ fn McpServerEmpty() -> impl IntoView {
     view! {
         <div class="empty-state">
             <div class="empty-icon">"🔌"</div>
-            <h3>"暂无 MCP 客户端"</h3>
-            <p>"点击右上角导入配置按钮添加 MCP 客户端"</p>
+            <h3>"暂无 MCP Server"</h3>
+            <p>"点击右上角导入配置按钮添加 MCP Server"</p>
         </div>
     }
 }
@@ -534,7 +514,7 @@ fn ImportConfigModal(
             is_saving.set(true);
             let service = service.clone();
             leptos::task::spawn_local(async move {
-                match service.with_value(|s| s.import_config(&text)) {
+                match service.get_value().import_config(&text).await {
                     Ok(servers) => {
                         use_app_state().notify(
                             crate::state::notification::NotificationType::Success,
@@ -595,6 +575,10 @@ fn ToolsModal(
     let tools = RwSignal::new(Vec::<McpTool>::new());
     let is_loading = RwSignal::new(true);
     let error_msg = RwSignal::new(None::<String>);
+    let selected_tool = RwSignal::new(None::<McpTool>);
+    let call_arguments = RwSignal::new("{}".to_string());
+    let call_output = RwSignal::new(None::<String>);
+    let is_calling = RwSignal::new(false);
     let service = StoredValue::new(service);
 
     {
@@ -614,6 +598,59 @@ fn ToolsModal(
     }
 
     let server_name = key.clone();
+    let run_tool = StoredValue::new({
+        let key = key.clone();
+        let service = service.clone();
+        move || {
+            let Some(tool) = selected_tool.get() else {
+                return;
+            };
+
+            let args = match serde_json::from_str::<serde_json::Value>(&call_arguments.get()) {
+                Ok(value) => match value.as_object() {
+                    Some(map) => map.clone(),
+                    None => {
+                        use_app_state().notify(
+                            crate::state::notification::NotificationType::Error,
+                            "Invalid Arguments",
+                            "工具参数必须是 JSON object",
+                        );
+                        return;
+                    }
+                },
+                Err(e) => {
+                    use_app_state().notify(
+                        crate::state::notification::NotificationType::Error,
+                        "Invalid JSON",
+                        e.to_string(),
+                    );
+                    return;
+                }
+            };
+
+            is_calling.set(true);
+            call_output.set(None);
+            let key = key.clone();
+            let tool_name = tool.name.clone();
+            let service = service.clone();
+            leptos::task::spawn_local(async move {
+                match service.get_value().call_tool(&key, &tool_name, args).await {
+                    Ok(result) => {
+                        let prefix = if result.is_error {
+                            "工具返回错误"
+                        } else {
+                            "调用成功"
+                        };
+                        call_output.set(Some(format!("{}\n{}", prefix, result.output)));
+                    }
+                    Err(e) => {
+                        call_output.set(Some(format!("调用失败\n{}", e)));
+                    }
+                }
+                is_calling.set(false);
+            });
+        }
+    });
 
     view! {
         <Modal title=format!("{} 工具", server_name) on_close=move || on_close.run(())>
@@ -632,11 +669,35 @@ fn ToolsModal(
                         }.into_any()
                     } else {
                         view! {
+                            <div class="mcp-tools-toolbar">
+                                <span>{format!("{} 个工具", tools_list.len())}</span>
+                            </div>
                             <div class="mcp-tools-list">
                                 {tools_list.into_iter().map(|tool| {
+                                    let tool_for_select = tool.clone();
+                                    let selected_tool_name = tool.name.clone();
                                     view! {
                                         <div class="mcp-tool-item">
-                                            <div class="mcp-tool-name">{tool.name}</div>
+                                            <div class="mcp-tool-header">
+                                                <div>
+                                                    <div class="mcp-tool-name">{tool.name}</div>
+                                                    <div class="mcp-tool-schema">{schema_summary(&tool.parameters)}</div>
+                                                </div>
+                                                <button
+                                                    class="btn btn-secondary btn-sm"
+                                                    on:click=move |_| {
+                                                        selected_tool.set(Some(tool_for_select.clone()));
+                                                        call_arguments.set(sample_arguments(&tool_for_select.parameters));
+                                                        call_output.set(None);
+                                                    }
+                                                >
+                                                    {move || if selected_tool.get().as_ref().map(|t| t.name.as_str()) == Some(selected_tool_name.as_str()) {
+                                                        "已选择"
+                                                    } else {
+                                                        "测试"
+                                                    }}
+                                                </button>
+                                            </div>
                                             {tool.description.map(|d| view! {
                                                 <div class="mcp-tool-desc">{d}</div>
                                             })}
@@ -644,6 +705,32 @@ fn ToolsModal(
                                     }
                                 }).collect::<Vec<_>>()}
                             </div>
+                            {move || selected_tool.get().map(|tool| view! {
+                                <div class="mcp-tool-runner">
+                                    <div class="mcp-tool-runner-header">
+                                        <strong>{format!("测试 {}", tool.name)}</strong>
+                                        <span>"JSON 参数"</span>
+                                    </div>
+                                    <textarea
+                                        class="mcp-json-editor mcp-tool-args"
+                                        prop:value=call_arguments
+                                        on:input=move |e| call_arguments.set(event_target_value(&e))
+                                        rows=8
+                                    />
+                                    <div class="mcp-tool-runner-actions">
+                                        <button
+                                            class="btn btn-primary btn-sm"
+                                            disabled=move || is_calling.get()
+                                            on:click=move |_| run_tool.with_value(|f| f())
+                                        >
+                                            {move || if is_calling.get() { "调用中..." } else { "调用工具" }}
+                                        </button>
+                                    </div>
+                                    {move || call_output.get().map(|output| view! {
+                                        <pre class="mcp-tool-output">{output}</pre>
+                                    })}
+                                </div>
+                            })}
                         }.into_any()
                     }
                 }}
@@ -667,6 +754,7 @@ fn EditModal(
     let edit_text = RwSignal::new(String::new());
     let is_saving = RwSignal::new(false);
     let service = StoredValue::new(service);
+    let app_state = use_app_state();
 
     // Initialize with current config JSON
     {
@@ -680,9 +768,9 @@ fn EditModal(
             match serde_json::from_str::<McpServerConfig>(&text) {
                 Ok(new_config) => {
                     is_saving.set(true);
-                    let service = service.clone();
+                    let service = service.get_value();
                     leptos::task::spawn_local(async move {
-                        match service.with_value(|s| s.save(new_config)) {
+                        match service.save(new_config).await {
                             Ok(_) => {
                                 use_app_state().notify(
                                     crate::state::notification::NotificationType::Success,
@@ -697,13 +785,13 @@ fn EditModal(
                                     "Save Failed",
                                     e.to_string(),
                                 );
+                                is_saving.set(false);
                             }
                         }
-                        is_saving.set(false);
                     });
                 }
                 Err(e) => {
-                    use_app_state().notify(
+                    app_state.notify(
                         crate::state::notification::NotificationType::Error,
                         "Invalid JSON",
                         e.to_string(),
@@ -744,8 +832,7 @@ fn EditModal(
 fn transport_display(transport: &McpTransport) -> String {
     match transport {
         McpTransport::Stdio { .. } => "stdio".to_string(),
-        McpTransport::Sse { .. } => "sse".to_string(),
-        McpTransport::Websocket { .. } => "websocket".to_string(),
+        McpTransport::Http { .. } => "http".to_string(),
     }
 }
 
@@ -759,7 +846,90 @@ fn transport_args_display(transport: &McpTransport) -> String {
             }
             s
         }
-        McpTransport::Sse { url, .. } => url.clone(),
-        McpTransport::Websocket { url, .. } => url.clone(),
+        McpTransport::Http { url, .. } => url.clone(),
     }
+}
+
+fn transport_endpoint_display(transport: &McpTransport) -> String {
+    match transport {
+        McpTransport::Stdio { command, args, .. } => args
+            .first()
+            .map(|arg| format!("{} {}", command, arg))
+            .unwrap_or_else(|| command.clone()),
+        McpTransport::Http { url, .. } => url.clone(),
+    }
+}
+
+fn server_summary(servers: &[McpServer]) -> McpServerSummary {
+    let mut summary = McpServerSummary {
+        total: servers.len(),
+        ..Default::default()
+    };
+
+    for server in servers {
+        match server.status() {
+            McpServerStatus::Connected => summary.connected += 1,
+            McpServerStatus::Error => summary.error += 1,
+            McpServerStatus::Connecting | McpServerStatus::Disconnected => {
+                summary.disconnected += 1
+            }
+        }
+    }
+
+    summary
+}
+
+fn schema_summary(schema: &serde_json::Value) -> String {
+    let props = schema
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .map(|p| p.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    if props.is_empty() {
+        "无参数".to_string()
+    } else {
+        format!("参数: {}", props.join(", "))
+    }
+}
+
+fn sample_arguments(schema: &serde_json::Value) -> String {
+    let mut sample = serde_json::Map::new();
+    let required = schema
+        .get("required")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) {
+        for key in required.iter().filter_map(|v| v.as_str()) {
+            let value = properties
+                .get(key)
+                .map(sample_value)
+                .unwrap_or(serde_json::Value::Null);
+            sample.insert(key.to_string(), value);
+        }
+    }
+
+    serde_json::to_string_pretty(&sample).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn sample_value(schema: &serde_json::Value) -> serde_json::Value {
+    match schema.get("type").and_then(|v| v.as_str()) {
+        Some("number") | Some("integer") => serde_json::json!(0),
+        Some("boolean") => serde_json::json!(false),
+        Some("array") => serde_json::json!([]),
+        Some("object") => serde_json::json!({}),
+        _ => serde_json::json!(""),
+    }
+}
+
+fn confirm_delete(name: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| {
+            window
+                .confirm_with_message(&format!("确认删除 MCP Server '{}'？", name))
+                .ok()
+        })
+        .unwrap_or(false)
 }

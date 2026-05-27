@@ -303,6 +303,7 @@ pub struct CallToolParams {
 #[serde(rename_all = "camelCase")]
 pub struct CallToolResult {
     pub content: Vec<ToolContent>,
+    #[serde(default)]
     pub is_error: bool,
 }
 

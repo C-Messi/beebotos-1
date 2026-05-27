@@ -498,7 +498,10 @@ fn StepLlmModels(state: RwSignal<WizardState>) -> impl IntoView {
                 ("claude-3-sonnet", "https://api.anthropic.com"),
             ),
             ("zhipu", ("glm-4", "https://open.bigmodel.cn/api/paas/v4")),
-            ("deepseek", ("deepseek-chat", "https://api.deepseek.com")),
+            (
+                "deepseek",
+                ("deepseek-v4-flash", "https://api.deepseek.com/v1"),
+            ),
             ("ollama", ("llama2", "http://localhost:11434")),
         ]
         .into_iter()

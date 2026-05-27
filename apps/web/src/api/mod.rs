@@ -31,8 +31,8 @@ pub use gateway::{
 };
 // Re-export Gateway API
 pub use mcp_server::{
-    McpImportConfig, McpServer, McpServerConfig, McpServerEntry, McpServerService, McpServerStatus,
-    McpTool, McpTransport,
+    McpCallToolRequest, McpCallToolResponse, McpServer, McpServerConfig, McpServerEntry,
+    McpServerService, McpServerStatus, McpTool, McpTransport,
 };
 // Re-export 服务
 pub use services::{

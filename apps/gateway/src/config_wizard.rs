@@ -673,7 +673,7 @@ impl ConfigWizard {
         );
         println!();
 
-        let providers = vec!["kimi", "openai", "anthropic", "zhipu", "ollama"];
+        let providers = vec!["deepseek", "kimi", "openai", "anthropic", "zhipu", "ollama"];
 
         println!("Available providers:");
         for (i, provider) in providers.iter().enumerate() {
@@ -703,6 +703,7 @@ impl ConfigWizard {
 
                 // Model name with defaults
                 let default_model = match *provider {
+                    "deepseek" => "deepseek-v4-flash",
                     "kimi" => "moonshot-v1-8k",
                     "openai" => "gpt-4",
                     "anthropic" => "claude-3-sonnet",
@@ -715,10 +716,11 @@ impl ConfigWizard {
                     Some(self.prompt_string(&format!("{} model name", provider), default_model)?);
 
                 // Base URL for specific providers
-                if provider == &"ollama" || provider == &"kimi" {
+                if provider == &"ollama" || provider == &"kimi" || provider == &"deepseek" {
                     let default_url = match *provider {
                         "ollama" => "http://localhost:11434",
                         "kimi" => "https://api.moonshot.cn",
+                        "deepseek" => "https://api.deepseek.com/v1",
                         _ => "",
                     };
                     provider_config.base_url =
