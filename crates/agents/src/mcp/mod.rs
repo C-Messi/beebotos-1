@@ -65,6 +65,14 @@ impl MCPImplementation {
     }
 }
 
+/// Lightweight MCP tool metadata used for search-mode discovery.
+#[derive(Debug, Clone)]
+pub struct MCPToolSummary {
+    pub server_name: String,
+    pub tool_name: String,
+    pub description: Option<String>,
+}
+
 /// MCP Manager for handling multiple MCP connections
 #[derive(Clone)]
 pub struct MCPManager {
@@ -103,6 +111,50 @@ impl MCPManager {
     pub async fn list_clients(&self) -> Vec<String> {
         let clients = self.clients.read().await;
         clients.keys().cloned().collect()
+    }
+
+    /// List MCP tools as lightweight summaries.
+    ///
+    /// The MCP protocol returns full tool descriptors from `tools/list`;
+    /// callers should use this method when they only need search/index
+    /// metadata and do not want to expose schemas to the LLM yet.
+    pub async fn list_tool_summaries(&self) -> Result<Vec<MCPToolSummary>, MCPError> {
+        let clients = self.clients.read().await;
+        let client_entries: Vec<(String, Arc<MCPClient>)> = clients
+            .iter()
+            .map(|(name, client)| (name.clone(), client.clone()))
+            .collect();
+        drop(clients);
+
+        let mut summaries = Vec::new();
+        for (server_name, client) in client_entries {
+            let result = client.list_tools(None).await?;
+            summaries.extend(result.tools.into_iter().map(|tool| MCPToolSummary {
+                server_name: server_name.clone(),
+                tool_name: tool.name,
+                description: tool.description,
+            }));
+        }
+
+        Ok(summaries)
+    }
+
+    /// Load one MCP tool descriptor with its full schema on demand.
+    pub async fn get_tool_schema(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+    ) -> Result<types::Tool, MCPError> {
+        let client = self
+            .get_client(server_name)
+            .await
+            .ok_or_else(|| MCPError::ToolNotFound(format!("{}/{}", server_name, tool_name)))?;
+        let result = client.list_tools(None).await?;
+        result
+            .tools
+            .into_iter()
+            .find(|tool| tool.name == tool_name)
+            .ok_or_else(|| MCPError::ToolNotFound(format!("{}/{}", server_name, tool_name)))
     }
 
     /// List all registered servers

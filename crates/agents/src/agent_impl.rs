@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
@@ -40,6 +41,12 @@ struct WebSearchResult {
 struct WebSearchFailure {
     provider: &'static str,
     reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct McpToolTarget {
+    server_name: String,
+    tool_name: String,
 }
 
 pub struct Agent {
@@ -357,6 +364,14 @@ impl Agent {
         )
     }
 
+    fn is_mcp_search_tool(name: &str) -> bool {
+        name == "mcp_tool_search"
+    }
+
+    fn is_mcp_dynamic_tool_name(name: &str) -> bool {
+        name.starts_with("mcp__")
+    }
+
     fn is_controlled_workspace_tool(name: &str) -> bool {
         matches!(
             name,
@@ -558,6 +573,31 @@ impl Agent {
         }
 
         tools
+    }
+
+    fn mcp_tool_search_definition() -> communication::ToolDefinition {
+        communication::ToolDefinition {
+            name: "mcp_tool_search".to_string(),
+            description: "Search connected MCP tools by intent before using an MCP capability. \
+                          This returns lightweight matches only; after search, the runtime will \
+                          dynamically expose the selected MCP tool schemas for the next tool call."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Natural-language task or capability to search for" },
+                    "server": { "type": "string", "description": "Optional MCP server name to restrict search" },
+                    "limit": { "type": "integer", "description": "Maximum tools to return", "default": 5 }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    fn add_mcp_tool_search_if_available(&self, tools: &mut Vec<communication::ToolDefinition>) {
+        if self.mcp_manager.is_some() && !tools.iter().any(|tool| tool.name == "mcp_tool_search") {
+            tools.push(Self::mcp_tool_search_definition());
+        }
     }
 
     fn controlled_workspace_tool_definitions(&self) -> Vec<communication::ToolDefinition> {
@@ -989,6 +1029,16 @@ impl Agent {
         let tool_name = tool_call.function.name.as_str();
         let mut params = Self::parse_tool_arguments(&tool_call.function.arguments)?;
 
+        if Self::is_mcp_search_tool(tool_name) {
+            return self.execute_mcp_tool_search(params.as_ref()).await;
+        }
+
+        if Self::is_mcp_dynamic_tool_name(tool_name) {
+            return self
+                .execute_mcp_dynamic_tool(tool_name, params.as_ref(), input_text)
+                .await;
+        }
+
         if Self::is_builtin_workspace_tool(tool_name) {
             return self
                 .execute_builtin_workspace_tool(tool_name, params.as_ref(), input_text)
@@ -1032,6 +1082,345 @@ impl Agent {
             Self::recoverable_skill_observation(&resolved_id, &result.output)
         };
         Ok((output, result.success))
+    }
+
+    fn mcp_dynamic_tool_name(server_name: &str, tool_name: &str) -> String {
+        let raw = format!("{}:{}", server_name, tool_name);
+        format!(
+            "mcp__{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+        )
+    }
+
+    fn parse_mcp_dynamic_tool_name(name: &str) -> Result<McpToolTarget, AgentError> {
+        let encoded = name.strip_prefix("mcp__").ok_or_else(|| {
+            AgentError::Execution(format!("Invalid MCP dynamic tool name: {}", name))
+        })?;
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|e| AgentError::Execution(format!("Invalid MCP dynamic tool id: {}", e)))?;
+        let decoded = String::from_utf8(decoded)
+            .map_err(|e| AgentError::Execution(format!("Invalid MCP dynamic tool id: {}", e)))?;
+        let (server_name, tool_name) = decoded.split_once(':').ok_or_else(|| {
+            AgentError::Execution(format!("Invalid MCP dynamic tool target: {}", decoded))
+        })?;
+        if server_name.is_empty() || tool_name.is_empty() {
+            return Err(AgentError::Execution(format!(
+                "Invalid MCP dynamic tool target: {}",
+                decoded
+            )));
+        }
+        Ok(McpToolTarget {
+            server_name: server_name.to_string(),
+            tool_name: tool_name.to_string(),
+        })
+    }
+
+    async fn mcp_tool_definition(
+        &self,
+        target: &McpToolTarget,
+    ) -> Result<communication::ToolDefinition, AgentError> {
+        let manager = self
+            .mcp_manager
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("MCP manager not configured".into()))?;
+        let tool = manager
+            .get_tool_schema(&target.server_name, &target.tool_name)
+            .await
+            .map_err(|e| AgentError::Execution(format!("Failed to load MCP tool schema: {}", e)))?;
+        Ok(communication::ToolDefinition {
+            name: Self::mcp_dynamic_tool_name(&target.server_name, &target.tool_name),
+            description: format!(
+                "MCP tool {}/{}: {}",
+                target.server_name,
+                target.tool_name,
+                tool.description.unwrap_or_default()
+            ),
+            parameters: tool.input_schema,
+        })
+    }
+
+    fn mcp_search_score(
+        query: &str,
+        server_name: &str,
+        tool_name: &str,
+        description: &str,
+    ) -> usize {
+        let haystack = format!("{} {} {}", server_name, tool_name, description).to_lowercase();
+        let query_lower = query.to_lowercase();
+        let mut score = if haystack.contains(&query_lower) {
+            10
+        } else {
+            0
+        };
+        for term in query_lower
+            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+            .filter(|term| term.chars().count() >= 2)
+        {
+            if haystack.contains(term) {
+                score += 1;
+            }
+        }
+        score
+    }
+
+    async fn execute_mcp_tool_search(
+        &self,
+        params: Option<&HashMap<String, String>>,
+    ) -> Result<(String, bool), AgentError> {
+        let query = Self::tool_arg_ref(params, "query")
+            .ok_or_else(|| AgentError::Execution("mcp_tool_search requires query".to_string()))?;
+        let limit = Self::tool_arg_ref(params, "limit")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(5)
+            .clamp(1, 10);
+        let server_filter = Self::tool_arg_ref(params, "server").map(|s| s.to_lowercase());
+        let manager = self
+            .mcp_manager
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("MCP manager not configured".into()))?;
+        let summaries = manager
+            .list_tool_summaries()
+            .await
+            .map_err(|e| AgentError::Execution(format!("MCP tool search failed: {}", e)))?;
+
+        let mut scored = summaries
+            .into_iter()
+            .filter(|summary| {
+                server_filter
+                    .as_ref()
+                    .map_or(true, |server| summary.server_name.to_lowercase() == *server)
+            })
+            .map(|summary| {
+                let desc = summary.description.clone().unwrap_or_default();
+                let score =
+                    Self::mcp_search_score(query, &summary.server_name, &summary.tool_name, &desc);
+                (score, summary, desc)
+            })
+            .collect::<Vec<_>>();
+
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        let selected = scored
+            .into_iter()
+            .filter(|(score, _, _)| *score > 0)
+            .take(limit)
+            .collect::<Vec<_>>();
+
+        if selected.is_empty() {
+            return Ok((
+                format!(
+                    "No matching MCP tools found for query '{}'. Try a broader search query.",
+                    query
+                ),
+                false,
+            ));
+        }
+
+        let mut lines = vec![
+            "MCP tool search results. The matching tool schemas have been loaded dynamically; \
+             call the exact tool names below if one fits."
+                .to_string(),
+        ];
+        for (idx, (_, summary, desc)) in selected.iter().enumerate() {
+            lines.push(format!(
+                "{}. {} ({}/{}) - {}",
+                idx + 1,
+                Self::mcp_dynamic_tool_name(&summary.server_name, &summary.tool_name),
+                summary.server_name,
+                summary.tool_name,
+                desc.chars().take(240).collect::<String>()
+            ));
+        }
+        Ok((lines.join("\n"), true))
+    }
+
+    async fn mcp_targets_from_search_arguments(
+        &self,
+        arguments: &str,
+    ) -> Option<Vec<McpToolTarget>> {
+        let params = Self::parse_tool_arguments(arguments).ok()?;
+        let query = Self::tool_arg_ref(params.as_ref(), "query")?;
+        let limit = Self::tool_arg_ref(params.as_ref(), "limit")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(5)
+            .clamp(1, 10);
+        let server_filter = Self::tool_arg_ref(params.as_ref(), "server").map(|s| s.to_lowercase());
+        let manager = self.mcp_manager.as_ref()?;
+        let summaries = manager.list_tool_summaries().await.ok()?;
+
+        let mut scored = summaries
+            .into_iter()
+            .filter(|summary| {
+                server_filter
+                    .as_ref()
+                    .map_or(true, |server| summary.server_name.to_lowercase() == *server)
+            })
+            .map(|summary| {
+                let desc = summary.description.clone().unwrap_or_default();
+                let score =
+                    Self::mcp_search_score(query, &summary.server_name, &summary.tool_name, &desc);
+                (score, summary)
+            })
+            .filter(|(score, _)| *score > 0)
+            .collect::<Vec<_>>();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let targets = scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, summary)| McpToolTarget {
+                server_name: summary.server_name,
+                tool_name: summary.tool_name,
+            })
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            None
+        } else {
+            Some(targets)
+        }
+    }
+
+    async fn execute_mcp_dynamic_tool(
+        &self,
+        tool_name: &str,
+        params: Option<&HashMap<String, String>>,
+        input_text: &str,
+    ) -> Result<(String, bool), AgentError> {
+        let target = Self::parse_mcp_dynamic_tool_name(tool_name)?;
+        let manager = self
+            .mcp_manager
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidConfig("MCP manager not configured".into()))?;
+        let client = manager
+            .get_client(&target.server_name)
+            .await
+            .ok_or_else(|| {
+                AgentError::InvalidConfig(format!("MCP client '{}' not found", target.server_name))
+            })?;
+
+        let mut arguments = serde_json::Map::new();
+        if let Some(params) = params {
+            for (key, value) in params {
+                let parsed = serde_json::from_str::<serde_json::Value>(value)
+                    .unwrap_or_else(|_| serde_json::Value::String(value.clone()));
+                arguments.insert(key.clone(), parsed);
+            }
+        }
+
+        let skill_id = format!("mcp:{}/{}", target.server_name, target.tool_name);
+        Self::apply_mcp_default_params(&skill_id, &mut arguments);
+
+        let tool_schema = manager
+            .get_tool_schema(&target.server_name, &target.tool_name)
+            .await
+            .map_err(|e| AgentError::Execution(format!("Failed to load MCP tool schema: {}", e)))?
+            .input_schema;
+        if let Err(e) = crate::mcp::skill_bridge::validate_tool_arguments(&tool_schema, &arguments)
+        {
+            return Ok((
+                format!(
+                    "MCP parameter validation failed.\nTool: {}/{}\nArguments: {}\nValidation \
+                     error: {}\n\nRetry with corrected arguments or ask one concise clarification \
+                     question if the missing information cannot be inferred.",
+                    target.server_name,
+                    target.tool_name,
+                    serde_json::Value::Object(arguments),
+                    e
+                ),
+                false,
+            ));
+        }
+
+        if Self::is_high_risk_mcp_skill(&skill_id)
+            && !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let params_json = serde_json::Value::Object(arguments.clone());
+            if let Some(ref gate) = self.approval_gate {
+                match gate.evaluate(&skill_id, &params_json, &Self::approval_env()) {
+                    crate::security::ApprovalResult::Approved
+                    | crate::security::ApprovalResult::AutoApproved { .. } => {}
+                    crate::security::ApprovalResult::Rejected { reason } => {
+                        let request = gate.build_request(&skill_id, &params_json, input_text);
+                        let req_id = request.request_id.clone();
+                        {
+                            let mut pending = self.pending_approvals.write().await;
+                            pending.insert(req_id, request);
+                        }
+                        return Ok((
+                            format!(
+                                "{}\n\n{}\n\n⚠️ \
+                                 这是一个高风险操作，需要您的确认后才能执行。\\\
+                                 n请回复「确认」或「同意」来执行此操作。",
+                                Self::generate_action_preview(
+                                    &skill_id,
+                                    &target.tool_name,
+                                    &arguments
+                                ),
+                                reason
+                            ),
+                            false,
+                        ));
+                    }
+                    _ => {
+                        let request = gate.build_request(&skill_id, &params_json, input_text);
+                        let req_id = request.request_id.clone();
+                        {
+                            let mut pending = self.pending_approvals.write().await;
+                            pending.insert(req_id, request);
+                        }
+                        return Ok((
+                            format!(
+                                "{}\n\n⚠️ 这是一个高风险操作，需要您的确认后才能执行。\\\
+                                 n请回复「确认」或「同意」来执行此操作。",
+                                Self::generate_action_preview(
+                                    &skill_id,
+                                    &target.tool_name,
+                                    &arguments
+                                )
+                            ),
+                            false,
+                        ));
+                    }
+                }
+            }
+        }
+
+        let result = client
+            .call_tool(
+                target.tool_name.clone(),
+                if arguments.is_empty() {
+                    None
+                } else {
+                    Some(arguments)
+                },
+            )
+            .await
+            .map_err(|e| AgentError::Execution(format!("MCP tool call failed: {}", e)))?;
+
+        let output = result
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                crate::mcp::types::ToolContent::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if result.is_error {
+            return Ok((
+                format_mcp_call_error(
+                    &skill_id,
+                    if output.is_empty() {
+                        "unknown error"
+                    } else {
+                        output.as_str()
+                    },
+                ),
+                false,
+            ));
+        }
+
+        Ok((Self::truncate_tool_output(&output, 4000), true))
     }
 
     async fn resolve_native_skill(
@@ -1186,6 +1575,10 @@ impl Agent {
 
     fn tool_arg<'a>(params: &'a Option<HashMap<String, String>>, key: &str) -> Option<&'a str> {
         params.as_ref().and_then(|p| p.get(key)).map(|s| s.as_str())
+    }
+
+    fn tool_arg_ref<'a>(params: Option<&'a HashMap<String, String>>, key: &str) -> Option<&'a str> {
+        params.and_then(|p| p.get(key)).map(|s| s.as_str())
     }
 
     fn should_skip_walk_entry(path: &Path) -> bool {
@@ -1853,6 +2246,7 @@ impl Agent {
             return "No skill registry is configured.".to_string();
         };
         let mut skills = registry.list_enabled().await;
+        skills.retain(|skill| !skill.skill.id.starts_with("mcp:"));
         skills.sort_by(|a, b| a.skill.id.cmp(&b.skill.id));
         if skills.is_empty() {
             return "No enabled skills are available.".to_string();
@@ -1902,6 +2296,14 @@ impl Agent {
         let tool_name = tool_call.function.name.as_str();
         let params = Self::parse_tool_arguments(&tool_call.function.arguments)?;
         match tool_name {
+            "mcp_tool_search" => self
+                .execute_mcp_tool_search(params.as_ref())
+                .await
+                .map(|(output, _)| output),
+            _ if Self::is_mcp_dynamic_tool_name(tool_name) => self
+                .execute_mcp_dynamic_tool(tool_name, params.as_ref(), input_text)
+                .await
+                .map(|(output, _)| output),
             "activate_skill" => {
                 let skill_id = Self::tool_arg(&params, "skill_id")
                     .ok_or_else(|| {
@@ -2570,7 +2972,7 @@ impl Agent {
         Ok(Some(summary))
     }
 
-    /// Execute a tool by name (skill registry or MCP fallback)
+    /// Execute a non-MCP tool by name.
     async fn execute_tool_by_name(
         &self,
         tool_name: &str,
@@ -2581,40 +2983,6 @@ impl Agent {
             if let Some(skill) = registry.get(tool_name).await {
                 let result = self.execute_registered_skill(&skill, input, None).await?;
                 return Ok(result.output);
-            }
-        }
-
-        // Try MCP bridge
-        if let Some((server, tool)) = crate::mcp::skill_bridge::parse_mcp_skill_id(tool_name) {
-            if let Some(mcp) = &self.mcp_manager {
-                if let Some(client) = mcp.get_client(server).await {
-                    let args = if input.is_empty() {
-                        None
-                    } else {
-                        let mut map = serde_json::Map::new();
-                        map.insert(
-                            "input".to_string(),
-                            serde_json::Value::String(input.to_string()),
-                        );
-                        Some(map)
-                    };
-                    match client.call_tool(tool, args).await {
-                        Ok(result) => {
-                            let text = result
-                                .content
-                                .first()
-                                .map(|c| match c {
-                                    crate::mcp::types::ToolContent::Text { text } => text.clone(),
-                                    _ => String::new(),
-                                })
-                                .unwrap_or_default();
-                            return Ok(text);
-                        }
-                        Err(e) => {
-                            return Err(AgentError::Execution(format!("MCP tool failed: {}", e)))
-                        }
-                    }
-                }
             }
         }
 
@@ -2843,16 +3211,15 @@ impl Agent {
                 communication::PlatformType::Custom,
                 format!(
                     "[System Context] You have access to the following \
-                     skills.\n\n{}\n\nINSTRUCTION:\n1. When a skill matches the user request, \
-                     reply ONLY with SKILL:<id>|{{\"key\":\"value\"}} using REAL values.\n2. If \
-                     no skill matches, answer directly.\n3. NEVER analyze, explain, or think out \
-                     loud. NEVER list parameters. NEVER use placeholders like <id> or \
-                     {{\"param\":\"value\"}}.\n4. If info is missing, ask in ONE short \
-                     sentence.\n\nEXAMPLES:\nUser: What's the weather in Beijing?\nOutput: \
-                     SKILL:weather_assistant|{{\"city\":\"Beijing\"}}\n\nUser: Buy 0.01 \
-                     BTC\nOutput: \
-                     SKILL:mcp:alpaca/place_crypto_order|{{\"symbol\":\"BTC/USD\",\"side\":\"buy\"\
-                     ,\"qty\":\"0.01\"}}",
+                     skills.\n\n{}\n\nINSTRUCTION:\n1. These skills are context packs. MCP tools \
+                     are not skills; use mcp_tool_search when an external MCP capability is \
+                     needed.\n2. When a non-MCP skill matches the user request, reply ONLY with \
+                     SKILL:<id>|{{\"key\":\"value\"}} using REAL values.\n2. If no skill matches, \
+                     answer directly.\n3. NEVER analyze, explain, or think out loud. NEVER list \
+                     parameters. NEVER use placeholders like <id> or {{\"param\":\"value\"}}.\n4. \
+                     If info is missing, ask in ONE short sentence.\n\nEXAMPLES:\nUser: What's \
+                     the weather in Beijing?\nOutput: \
+                     SKILL:weather_assistant|{{\"city\":\"Beijing\"}}",
                     catalog
                 ),
             )];
@@ -3686,7 +4053,8 @@ impl Agent {
         let (input_text, mut extra_params, history, memory_context, weather_data, session_key) =
             self.extract_react_input(task);
         let cancel_rx = Self::cancellation_receiver(&session_key, &extra_params).await;
-        let tools = self.builtin_react_tools();
+        let mut tools = self.builtin_react_tools();
+        self.add_mcp_tool_search_if_available(&mut tools);
         let mut loop_messages = self
             .build_react_messages(
                 &input_text,
@@ -3887,6 +4255,32 @@ impl Agent {
                             format!("Updated active skill contexts:\n{}", active),
                             metadata,
                         ));
+                    }
+                }
+
+                if Self::is_mcp_search_tool(&tool_call.function.name) {
+                    if let Some(targets) = self
+                        .mcp_targets_from_search_arguments(&tool_call.function.arguments)
+                        .await
+                    {
+                        for target in targets {
+                            match self.mcp_tool_definition(&target).await {
+                                Ok(definition) => {
+                                    if !tools.iter().any(|tool| tool.name == definition.name) {
+                                        tools.push(definition);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to dynamically load MCP tool schema for {}/{}: {}",
+                                        target.server_name, target.tool_name, e
+                                    );
+                                }
+                            }
+                        }
+                        if let Ok(json) = serde_json::to_string(&tools) {
+                            extra_params.insert("tools_json".to_string(), json);
+                        }
                     }
                 }
             }
@@ -5494,93 +5888,6 @@ impl Agent {
                             }
                         }
                     }
-                } else if let Some((server_name, tool_name)) =
-                    crate::mcp::skill_bridge::parse_mcp_skill_id(skill_id)
-                {
-                    // 🆕 FIX: Fallback for MCP skills not found in registry.
-                    // Execute directly via MCP manager without requiring registry entry.
-                    info!(
-                        "Gateway matched MCP skill '{}' not in registry, executing directly via \
-                         MCP client",
-                        skill_id
-                    );
-                    if let Some(ref mcp) = self.mcp_manager {
-                        if let Some(client) = mcp.get_client(server_name).await {
-                            let mut arguments = serde_json::Map::new();
-                            if !input_text.is_empty() {
-                                match serde_json::from_str::<
-                                    serde_json::Map<String, serde_json::Value>,
-                                >(&input_text)
-                                {
-                                    Ok(map) => arguments = map,
-                                    Err(_) => {
-                                        arguments.insert(
-                                            "query".to_string(),
-                                            serde_json::Value::String(input_text.to_string()),
-                                        );
-                                    }
-                                }
-                            }
-                            let args = if arguments.is_empty() {
-                                None
-                            } else {
-                                Some(arguments)
-                            };
-                            match client.call_tool(tool_name, args).await {
-                                Ok(result) => {
-                                    let output = if result.is_error {
-                                        let error_text = result
-                                            .content
-                                            .iter()
-                                            .filter_map(|c| match c {
-                                                crate::mcp::types::ToolContent::Text { text } => {
-                                                    Some(text.clone())
-                                                }
-                                                _ => None,
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join("\n");
-                                        return Ok((
-                                            format_mcp_call_error(skill_id, &error_text),
-                                            vec![],
-                                        ));
-                                    } else {
-                                        result
-                                            .content
-                                            .iter()
-                                            .filter_map(|c| match c {
-                                                crate::mcp::types::ToolContent::Text { text } => {
-                                                    Some(text.clone())
-                                                }
-                                                _ => None,
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join("\n")
-                                    };
-                                    let output = self.synthesize_skill_output(
-                                        &input_text,
-                                        &output,
-                                        skill_id,
-                                    );
-                                    return Ok((output, vec![]));
-                                }
-                                Err(e) => {
-                                    warn!("Direct MCP tool call for '{}' failed: {}", skill_id, e);
-                                    return Ok((
-                                        format_mcp_call_error(skill_id, &e.to_string()),
-                                        vec![],
-                                    ));
-                                }
-                            }
-                        } else {
-                            warn!(
-                                "MCP client '{}' not found for skill '{}'",
-                                server_name, skill_id
-                            );
-                        }
-                    } else {
-                        warn!("MCP manager not configured for skill '{}'", skill_id);
-                    }
                 } else {
                     warn!(
                         "Gateway matched skill '{}' but not found in registry",
@@ -5902,6 +6209,7 @@ impl Agent {
         let mut tool_name_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let mut native_tools: Vec<communication::ToolDefinition> = self.builtin_workspace_tools();
+        self.add_mcp_tool_search_if_available(&mut native_tools);
         if let Some(ref registry) = self.skill_registry {
             let all_skills = registry.list_all().await;
             if !all_skills.is_empty() && top_n > 0 {
@@ -6616,6 +6924,36 @@ impl Agent {
                         }
                     };
                     loop_messages.push(Self::tool_result_message(&tool_call.id, output));
+
+                    if Self::is_mcp_search_tool(&tool_call.function.name) {
+                        if let Some(targets) = self
+                            .mcp_targets_from_search_arguments(&tool_call.function.arguments)
+                            .await
+                        {
+                            for target in targets {
+                                match self.mcp_tool_definition(&target).await {
+                                    Ok(definition) => {
+                                        if !native_tools
+                                            .iter()
+                                            .any(|tool| tool.name == definition.name)
+                                        {
+                                            native_tools.push(definition);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to dynamically load MCP tool schema for \
+                                             {}/{}: {}",
+                                            target.server_name, target.tool_name, e
+                                        );
+                                    }
+                                }
+                            }
+                            if let Ok(json) = serde_json::to_string(&native_tools) {
+                                extra_params.insert("tools_json".to_string(), json);
+                            }
+                        }
+                    }
                 }
                 if final_text == "⏹️ 已停止当前任务。" {
                     break;
@@ -7254,14 +7592,25 @@ impl Agent {
     ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
         let start_time = std::time::Instant::now();
         let skill_id = registered_skill.skill.id.clone();
-        let parsed_mcp_skill =
-            crate::mcp::skill_bridge::parse_mcp_skill_id(&registered_skill.skill.id);
+        if skill_id.starts_with("mcp:") {
+            return Ok(skills::executor::SkillExecutionResult {
+                task_id: skill_id.clone(),
+                success: false,
+                output: format!(
+                    "MCP tool '{}' is no longer executable as a skill. Use mcp_tool_search so the \
+                     runtime can load the MCP tool schema dynamically, then call the dynamically \
+                     exposed MCP tool.",
+                    skill_id
+                ),
+                structured_output: None,
+                execution_time_ms: start_time.elapsed().as_millis() as u64,
+            });
+        }
+        let parsed_mcp_skill: Option<(&str, &str)> = None;
 
         // 🆕 OPTIMIZATION PHASE 1: Approval gate for destructive operations
         // 🆕 FIX (Plan C): Store pending approval for multi-step user confirmation
-        if parsed_mcp_skill.is_none()
-            && !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if !self.skip_approval.load(std::sync::atomic::Ordering::SeqCst) {
             if let Some(ref gate) = self.approval_gate {
                 let env = Self::approval_env();
                 let params_json = parameters

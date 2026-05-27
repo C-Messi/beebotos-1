@@ -8,7 +8,6 @@ use axum::extract::{Path, State};
 use axum::Json;
 use gateway::middleware::{require_any_role, AuthUser};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
 
 use crate::error::GatewayError;
 use crate::AppState;
@@ -60,14 +59,6 @@ pub struct McpCallToolResponse {
     pub success: bool,
     pub output: String,
     pub is_error: bool,
-}
-
-/// Bridge response
-#[derive(Debug, Serialize)]
-pub struct McpBridgeResponse {
-    pub success: bool,
-    pub registered: usize,
-    pub message: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -200,41 +191,20 @@ pub async fn call_tool(
     }))
 }
 
-/// Manually trigger MCP → Skill bridge.
+/// Legacy bridge endpoint.
+///
+/// MCP tools are no longer registered as skills. Agents use MCP tool search
+/// mode: expose `mcp_tool_search` first, then dynamically load selected tool
+/// schemas.
 /// Admin only.
 pub async fn bridge(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     user: AuthUser,
-) -> Result<Json<McpBridgeResponse>, GatewayError> {
+) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["admin"])?;
-
-    let manager = state
-        .mcp_manager
-        .as_ref()
-        .ok_or_else(|| GatewayError::service_unavailable("MCP", "MCP manager not initialized"))?;
-
-    let registry = state.skill_registry.as_ref().ok_or_else(|| {
-        GatewayError::service_unavailable("SkillRegistry", "Skill registry not initialized")
-    })?;
-
-    match beebotos_agents::mcp::skill_bridge::McpSkillBridge::bridge_all(manager, registry).await {
-        Ok(count) => {
-            info!(
-                "MCP bridge triggered by admin '{}': {} tool(s) registered",
-                user.claims.sub, count
-            );
-            Ok(Json(McpBridgeResponse {
-                success: true,
-                registered: count,
-                message: format!("{} MCP tool(s) bridged to skills", count),
-            }))
-        }
-        Err(e) => {
-            warn!("MCP bridge failed: {}", e);
-            Err(GatewayError::Internal {
-                message: format!("MCP bridge failed: {}", e),
-                correlation_id: uuid::Uuid::new_v4().to_string(),
-            })
-        }
-    }
+    Ok(Json(serde_json::json!({
+        "success": false,
+        "registered": 0,
+        "message": "MCP Skill Bridge has been removed. MCP tools are discovered through mcp_tool_search and loaded dynamically."
+    })))
 }

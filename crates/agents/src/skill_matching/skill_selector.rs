@@ -209,12 +209,24 @@ impl SkillSelector {
         } else {
             format!("{} {}", query_summary, query)
         };
-        let mut scored = self.registry.search_scored(&recall_query).await;
+        let mut scored: Vec<_> = self
+            .registry
+            .search_scored(&recall_query)
+            .await
+            .into_iter()
+            .filter(|(_, skill)| !skill.skill.id.starts_with("mcp:"))
+            .collect();
 
         // 🆕 FIX: If search returns empty, fallback to enabled skills so ranking
         // still has candidates. All fallback skills get score 0.
         if scored.is_empty() {
-            let fallback = self.registry.list_enabled().await;
+            let fallback: Vec<_> = self
+                .registry
+                .list_enabled()
+                .await
+                .into_iter()
+                .filter(|skill| !skill.skill.id.starts_with("mcp:"))
+                .collect();
             scored = fallback.into_iter().map(|s| (0, s)).collect();
         }
 
@@ -232,12 +244,6 @@ impl SkillSelector {
         });
 
         let mut candidates: Vec<RegisteredSkill> = Vec::new();
-        for skill in self.domain_pinned_candidates(&recall_query).await {
-            if !candidates.iter().any(|s| s.skill.id == skill.skill.id) {
-                candidates.push(skill);
-            }
-        }
-
         for (_, skill) in scored {
             if !candidates.iter().any(|s| s.skill.id == skill.skill.id) {
                 candidates.push(skill);
@@ -248,71 +254,6 @@ impl SkillSelector {
         candidates.truncate(self.max_candidates);
 
         Ok(candidates)
-    }
-
-    async fn domain_pinned_candidates(&self, query: &str) -> Vec<RegisteredSkill> {
-        let lower = query.to_lowercase();
-        let has_crypto = lower.contains("btc")
-            || lower.contains("bitcoin")
-            || lower.contains("比特币")
-            || lower.contains("eth")
-            || lower.contains("ethereum")
-            || lower.contains("以太坊")
-            || lower.contains("crypto")
-            || lower.contains("加密");
-        let has_order = lower.contains("下单")
-            || lower.contains("开单")
-            || lower.contains("开一单")
-            || lower.contains("买入")
-            || lower.contains("卖出")
-            || lower.contains("购买")
-            || lower.contains("order")
-            || lower.contains("buy")
-            || lower.contains("sell")
-            || lower.contains("trade");
-        let has_position = lower.contains("持仓")
-            || lower.contains("仓位")
-            || lower.contains("position")
-            || lower.contains("portfolio");
-        let has_market_data = lower.contains("行情")
-            || lower.contains("报价")
-            || lower.contains("价格")
-            || lower.contains("quote")
-            || lower.contains("snapshot")
-            || lower.contains("market")
-            || lower.contains("price");
-
-        let mut ids: Vec<&str> = Vec::new();
-        if has_crypto && has_order {
-            ids.extend([
-                "mcp:alpaca/place_crypto_order",
-                "mcp:alpaca/get_crypto_latest_quote",
-                "mcp:alpaca/get_crypto_snapshot",
-                "mcp:alpaca/get_all_positions",
-            ]);
-        } else if has_crypto && has_market_data {
-            ids.extend([
-                "mcp:alpaca/get_crypto_snapshot",
-                "mcp:alpaca/get_crypto_latest_quote",
-                "mcp:alpaca/get_crypto_latest_trade",
-            ]);
-        }
-        if has_position {
-            ids.extend([
-                "mcp:alpaca/get_all_positions",
-                "mcp:alpaca/get_open_position",
-            ]);
-        }
-
-        let mut out = Vec::new();
-        for id in ids {
-            if let Some(skill) = self.registry.get(id).await {
-                if skill.enabled && !out.iter().any(|s: &RegisteredSkill| s.skill.id == id) {
-                    out.push(skill);
-                }
-            }
-        }
-        out
     }
 
     fn apply_domain_score_adjustments(
