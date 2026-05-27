@@ -163,6 +163,98 @@ impl GatewayAgentRuntime {
         Ok(runtime)
     }
 
+    async fn get_or_build_skill_catalog(&self, agent_label: &str) -> Option<String> {
+        let cached = self.skill_catalog.read().await.clone();
+        if let Some(catalog) = cached {
+            info!("Using cached skill/MCP catalog for {}", agent_label);
+            return Some(catalog);
+        }
+
+        let mut discovery = crate::skills::SkillDiscovery::new();
+        discovery.add_path("skills");
+        let metas = discovery.scan().await;
+        info!(
+            "SkillDiscovery scanned {} skills for {}",
+            metas.len(),
+            agent_label
+        );
+        for m in &metas {
+            info!("  - skill: {} (id={}, kind={:?})", m.name, m.id, m.kind);
+        }
+
+        let mut lines: Vec<String> = metas
+            .iter()
+            .map(|m| format!("- {} ({}): {}", m.id, m.category, m.description))
+            .collect();
+
+        // Include non-MCP skills from registry. MCP entries are listed separately
+        // below by name only, then loaded via mcp_tool_search when needed.
+        if let Some(ref registry) = self.skill_registry {
+            let registered = registry.list_all().await;
+            for r in &registered {
+                let id = &r.skill.id;
+                if id.starts_with("mcp:") {
+                    continue;
+                }
+                let desc = &r.skill.manifest.description;
+                if !lines.iter().any(|l| l.starts_with(&format!("- {} ", id))) {
+                    lines.push(format!("- {} ({}): {}", id, r.category, desc));
+                }
+            }
+            info!(
+                "Added {} skills from registry to catalog (total {})",
+                registered.len(),
+                lines.len()
+            );
+        }
+
+        if let Some(ref manager) = self.mcp_manager {
+            match manager.list_tool_summaries().await {
+                Ok(mut summaries) if !summaries.is_empty() => {
+                    summaries.sort_by(|a, b| {
+                        (&a.server_name, &a.tool_name).cmp(&(&b.server_name, &b.tool_name))
+                    });
+                    lines.push(
+                        "\n[MCP Tools]\nMCP tool names are discovery handles. To use one, call \
+                         mcp_tool_search with tool_name set to the exact mcp:server/tool name, \
+                         then call the dynamically exposed tool after its schema is loaded."
+                            .to_string(),
+                    );
+                    let total = summaries.len();
+                    for summary in summaries.iter().take(200) {
+                        let display_name =
+                            format!("mcp:{}/{}", summary.server_name, summary.tool_name);
+                        let desc = summary
+                            .description
+                            .as_deref()
+                            .unwrap_or("")
+                            .chars()
+                            .take(180)
+                            .collect::<String>();
+                        if desc.trim().is_empty() {
+                            lines.push(format!("- {}", display_name));
+                        } else {
+                            lines.push(format!("- {}: {}", display_name, desc));
+                        }
+                    }
+                    if total > 200 {
+                        lines.push(format!("...{} more MCP tools omitted.", total - 200));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => warn!("Failed to add MCP tool catalog for {}: {}", agent_label, e),
+            }
+        }
+
+        let catalog = if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
+        };
+        *self.skill_catalog.write().await = catalog.clone();
+        catalog
+    }
+
     /// 🆕 Recover agents after all runtime dependencies (including MCP manager)
     /// are configured. Call this after with_mcp() and with_skill_registry()
     /// to ensure recovered agents have access to MCP tools.
@@ -389,62 +481,11 @@ impl GatewayAgentRuntime {
             builder = builder.with_llm_interface(llm.clone());
         }
 
-        // 🆕 FIX: Rebuild skill catalog for recovered agent so it can discover and use
-        // skills 🟢 P2 OPTIMIZE: Use cached catalog if available to avoid
-        // repeated filesystem scans
-        let skill_catalog = {
-            let cached = self.skill_catalog.read().await.clone();
-            if let Some(catalog) = cached {
-                info!(
-                    "Using cached skill catalog for recovered agent {}",
-                    agent_id
-                );
-                Some(catalog)
-            } else {
-                let mut discovery = crate::skills::SkillDiscovery::new();
-                discovery.add_path("skills");
-                let metas = discovery.scan().await;
-                info!(
-                    "SkillDiscovery scanned {} skills for recovered agent {}",
-                    metas.len(),
-                    agent_id
-                );
-                for m in &metas {
-                    info!("  - skill: {} (id={}, kind={:?})", m.name, m.id, m.kind);
-                }
-                let mut lines: Vec<String> = metas
-                    .iter()
-                    .map(|m| format!("- {} ({}): {}", m.id, m.category, m.description))
-                    .collect();
-                // Also include non-MCP skills from registry. MCP tools are
-                // exposed through mcp_tool_search, not as skill catalog entries.
-                if let Some(ref registry) = self.skill_registry {
-                    let registered = registry.list_all().await;
-                    for r in &registered {
-                        let id = &r.skill.id;
-                        if id.starts_with("mcp:") {
-                            continue;
-                        }
-                        let desc = &r.skill.manifest.description;
-                        if !lines.iter().any(|l| l.starts_with(&format!("- {} ", id))) {
-                            lines.push(format!("- {} ({}): {}", id, r.category, desc));
-                        }
-                    }
-                    info!(
-                        "Added {} skills from registry to catalog (total {})",
-                        registered.len(),
-                        lines.len()
-                    );
-                }
-                let catalog = if lines.is_empty() {
-                    None
-                } else {
-                    Some(lines.join("\n"))
-                };
-                *self.skill_catalog.write().await = catalog.clone();
-                catalog
-            }
-        };
+        // Rebuild skill/MCP catalog for recovered agent so it can discover names
+        // while loading MCP schemas only on demand.
+        let skill_catalog = self
+            .get_or_build_skill_catalog(&format!("recovered agent {}", agent_id))
+            .await;
         if let Some(catalog) = skill_catalog {
             builder = builder.with_skill_catalog(catalog);
         }
@@ -912,59 +953,10 @@ impl AgentRuntime for GatewayAgentRuntime {
                 .with_permission("planning:execute")
                 .with_permission("skill:call");
 
-            // 🆕 FIX: Build skill catalog from SkillDiscovery for global LLM context
-            // injection 🟢 P2 OPTIMIZE: Use cached catalog if available to
-            // avoid repeated filesystem scans
-            let skill_catalog = {
-                let cached = self.skill_catalog.read().await.clone();
-                if let Some(catalog) = cached {
-                    info!("Using cached skill catalog for agent {}", agent_id);
-                    Some(catalog)
-                } else {
-                    let mut discovery = crate::skills::SkillDiscovery::new();
-                    discovery.add_path("skills");
-                    let metas = discovery.scan().await;
-                    info!(
-                        "SkillDiscovery scanned {} skills for agent {}",
-                        metas.len(),
-                        agent_id
-                    );
-                    for m in &metas {
-                        info!("  - skill: {} (id={}, kind={:?})", m.name, m.id, m.kind);
-                    }
-                    let mut lines: Vec<String> = metas
-                        .iter()
-                        .map(|m| format!("- {} ({}): {}", m.id, m.category, m.description))
-                        .collect();
-                    // Also include non-MCP skills from registry. MCP tools are
-                    // exposed through mcp_tool_search, not as skill catalog entries.
-                    if let Some(ref registry) = self.skill_registry {
-                        let registered = registry.list_all().await;
-                        for r in &registered {
-                            let id = &r.skill.id;
-                            if id.starts_with("mcp:") {
-                                continue;
-                            }
-                            let desc = &r.skill.manifest.description;
-                            if !lines.iter().any(|l| l.starts_with(&format!("- {} ", id))) {
-                                lines.push(format!("- {} ({}): {}", id, r.category, desc));
-                            }
-                        }
-                        info!(
-                            "Added {} skills from registry to catalog (total {})",
-                            registered.len(),
-                            lines.len()
-                        );
-                    }
-                    let catalog = if lines.is_empty() {
-                        None
-                    } else {
-                        Some(lines.join("\n"))
-                    };
-                    *self.skill_catalog.write().await = catalog.clone();
-                    catalog
-                }
-            };
+            // Build skill/MCP catalog for global LLM context injection.
+            let skill_catalog = self
+                .get_or_build_skill_catalog(&format!("agent {}", agent_id))
+                .await;
 
             let mut builder = KernelAgentBuilder::new()
                 .with_config(agent_config.clone())

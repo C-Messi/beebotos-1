@@ -30,8 +30,7 @@ pub fn ContentRenderer(
     /// 附件列表
     #[prop(optional)]
     attachments: Vec<Attachment>,
-    #[prop(optional)]
-    sanitize_internal_errors: bool,
+    #[prop(optional)] sanitize_internal_errors: bool,
 ) -> impl IntoView {
     let content = display_content(&content, sanitize_internal_errors);
     let content_type = detect_content_type(&content);
@@ -210,7 +209,9 @@ mod tests {
 
     #[test]
     fn llm_internal_error_is_not_rendered_raw() {
-        let raw = "Execution error: LLM ReAct turn failed: Execution error: LLM call failed: Internal error: LLM request failed: Provider error: All providers failed or are unavailable (correlation_id: ddcde277-e26c-452f-afb5-fdb844e03a0f)";
+        let raw = "Execution error: LLM ReAct turn failed: Execution error: LLM call failed: \
+                   Internal error: LLM request failed: Provider error: All providers failed or \
+                   are unavailable (correlation_id: ddcde277-e26c-452f-afb5-fdb844e03a0f)";
 
         let display = display_content(raw, true);
 

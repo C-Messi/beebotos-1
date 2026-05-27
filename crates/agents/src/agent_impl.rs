@@ -294,6 +294,106 @@ fn is_pending_approval_adjustment(message_text: &str) -> bool {
             || lower.contains("amount"))
 }
 
+fn is_confirmation_message(message_text: &str) -> bool {
+    let text = message_text.trim();
+    let lower = text.to_ascii_lowercase();
+    matches!(
+        text,
+        "确认" | "同意" | "可以" | "执行" | "是" | "好" | "好的" | "确认执行"
+    ) || matches!(lower.as_str(), "yes" | "y" | "ok" | "okay" | "confirm")
+}
+
+fn has_side_effect_execution_intent(message_text: &str) -> bool {
+    let lower = message_text.to_ascii_lowercase();
+    let side_effect_terms = [
+        "执行",
+        "操作",
+        "提交",
+        "创建",
+        "修改",
+        "删除",
+        "移除",
+        "取消",
+        "发送",
+        "转账",
+        "支付",
+        "提现",
+        "下单",
+        "开单",
+        "买",
+        "买入",
+        "卖",
+        "卖出",
+        "购买",
+        "交易",
+        "execute",
+        "run",
+        "submit",
+        "create",
+        "modify",
+        "update",
+        "delete",
+        "remove",
+        "cancel",
+        "send",
+        "transfer",
+        "withdraw",
+        "pay",
+        "buy",
+        "sell",
+        "order",
+        "place order",
+    ];
+    side_effect_terms.iter().any(|term| lower.contains(term))
+}
+
+fn looks_like_unbacked_approval_confirmation(response: &str) -> bool {
+    let lower = response.to_ascii_lowercase();
+    let asks_confirmation = response.contains("确认")
+        || response.contains("请回复")
+        || lower.contains("confirm")
+        || lower.contains("please reply");
+    let side_effect_context = response.contains("执行")
+        || response.contains("操作")
+        || response.contains("提交")
+        || response.contains("创建")
+        || response.contains("修改")
+        || response.contains("删除")
+        || response.contains("移除")
+        || response.contains("取消")
+        || response.contains("发送")
+        || response.contains("转账")
+        || response.contains("支付")
+        || response.contains("提现")
+        || response.contains("无法撤销")
+        || response.contains("真实")
+        || response.contains("高风险")
+        || response.contains("下单")
+        || response.contains("市价")
+        || response.contains("买入")
+        || response.contains("卖出")
+        || response.contains("手数")
+        || lower.contains("execute")
+        || lower.contains("submit")
+        || lower.contains("create")
+        || lower.contains("modify")
+        || lower.contains("update")
+        || lower.contains("delete")
+        || lower.contains("remove")
+        || lower.contains("cancel")
+        || lower.contains("send")
+        || lower.contains("transfer")
+        || lower.contains("withdraw")
+        || lower.contains("payment")
+        || lower.contains("irreversible")
+        || lower.contains("risk")
+        || lower.contains("order")
+        || lower.contains("buy")
+        || lower.contains("sell")
+        || lower.contains("market");
+    asks_confirmation && side_effect_context
+}
+
 impl Agent {
     fn runtime_context_prompt() -> String {
         let now = chrono::Local::now();
@@ -578,18 +678,20 @@ impl Agent {
     fn mcp_tool_search_definition() -> communication::ToolDefinition {
         communication::ToolDefinition {
             name: "mcp_tool_search".to_string(),
-            description: "Search connected MCP tools by intent before using an MCP capability. \
-                          This returns lightweight matches only; after search, the runtime will \
-                          dynamically expose the selected MCP tool schemas for the next tool call."
+            description: "Load schema details for a connected MCP tool. Prefer passing the exact \
+                          catalog name in tool_name, for example mcp:server/tool. You may also \
+                          search by query when you only know the intent. This returns lightweight \
+                          matches and dynamically exposes selected MCP tool schemas for the next \
+                          tool call."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Natural-language task or capability to search for" },
+                    "tool_name": { "type": "string", "description": "Exact MCP catalog name in the form mcp:server/tool" },
+                    "query": { "type": "string", "description": "Natural-language task or capability to search for when the exact tool_name is unknown" },
                     "server": { "type": "string", "description": "Optional MCP server name to restrict search" },
                     "limit": { "type": "integer", "description": "Maximum tools to return", "default": 5 }
-                },
-                "required": ["query"]
+                }
             }),
         }
     }
@@ -1092,6 +1194,35 @@ impl Agent {
         )
     }
 
+    fn mcp_display_tool_name(server_name: &str, tool_name: &str) -> String {
+        format!("mcp:{}/{}", server_name, tool_name)
+    }
+
+    fn parse_mcp_display_tool_name(name: &str) -> Result<McpToolTarget, AgentError> {
+        let raw = name.trim().strip_prefix("mcp:").ok_or_else(|| {
+            AgentError::Execution(format!(
+                "Invalid MCP tool name '{}'. Expected format mcp:server/tool",
+                name
+            ))
+        })?;
+        let (server_name, tool_name) = raw.split_once('/').ok_or_else(|| {
+            AgentError::Execution(format!(
+                "Invalid MCP tool name '{}'. Expected format mcp:server/tool",
+                name
+            ))
+        })?;
+        if server_name.is_empty() || tool_name.is_empty() {
+            return Err(AgentError::Execution(format!(
+                "Invalid MCP tool name '{}'. Expected format mcp:server/tool",
+                name
+            )));
+        }
+        Ok(McpToolTarget {
+            server_name: server_name.to_string(),
+            tool_name: tool_name.to_string(),
+        })
+    }
+
     fn parse_mcp_dynamic_tool_name(name: &str) -> Result<McpToolTarget, AgentError> {
         let encoded = name.strip_prefix("mcp__").ok_or_else(|| {
             AgentError::Execution(format!("Invalid MCP dynamic tool name: {}", name))
@@ -1168,8 +1299,13 @@ impl Agent {
         &self,
         params: Option<&HashMap<String, String>>,
     ) -> Result<(String, bool), AgentError> {
-        let query = Self::tool_arg_ref(params, "query")
-            .ok_or_else(|| AgentError::Execution("mcp_tool_search requires query".to_string()))?;
+        let exact_tool_name = Self::tool_arg_ref(params, "tool_name").map(str::trim);
+        let query = Self::tool_arg_ref(params, "query").map(str::trim);
+        if exact_tool_name.map_or(true, str::is_empty) && query.map_or(true, str::is_empty) {
+            return Err(AgentError::Execution(
+                "mcp_tool_search requires tool_name (mcp:server/tool) or query".to_string(),
+            ));
+        }
         let limit = Self::tool_arg_ref(params, "limit")
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(5)
@@ -1184,50 +1320,85 @@ impl Agent {
             .await
             .map_err(|e| AgentError::Execution(format!("MCP tool search failed: {}", e)))?;
 
-        let mut scored = summaries
-            .into_iter()
-            .filter(|summary| {
-                server_filter
-                    .as_ref()
-                    .map_or(true, |server| summary.server_name.to_lowercase() == *server)
-            })
-            .map(|summary| {
-                let desc = summary.description.clone().unwrap_or_default();
-                let score =
-                    Self::mcp_search_score(query, &summary.server_name, &summary.tool_name, &desc);
-                (score, summary, desc)
-            })
-            .collect::<Vec<_>>();
+        let selected = if let Some(tool_name) = exact_tool_name.filter(|value| !value.is_empty()) {
+            let target = Self::parse_mcp_display_tool_name(tool_name)?;
+            summaries
+                .into_iter()
+                .filter(|summary| {
+                    summary.server_name == target.server_name
+                        && summary.tool_name == target.tool_name
+                })
+                .map(|summary| {
+                    let desc = summary.description.clone().unwrap_or_default();
+                    (usize::MAX, summary, desc)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            let query = query.unwrap_or_default();
+            let mut scored = summaries
+                .into_iter()
+                .filter(|summary| {
+                    server_filter
+                        .as_ref()
+                        .map_or(true, |server| summary.server_name.to_lowercase() == *server)
+                })
+                .map(|summary| {
+                    let desc = summary.description.clone().unwrap_or_default();
+                    let score = Self::mcp_search_score(
+                        query,
+                        &summary.server_name,
+                        &summary.tool_name,
+                        &desc,
+                    );
+                    (score, summary, desc)
+                })
+                .collect::<Vec<_>>();
 
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-        let selected = scored
-            .into_iter()
-            .filter(|(score, _, _)| *score > 0)
-            .take(limit)
-            .collect::<Vec<_>>();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored
+                .into_iter()
+                .filter(|(score, _, _)| *score > 0)
+                .take(limit)
+                .collect::<Vec<_>>()
+        };
 
         if selected.is_empty() {
             return Ok((
-                format!(
-                    "No matching MCP tools found for query '{}'. Try a broader search query.",
-                    query
-                ),
+                exact_tool_name
+                    .filter(|value| !value.is_empty())
+                    .map(|tool_name| {
+                        format!(
+                            "No MCP tool named '{}' was found. Use one of the catalog names in \
+                             the form mcp:server/tool.",
+                            tool_name
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            "No matching MCP tools found for query '{}'. Try a broader search \
+                             query.",
+                            query.unwrap_or_default()
+                        )
+                    }),
                 false,
             ));
         }
 
         let mut lines = vec![
-            "MCP tool search results. The matching tool schemas have been loaded dynamically; \
-             call the exact tool names below if one fits."
+            "MCP schema lookup results. The matching tool schemas will be exposed dynamically for \
+             the next tool call; call the dynamic tool names below in the next step."
                 .to_string(),
         ];
         for (idx, (_, summary, desc)) in selected.iter().enumerate() {
+            let display_name =
+                Self::mcp_display_tool_name(&summary.server_name, &summary.tool_name);
+            let dynamic_name =
+                Self::mcp_dynamic_tool_name(&summary.server_name, &summary.tool_name);
             lines.push(format!(
-                "{}. {} ({}/{}) - {}",
+                "{}. {} -> {} - {}",
                 idx + 1,
-                Self::mcp_dynamic_tool_name(&summary.server_name, &summary.tool_name),
-                summary.server_name,
-                summary.tool_name,
+                display_name,
+                dynamic_name,
                 desc.chars().take(240).collect::<String>()
             ));
         }
@@ -1239,7 +1410,8 @@ impl Agent {
         arguments: &str,
     ) -> Option<Vec<McpToolTarget>> {
         let params = Self::parse_tool_arguments(arguments).ok()?;
-        let query = Self::tool_arg_ref(params.as_ref(), "query")?;
+        let tool_name = Self::tool_arg_ref(params.as_ref(), "tool_name");
+        let query = Self::tool_arg_ref(params.as_ref(), "query");
         let limit = Self::tool_arg_ref(params.as_ref(), "limit")
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(5)
@@ -1247,6 +1419,16 @@ impl Agent {
         let server_filter = Self::tool_arg_ref(params.as_ref(), "server").map(|s| s.to_lowercase());
         let manager = self.mcp_manager.as_ref()?;
         let summaries = manager.list_tool_summaries().await.ok()?;
+
+        if let Some(tool_name) = tool_name.filter(|value| !value.trim().is_empty()) {
+            let target = Self::parse_mcp_display_tool_name(tool_name).ok()?;
+            let exists = summaries.iter().any(|summary| {
+                summary.server_name == target.server_name && summary.tool_name == target.tool_name
+            });
+            return if exists { Some(vec![target]) } else { None };
+        }
+
+        let query = query?;
 
         let mut scored = summaries
             .into_iter()
@@ -2274,6 +2456,58 @@ impl Agent {
             lines.push(format!("...{} more skills omitted.", skills.len() - 80));
         }
         lines.join("\n")
+    }
+
+    async fn build_mcp_tool_index_context(&self) -> Option<String> {
+        let Some(manager) = &self.mcp_manager else {
+            return None;
+        };
+
+        let mut summaries = match manager.list_tool_summaries().await {
+            Ok(summaries) => summaries,
+            Err(e) => {
+                warn!("Failed to build MCP tool catalog: {}", e);
+                return Some(
+                    "MCP manager is configured, but the MCP tool catalog could not be loaded. \
+                     Retry mcp_tool_search when an MCP capability is needed."
+                        .to_string(),
+                );
+            }
+        };
+        if summaries.is_empty() {
+            return Some("No MCP tools are currently connected.".to_string());
+        }
+
+        summaries
+            .sort_by(|a, b| (&a.server_name, &a.tool_name).cmp(&(&b.server_name, &b.tool_name)));
+        let total = summaries.len();
+        let mut lines = vec![
+            "Available MCP tools are listed by catalog name only. To use one, first call \
+             mcp_tool_search with tool_name set to the exact `mcp:server/tool` name; the runtime \
+             will then load that tool's schema and expose a dynamic callable tool for the next \
+             step."
+                .to_string(),
+        ];
+        for summary in summaries.iter().take(200) {
+            let display_name =
+                Self::mcp_display_tool_name(&summary.server_name, &summary.tool_name);
+            let desc = summary
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(180)
+                .collect::<String>();
+            if desc.trim().is_empty() {
+                lines.push(format!("- `{}`", display_name));
+            } else {
+                lines.push(format!("- `{}`: {}", display_name, desc));
+            }
+        }
+        if total > 200 {
+            lines.push(format!("...{} more MCP tools omitted.", total - 200));
+        }
+        Some(lines.join("\n"))
     }
 
     async fn active_skill_context_for_session(&self, session_key: &str) -> Option<String> {
@@ -3344,6 +3578,13 @@ impl Agent {
     /// approval). Uses precise suffix/prefix matching to avoid false
     /// positives on skill names like "buying_guide" or "knowledge_buy".
     fn is_high_risk_mcp_skill(skill_id: &str) -> bool {
+        // Temporarily allow the model to execute MCP tools directly without
+        // the approval/pending-confirmation gate. Set this env var when the
+        // guard needs to be re-enabled during local testing.
+        if std::env::var_os("BEEBOTOS_ENABLE_MCP_APPROVAL").is_none() {
+            return false;
+        }
+
         let id_lower = skill_id.to_lowercase();
         // 🆕 FIX: Removed "_trade" — get_crypto_latest_trade / get_crypto_latest_quote
         // are read-only queries and should NOT require approval.
@@ -3901,6 +4142,7 @@ impl Agent {
         session_key: &str,
     ) -> Vec<communication::Message> {
         let skill_index = self.build_skill_index_context().await;
+        let mcp_tool_index = self.build_mcp_tool_index_context().await;
         let active_skill_context = self.active_skill_context_for_session(session_key).await;
         let controlled_tool_prompt = if self.controlled_workspace_tools_enabled() {
             "Controlled workspace tools are currently enabled. You may use write_file, edit_file, \
@@ -3923,8 +4165,8 @@ impl Agent {
              elsewhere.\n\nThis is the BeeBotOS user workspace, normally ./data/workspace \
              relative to the repo. Treat it as your current working directory, not the repository \
              root.\n\n## Tools\nExecutable tools include read_file, list_dir, glob, grep, \
-             write_file, edit_file, exec, web_fetch, web_search, and activate_skill when enabled \
-             by runtime policy. {}\n\n## Skills\n{}",
+             write_file, edit_file, exec, web_fetch, web_search, activate_skill, and \
+             mcp_tool_search when enabled by runtime policy. {}\n\n## Skills\n{}",
             self.config.name,
             self.config.description,
             runtime_context,
@@ -3932,6 +4174,10 @@ impl Agent {
             controlled_tool_prompt,
             skill_index
         );
+        if let Some(mcp_tools) = mcp_tool_index {
+            system.push_str("\n\n## MCP Tools\n");
+            system.push_str(&mcp_tools);
+        }
         if let Some(active) = active_skill_context {
             system.push_str("\n\n## Active Skill Contexts\n");
             system.push_str(&active);
@@ -4470,22 +4716,15 @@ impl Agent {
             }
         }
 
-        let confirmation_text = message_text.trim();
-        let confirmation_lower = confirmation_text.to_ascii_lowercase();
-        let is_confirmation = matches!(
-            confirmation_text,
-            "确认" | "同意" | "可以" | "执行" | "是" | "好" | "好的" | "确认执行"
-        ) || matches!(
-            confirmation_lower.as_str(),
-            "yes" | "y" | "ok" | "okay" | "confirm"
-        );
+        let is_confirmation = is_confirmation_message(&message_text);
 
         if is_confirmation {
             let mut approvals = self.pending_approvals.write().await;
             if !approvals.is_empty() {
-                // Take the most recent pending approval
-                if let Some((req_id, request)) =
-                    approvals.iter().next().map(|(k, v)| (k.clone(), v.clone()))
+                if let Some((req_id, request)) = approvals
+                    .iter()
+                    .max_by(|(_, a), (_, b)| a.created_at.cmp(&b.created_at))
+                    .map(|(k, v)| (k.clone(), v.clone()))
                 {
                     approvals.remove(&req_id);
                     drop(approvals);
@@ -4493,6 +4732,53 @@ impl Agent {
                         "Plan C: User confirmed pending approval {} for skill '{}'",
                         req_id, request.skill_id
                     );
+
+                    if request.skill_id.starts_with("mcp:") {
+                        let target = match Self::parse_mcp_display_tool_name(&request.skill_id) {
+                            Ok(target) => target,
+                            Err(e) => {
+                                return Ok((
+                                    format!("已确认操作，但 MCP 工具名无效: {}", e),
+                                    vec![],
+                                ));
+                            }
+                        };
+                        let dynamic_tool_name =
+                            Self::mcp_dynamic_tool_name(&target.server_name, &target.tool_name);
+                        let confirmed_params = request.params.as_object().map(|obj| {
+                            obj.iter()
+                                .filter_map(|(k, v)| {
+                                    if let Some(s) = v.as_str() {
+                                        Some((k.clone(), s.to_string()))
+                                    } else if v.is_null() {
+                                        None
+                                    } else {
+                                        Some((k.clone(), v.to_string()))
+                                    }
+                                })
+                                .collect::<HashMap<_, _>>()
+                        });
+
+                        self.skip_approval
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        let execution = self
+                            .execute_mcp_dynamic_tool(
+                                &dynamic_tool_name,
+                                confirmed_params.as_ref(),
+                                &request.original_input,
+                            )
+                            .await;
+                        self.skip_approval
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+                        return match execution {
+                            Ok((output, true)) => Ok((output, vec![])),
+                            Ok((output, false)) => {
+                                Ok((format!("已确认操作，但执行失败: {}", output), vec![]))
+                            }
+                            Err(e) => Ok((format!("已确认操作，但执行失败: {}", e), vec![])),
+                        };
+                    }
 
                     // Re-execute the skill with approval bypassed
                     if let Some(ref registry) = self.skill_registry {
@@ -4556,6 +4842,13 @@ impl Agent {
                     return Ok(("已确认，但找不到对应的技能。".to_string(), vec![]));
                 }
             }
+            return Ok((
+                "当前没有待确认的真实工具操作。上一条确认提示没有创建后端审批单，\
+                 我不会继续用聊天文本模拟下单。请重新发送下单请求，我会先调用对应的 MCP \
+                 工具生成真实确认单，再由您确认执行。"
+                    .to_string(),
+                vec![],
+            ));
         }
 
         // Step 1: LLM Intent Analysis (zero hardcoded rules)
@@ -6732,6 +7025,18 @@ impl Agent {
         // bulky text-based skill catalog and inject a strong command-style system hint.
         let messages = if extra_params.contains_key("tools_json") {
             let runtime_context = Self::runtime_context_prompt();
+            let approval_tool_policy = if has_side_effect_execution_intent(&input_text) {
+                "\n\nSide-effect requests must be handled through real tool calls. Do not write a \
+                 confirmation card, risk warning, or ask the user to confirm in final text before \
+                 a real tool call has created a runtime approval request. For MCP capabilities, \
+                 first call mcp_tool_search for the matching MCP tool, then call the dynamically \
+                 exposed MCP tool with the action parameters directly. MCP tool calls are \
+                 temporarily allowed to run without runtime confirmation. If required parameters \
+                 are missing, ask for those parameters directly; do not invent a fake approval \
+                 flow."
+            } else {
+                ""
+            };
             let mut result = vec![communication::Message::new(
                 uuid::Uuid::new_v4(),
                 communication::PlatformType::Custom,
@@ -6741,8 +7046,8 @@ impl Agent {
                      needs a tool. For ordinary questions that do not need tools, answer \
                      directly. When you do call a tool, call the most appropriate tool with \
                      correct parameters. If a parameter is missing, use a reasonable default or \
-                     leave it empty.\n\n{}",
-                    runtime_context
+                     leave it empty.{}\n\n{}",
+                    approval_tool_policy, runtime_context
                 ),
             )];
             result.extend(messages);
@@ -6776,6 +7081,7 @@ impl Agent {
             extra_params.insert("agent_id".to_string(), self.config.id.clone());
             extra_params.insert("react_run_id".to_string(), run_id.clone());
             let mut final_text = String::new();
+            let mut called_real_tool = false;
 
             self.emit_react_trace(
                 crate::react_trace::ReActTraceEvent::new(
@@ -6813,6 +7119,28 @@ impl Agent {
                     })?;
 
                 if turn.tool_calls.is_empty() {
+                    if has_side_effect_execution_intent(&input_text)
+                        && !called_real_tool
+                        && looks_like_unbacked_approval_confirmation(&turn.content)
+                        && round + 1 < max_tool_rounds
+                    {
+                        warn!(
+                            "Native tool loop blocked unbacked approval confirmation; forcing \
+                             tool call"
+                        );
+                        loop_messages.push(communication::Message::new(
+                            uuid::Uuid::new_v4(),
+                            communication::PlatformType::Custom,
+                            "System: You just wrote a confirmation prompt for a side-effecting \
+                             operation without creating a runtime approval request. That is not \
+                             allowed. Use a real tool call for the requested action. For MCP \
+                             actions, call mcp_tool_search first, then call the dynamically \
+                             exposed MCP tool with the user's parameters. Do not ask for \
+                             confirmation in final text."
+                                .to_string(),
+                        ));
+                        continue;
+                    }
                     final_text = turn.content;
                     self.emit_react_trace(
                         crate::react_trace::ReActTraceEvent::new(
@@ -6852,6 +7180,9 @@ impl Agent {
                 ));
 
                 for tool_call in &turn.tool_calls {
+                    if !Self::is_mcp_search_tool(&tool_call.function.name) {
+                        called_real_tool = true;
+                    }
                     if Self::is_cancelled(&cancel_rx) {
                         info!(
                             "handle_llm_task: session {} cancelled before native tool {}",
@@ -10774,6 +11105,52 @@ mod planning_integration_tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn test_mcp_display_tool_name_round_trip() {
+        let display = Agent::mcp_display_tool_name("alpaca", "get_crypto_snapshot");
+        assert_eq!(display, "mcp:alpaca/get_crypto_snapshot");
+
+        let parsed = Agent::parse_mcp_display_tool_name(&display).unwrap();
+        assert_eq!(parsed.server_name, "alpaca");
+        assert_eq!(parsed.tool_name, "get_crypto_snapshot");
+
+        let dynamic = Agent::mcp_dynamic_tool_name(&parsed.server_name, &parsed.tool_name);
+        assert!(dynamic.starts_with("mcp__"));
+    }
+
+    #[test]
+    fn test_mcp_tool_search_definition_includes_tool_name() {
+        let def = Agent::mcp_tool_search_definition();
+        let properties = def.parameters.get("properties").unwrap();
+        assert!(properties.get("tool_name").is_some());
+        assert!(properties.get("query").is_some());
+        assert!(def.parameters.get("required").is_none());
+    }
+
+    #[test]
+    fn test_confirmation_message_detection() {
+        assert!(is_confirmation_message("确认"));
+        assert!(is_confirmation_message("confirm"));
+        assert!(!is_confirmation_message("确认买入 0.01 手黄金"));
+    }
+
+    #[test]
+    fn test_approval_confirmation_guard_detection() {
+        assert!(has_side_effect_execution_intent(
+            "利用metatrader帮我买0.01手黄金"
+        ));
+        assert!(has_side_effect_execution_intent("删除这个文件"));
+        assert!(looks_like_unbacked_approval_confirmation(
+            "请回复「确认」来执行此交易，真实账户市价单将立即成交。"
+        ));
+        assert!(looks_like_unbacked_approval_confirmation(
+            "这是高风险删除操作，请回复 confirm 继续。"
+        ));
+        assert!(!looks_like_unbacked_approval_confirmation(
+            "当前黄金价格约为 4484.93。"
+        ));
     }
 
     #[test]

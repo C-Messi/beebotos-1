@@ -186,7 +186,9 @@ impl UnifiedMemorySystem {
         date: Option<chrono::NaiveDate>,
     ) -> Result<()> {
         let old_entries = self.storage.read_entries(file_type, date).await?;
-        self.storage.rewrite_entries(file_type, entries, date).await?;
+        self.storage
+            .rewrite_entries(file_type, entries, date)
+            .await?;
 
         if self.config.auto_index {
             {

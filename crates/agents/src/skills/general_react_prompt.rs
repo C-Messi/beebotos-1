@@ -62,9 +62,9 @@ pub fn build_general_react_prompt(available_tools: &HashMap<String, Box<dyn Skil
 6. 最多 30 轮：你可以在 1-30 轮之间的任意时刻终止，由你判断何时足够。
 7. 禁止过度思考：不要进行没有必要的额外工具调用。如果用户问题简单，1-2 轮即可结束。
 8. 需要实时数据或外部执行时必须调用工具，不要用 final_answer 伪造已经搜索、查询、下单或查看持仓。
-9. 遇到天气、行情、账户、持仓、下单、定时任务、系统能力等 BeeBotOS/业务能力时，优先调用 `skill_call`，用 `skill_id` 指定注册技能或 MCP 技能。
-10. BTC/ETH 等加密货币交易、行情、账户或持仓任务必须优先使用 Alpaca MCP 技能：下单用 `mcp:alpaca/place_crypto_order`；用户说“行情/走势/今日”时优先用 `mcp:alpaca/get_crypto_snapshot`，因为它包含最新成交、买卖盘、日 K 和涨跌幅；只问“报价/买一卖一”才用 `mcp:alpaca/get_crypto_latest_quote`；持仓用 `mcp:alpaca/get_all_positions` 或 `mcp:alpaca/get_open_position`。不要用 `web_search` 或 CoinGecko 替代可用的 Alpaca MCP 交易/账户能力。
-11. 调用 `mcp:alpaca/place_crypto_order` 时优先传结构化 `params`，例如 `{{"skill_id":"mcp:alpaca/place_crypto_order","params":{{"symbol":"BTC/USD","side":"buy","notional":"100","type":"market","time_in_force":"gtc"}}}}`。若用户限定单笔金额不要超过 N USD，必须使用 `notional` 且不得超过 N。
+9. 遇到天气、行情、账户、持仓、下单、定时任务、系统能力等 BeeBotOS/业务能力时，优先调用 `skill_call`。MCP 工具不要直接当作 skill_call 的目标；先用 `mcp_tool_search` 选定 `mcp:server/tool` 名称，再调用动态暴露的 MCP 工具。
+10. BTC/ETH 等加密货币交易、行情、账户或持仓任务必须优先使用 Alpaca MCP 工具：先用 `mcp_tool_search` 选定 `mcp:alpaca/place_crypto_order`、`mcp:alpaca/get_crypto_snapshot`、`mcp:alpaca/get_crypto_latest_quote`、`mcp:alpaca/get_all_positions` 或 `mcp:alpaca/get_open_position` 之一，再调用动态暴露的工具。不要用 `web_search` 或 CoinGecko 替代可用的 Alpaca MCP 交易/账户能力。
+11. 需要精确 MCP schema 时，用 `mcp_tool_search` 的 `tool_name` 参数直接指定 `mcp:server/tool` 名称；如果只知道意图，再用 `query` 搜索。若用户限定单笔金额不要超过 N USD，调用对应 MCP 工具时必须遵守该上限。
 12. 用户要求“搜索/网上查/互联网搜索”时必须先调用搜索或抓取工具；如果所有工具失败，final_answer 必须明确说明未能完成实时联网验证，不能用旧知识冒充最新搜索结果。
 13. 如果任务包含多个相互独立的分支（例如同时查询行情、检查账户/持仓、搜索新闻、评估风险），优先调用 `parallel_delegate`，把每个分支写成 branches 中的一项，拿到合并结果后再输出最终答复。但交易下单本身不得放入 parallel_delegate；必须单独、顺序执行。
 14. final_answer.content 只能写给用户看的最终答复。禁止包含 thought、action、tool_name、arguments、工具命令、当前状态分析或内部执行过程。

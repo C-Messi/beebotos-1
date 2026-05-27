@@ -615,18 +615,17 @@ impl SkillTool for SkillCallDescriptorTool {
     }
 
     fn description(&self) -> &str {
-        "Call a registered BeeBotOS skill or MCP skill by ID. Use this for app/domain abilities \
-         such as weather, crypto/stock market data, account/position queries, and order placement. \
-         Common skill_id examples: mcp:alpaca/get_crypto_latest_quote, \
-         mcp:alpaca/get_crypto_snapshot, mcp:alpaca/place_crypto_order. Parameters: skill_id \
-         (string), input (string, optional), params (object, optional)."
+        "Call a registered BeeBotOS skill by ID. Use this for app/domain abilities such as \
+         weather, file workflows, or other non-MCP capabilities. MCP tools should be discovered \
+         with mcp_tool_search first, then called through their dynamically exposed MCP tool name. \
+         Parameters: skill_id (string), input (string, optional), params (object, optional)."
     }
 
     fn parameters_schema(&self) -> Value {
         serde_json::json!({
-            "type": "object",
-            "properties": {
-                "skill_id": { "type": "string", "description": "Registered skill ID, e.g. mcp:alpaca/get_crypto_latest_quote" },
+                "type": "object",
+                "properties": {
+                "skill_id": { "type": "string", "description": "Registered skill ID, such as weather_assistant or another BeeBotOS skill" },
                 "input": { "type": "string", "description": "Natural-language or JSON input for the skill" },
                 "params": { "type": "object", "description": "Optional structured parameters for the skill" }
             },
