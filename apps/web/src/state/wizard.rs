@@ -641,17 +641,17 @@ impl WizardState {
                     auto_migrate: true,
                 };
                 self.models = ModelsConfigDraft {
-                    default_provider: "kimi".to_string(),
-                    fallback_chain: vec!["kimi".to_string()],
+                    default_provider: "deepseek".to_string(),
+                    fallback_chain: vec!["deepseek".to_string()],
                     cost_optimization: false,
                     max_tokens: 4096,
                     request_timeout: 60,
                     system_prompt: "You are a helpful assistant.".to_string(),
                     providers: vec![ProviderDraft {
-                        name: "kimi".to_string(),
+                        name: "deepseek".to_string(),
                         api_key: String::new(),
-                        model: "moonshot-v1-8k".to_string(),
-                        base_url: "https://api.moonshot.cn".to_string(),
+                        model: "deepseek-v4-flash".to_string(),
+                        base_url: "https://api.deepseek.com/v1".to_string(),
                         temperature: 0.7,
                         context_window: Some(8192),
                     }],
@@ -690,11 +690,19 @@ impl WizardState {
             "standard" => {
                 self.apply_template("minimal");
                 self.models.fallback_chain = vec![
-                    "kimi".to_string(),
-                    "openai".to_string(),
                     "deepseek".to_string(),
+                    "openai".to_string(),
+                    "kimi".to_string(),
                 ];
                 self.models.providers = vec![
+                    ProviderDraft {
+                        name: "deepseek".to_string(),
+                        api_key: String::new(),
+                        model: "deepseek-v4-flash".to_string(),
+                        base_url: "https://api.deepseek.com/v1".to_string(),
+                        temperature: 0.7,
+                        context_window: Some(8192),
+                    },
                     ProviderDraft {
                         name: "kimi".to_string(),
                         api_key: String::new(),
@@ -708,14 +716,6 @@ impl WizardState {
                         api_key: String::new(),
                         model: "gpt-4".to_string(),
                         base_url: "https://api.openai.com/v1".to_string(),
-                        temperature: 0.7,
-                        context_window: Some(8192),
-                    },
-                    ProviderDraft {
-                        name: "deepseek".to_string(),
-                        api_key: String::new(),
-                        model: "deepseek-v4-flash".to_string(),
-                        base_url: "https://api.deepseek.com/v1".to_string(),
                         temperature: 0.7,
                         context_window: Some(8192),
                     },
@@ -803,7 +803,7 @@ pub struct JwtConfigDraft {
     pub webhook_ip_whitelist: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelsConfigDraft {
     pub default_provider: String,
     pub fallback_chain: Vec<String>,
@@ -812,6 +812,27 @@ pub struct ModelsConfigDraft {
     pub system_prompt: String,
     pub request_timeout: u64,
     pub providers: Vec<ProviderDraft>,
+}
+
+impl Default for ModelsConfigDraft {
+    fn default() -> Self {
+        Self {
+            default_provider: "deepseek".to_string(),
+            fallback_chain: vec!["deepseek".to_string()],
+            cost_optimization: false,
+            max_tokens: 4096,
+            system_prompt: "You are a helpful assistant.".to_string(),
+            request_timeout: 60,
+            providers: vec![ProviderDraft {
+                name: "deepseek".to_string(),
+                api_key: String::new(),
+                model: "deepseek-v4-flash".to_string(),
+                base_url: "https://api.deepseek.com/v1".to_string(),
+                temperature: 0.7,
+                context_window: Some(8192),
+            }],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

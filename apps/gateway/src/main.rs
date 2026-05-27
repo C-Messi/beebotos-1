@@ -3198,8 +3198,8 @@ mod tests {
                 audience: "api".to_string(),
             },
             models: config::ModelsConfig {
-                default_provider: "kimi".to_string(),
-                fallback_chain: vec!["openai".to_string()],
+                default_provider: "deepseek".to_string(),
+                fallback_chain: Vec::new(),
                 request_timeout: 60,
                 cost_optimization: false,
                 max_tokens: 4096,
@@ -3207,16 +3207,16 @@ mod tests {
                 providers: {
                     let mut map = HashMap::new();
                     map.insert(
-                        "kimi".to_string(),
+                        "deepseek".to_string(),
                         config::ModelProviderConfig {
                             api_key: Some("test-key".to_string()),
-                            base_url: Some("https://api.moonshot.cn".to_string()),
-                            model: Some("moonshot-v1-8k".to_string()),
+                            base_url: Some("https://api.deepseek.com/v1".to_string()),
+                            model: Some("deepseek-v4-flash".to_string()),
                             temperature: 0.7,
                             deployment: None,
                             context_window: Some(8192),
-                            thinking: None,
-                            reasoning_effort: None,
+                            thinking: Some("enabled".to_string()),
+                            reasoning_effort: Some("high".to_string()),
                         },
                     );
                     map
