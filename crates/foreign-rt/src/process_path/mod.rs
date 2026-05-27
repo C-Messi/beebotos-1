@@ -366,6 +366,10 @@ impl ProcessSandboxExecutor {
             let _ = child.start_kill();
             let _ = tokio::fs::remove_file(&script_path).await;
 
+            // 🟢 P1 FIX: Wait for the child process to fully exit so it does not
+            // become a zombie (defunct) process.
+            let _ = child.wait().await;
+
             let execution_time = start.elapsed();
             let logs = WasmExecutorUtils::parse_logs(&stderr);
 

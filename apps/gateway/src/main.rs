@@ -1768,6 +1768,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "http://localhost:8080".to_string()),
         );
 
+    let mut app = app;
     if let Ok(updater_service) = updater::service::GatewayUpdateService::new(update_config) {
         // Start scheduled update checks
         updater_service.start_scheduler().await;
@@ -1792,39 +1793,16 @@ async fn main() -> anyhow::Result<()> {
                 axum::routing::post(updater::handlers::rollback_update),
             )
             .with_state(updater_state);
-        let app = app.merge(updater_routes);
+        app = app.merge(updater_routes);
         info!("Gateway updater module initialized");
-
-        // Start server
-        let addr = app_config
-            .server_addr()
-            .map_err(|e| anyhow::anyhow!("Invalid server address: {}", e))?;
-        info!("Server configured to listen on {}", addr);
-
-        // Choose between HTTP and HTTPS
-        if app_config.tls.as_ref().map(|t| t.enabled).unwrap_or(false) {
-            start_https_server(app, addr, &app_config).await?;
-        } else {
-            start_http_server(app, addr).await?;
-        }
-        return Ok(());
     }
 
-    // Start server (if updater not initialized)
-
+    // Start gRPC server for skill registry and instance management
     let addr = app_config
         .server_addr()
         .map_err(|e| anyhow::anyhow!("Invalid server address: {}", e))?;
     info!("Server configured to listen on {}", addr);
 
-    // Choose between HTTP and HTTPS
-    if app_config.tls.as_ref().map(|t| t.enabled).unwrap_or(false) {
-        start_https_server(app, addr, &app_config).await?;
-    } else {
-        start_http_server(app, addr).await?;
-    }
-
-    // Start gRPC server for skill registry and instance management
     let grpc_addr = std::net::SocketAddr::from((
         std::net::IpAddr::from_str(&app_config.server.host)
             .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0))),
@@ -1837,7 +1815,7 @@ async fn main() -> anyhow::Result<()> {
         handlers::http::skills::get_skills_base_dir(),
     )
     .with_rating_store(app_state.db.clone());
-    tokio::spawn(async move {
+    let grpc_handle = tokio::spawn(async move {
         info!("🚀 Starting gRPC SkillRegistry server on {}", grpc_addr);
         if let Err(e) = tonic::transport::Server::builder()
             .add_service(grpc_service.into_server())
@@ -1850,7 +1828,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 🟢 P1 FIX: Start workflow instance TTL cleanup background loop
     let cleanup_app_state = app_state.clone();
-    tokio::spawn(async move {
+    let cleanup_handle = tokio::spawn(async move {
         info!("🧹 Starting workflow instance TTL cleanup loop");
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
@@ -1859,16 +1837,48 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Graceful shutdown
+    // 🟢 P0 FIX: External shutdown channel so the main thread controls server
+    // lifetime and can enforce a hard timeout.  Previously start_http_server
+    // blocked forever with an internal shutdown_signal() and the code after it
+    // (gateway.shutdown, telemetry cleanup) was unreachable dead code.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    let tls_enabled = app_config.tls.as_ref().map(|t| t.enabled).unwrap_or(false);
+    let server_handle = tokio::spawn(async move {
+        let shutdown = async {
+            let _ = shutdown_rx.changed().await;
+        };
+        if tls_enabled {
+            start_https_server(app, addr, &app_config, shutdown).await
+        } else {
+            start_http_server(app, addr, shutdown).await
+        }
+    });
+
+    // Wait for shutdown signal
     shutdown_signal().await;
     info!("Shutting down gracefully...");
 
-    // Cleanup
+    // Notify HTTP/HTTPS server to close
+    let _ = shutdown_tx.send(());
+
+    // Wait for server shutdown with a hard timeout so a stuck connection
+    // cannot block the process forever.
+    match tokio::time::timeout(std::time::Duration::from_secs(30), server_handle).await {
+        Ok(Ok(_)) => info!("HTTP server stopped gracefully"),
+        Ok(Err(e)) => error!("HTTP server error: {}", e),
+        Err(_) => warn!("HTTP server shutdown timed out after 30s, forcing stop"),
+    }
+
+    // Cleanup other services
     info!("Shutting down services...");
     gateway.shutdown().await;
     telemetry::shutdown_telemetry();
-    info!("Shutdown complete");
 
+    // Abort background tasks
+    grpc_handle.abort();
+    cleanup_handle.abort();
+
+    info!("Shutdown complete");
     Ok(())
 }
 
@@ -3019,8 +3029,12 @@ async fn cleanup_workflow_instances(state: &Arc<AppState>) {
     }
 }
 
-/// Start HTTP server
-async fn start_http_server(app: Router, addr: SocketAddr) -> anyhow::Result<()> {
+/// Start HTTP server with external shutdown signal
+async fn start_http_server(
+    app: Router,
+    addr: SocketAddr,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> anyhow::Result<()> {
     warn!("Starting HTTP server (TLS is disabled - not recommended for production)");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -3030,17 +3044,18 @@ async fn start_http_server(app: Router, addr: SocketAddr) -> anyhow::Result<()> 
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(shutdown)
     .await?;
 
     Ok(())
 }
 
-/// Start HTTPS server
+/// Start HTTPS server with external shutdown signal
 async fn start_https_server(
     app: Router,
     addr: SocketAddr,
     config: &AppConfig,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
     info!("Starting HTTPS server");
 
@@ -3062,11 +3077,16 @@ async fn start_https_server(
 
     info!("HTTPS server listening on {}", addr);
 
-    axum_server::bind_rustls(addr, tls_config)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .await?;
-
-    Ok(())
+    tokio::select! {
+        result = axum_server::bind_rustls(addr, tls_config)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>()) => {
+            result.map_err(|e| anyhow::anyhow!(e))
+        }
+        _ = shutdown => {
+            info!("HTTPS server received shutdown signal");
+            Ok(())
+        }
+    }
 }
 
 /// Ensure default agent exists on startup

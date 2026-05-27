@@ -111,11 +111,12 @@ impl TaskMonitorService {
             service.state_machine_service.clone(),
         );
 
-        // Store the processor handle
-        // Note: blocking_lock is used in constructor, but this is typically called in
-        // async context We'll use a different approach - spawn initialization
-        let _processor_handle = Mutex::new(Some(processor));
-        // This is a workaround - we need to set it properly
+        // 🟢 P1 FIX: Store the processor handle so shutdown() can abort it.
+        // The previous code shadowed service.processor_handle with a local variable,
+        // leaving the field permanently None.
+        if let Ok(mut guard) = service.processor_handle.lock() {
+            *guard = Some(processor);
+        }
 
         service
     }
