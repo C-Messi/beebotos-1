@@ -220,7 +220,7 @@ pub struct AppState {
     /// listener)
     pub agent_event_bus: Option<beebotos_agents::events::AgentEventBus>,
     /// MCP manager for external tool/resource/prompt access
-    pub mcp_manager: Option<Arc<beebotos_agents::mcp::MCPManager>>,
+    pub mcp_manager: Arc<beebotos_agents::mcp::MCPManager>,
     /// Cron job service for scheduled task management
     pub cron_job_service: Option<Arc<crate::services::CronJobService>>,
     /// Queue used by agent tools to register newly-created cron jobs after the
@@ -481,95 +481,102 @@ impl AppState {
         register_builtin_skills(&skill_registry).await;
 
         // ── Initialize MCP Manager ──
-        let mcp_manager = if config.mcp.auto_init && !config.mcp.servers.is_empty() {
+        let mcp_manager = {
             let manager = Arc::new(beebotos_agents::mcp::MCPManager::new());
-            for server_config in &config.mcp.servers {
-                let client_config = beebotos_agents::mcp::ClientConfig {
-                    server_url: match &server_config.transport {
-                        crate::config::McpTransportConfig::Http { url, .. } => url.clone(),
-                        _ => "stdio".to_string(),
-                    },
-                    timeout_ms: server_config.timeout_ms.unwrap_or(config.mcp.timeout_ms),
-                    retry_count: server_config.retry_count.unwrap_or(config.mcp.retry_count),
-                };
+            if config.mcp.auto_init && !config.mcp.servers.is_empty() {
+                for server_config in &config.mcp.servers {
+                    let client_config = beebotos_agents::mcp::ClientConfig {
+                        server_url: match &server_config.transport {
+                            crate::config::McpTransportConfig::Http { url, .. } => url.clone(),
+                            _ => "stdio".to_string(),
+                        },
+                        timeout_ms: server_config.timeout_ms.unwrap_or(config.mcp.timeout_ms),
+                        retry_count: server_config.retry_count.unwrap_or(config.mcp.retry_count),
+                    };
 
-                let client_result = match &server_config.transport {
-                    crate::config::McpTransportConfig::Stdio {
-                        command,
-                        args,
-                        env,
-                        working_dir,
-                    } => {
-                        let stdio_config = beebotos_agents::mcp::StdioTransportConfig {
-                            command: command.clone(),
-                            args: args.clone(),
-                            env: env.clone(),
-                            working_dir: working_dir.as_ref().map(|p| std::path::PathBuf::from(p)),
-                        };
-                        beebotos_agents::mcp::MCPClient::connect_stdio_with_policy(
-                            client_config,
-                            stdio_config,
-                            &config.mcp.allowed_commands,
-                        )
-                        .await
-                    }
-                    crate::config::McpTransportConfig::Http {
-                        url,
-                        auth_token,
-                        headers,
-                        use_sse,
-                    } => {
-                        if config.mcp.enforce_tls
-                            && !url.to_ascii_lowercase().starts_with("https://")
-                        {
-                            warn!(
-                                "⚠️ MCP server '{}' uses non-TLS URL '{}'. Skipping \
-                                 (enforce_tls=true).",
-                                server_config.name, url
-                            );
-                            continue;
-                        }
-                        let http_config = beebotos_agents::mcp::HttpTransportConfig {
-                            base_url: url.clone(),
-                            auth_token: auth_token.clone(),
-                            headers: headers.clone(),
-                            timeout_ms: server_config.timeout_ms.unwrap_or(config.mcp.timeout_ms),
-                            use_sse: *use_sse,
-                        };
-                        beebotos_agents::mcp::MCPClient::connect_http(client_config, http_config)
+                    let client_result = match &server_config.transport {
+                        crate::config::McpTransportConfig::Stdio {
+                            command,
+                            args,
+                            env,
+                            working_dir,
+                        } => {
+                            let stdio_config = beebotos_agents::mcp::StdioTransportConfig {
+                                command: command.clone(),
+                                args: args.clone(),
+                                env: env.clone(),
+                                working_dir: working_dir
+                                    .as_ref()
+                                    .map(|p| std::path::PathBuf::from(p)),
+                            };
+                            beebotos_agents::mcp::MCPClient::connect_stdio_with_policy(
+                                client_config,
+                                stdio_config,
+                                &config.mcp.allowed_commands,
+                            )
                             .await
-                    }
-                };
+                        }
+                        crate::config::McpTransportConfig::Http {
+                            url,
+                            auth_token,
+                            headers,
+                            use_sse,
+                        } => {
+                            if config.mcp.enforce_tls
+                                && !url.to_ascii_lowercase().starts_with("https://")
+                            {
+                                warn!(
+                                    "⚠️ MCP server '{}' uses non-TLS URL '{}'. Skipping \
+                                     (enforce_tls=true).",
+                                    server_config.name, url
+                                );
+                                continue;
+                            }
+                            let http_config = beebotos_agents::mcp::HttpTransportConfig {
+                                base_url: url.clone(),
+                                auth_token: auth_token.clone(),
+                                headers: headers.clone(),
+                                timeout_ms: server_config
+                                    .timeout_ms
+                                    .unwrap_or(config.mcp.timeout_ms),
+                                use_sse: *use_sse,
+                            };
+                            beebotos_agents::mcp::MCPClient::connect_http(
+                                client_config,
+                                http_config,
+                            )
+                            .await
+                        }
+                    };
 
-                match client_result {
-                    Ok(client) => {
-                        manager.register_client(&server_config.name, client).await;
-                        info!("✅ MCP server '{}' registered", server_config.name);
-                    }
-                    Err(e) => {
-                        warn!(
-                            "⚠️ Failed to connect to MCP server '{}': {}",
-                            server_config.name, e
-                        );
+                    match client_result {
+                        Ok(client) => {
+                            manager.register_client(&server_config.name, client).await;
+                            info!("✅ MCP server '{}' registered", server_config.name);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "⚠️ Failed to connect to MCP server '{}': {}",
+                                server_config.name, e
+                            );
+                        }
                     }
                 }
-            }
 
-            if let Err(e) = manager.initialize_all().await {
-                warn!("⚠️ MCP initialization failed: {}", e);
+                if let Err(e) = manager.initialize_all().await {
+                    warn!("⚠️ MCP initialization failed: {}", e);
+                } else {
+                    let client_names = manager.list_clients().await;
+                    info!(
+                        "✅ MCP Manager initialized with {} server(s): {:?}",
+                        client_names.len(),
+                        client_names
+                    );
+                }
             } else {
-                let client_names = manager.list_clients().await;
-                info!(
-                    "✅ MCP Manager initialized with {} server(s): {:?}",
-                    client_names.len(),
-                    client_names
-                );
+                info!("ℹ️ MCP auto-init disabled or no servers configured");
             }
-
-            Some(manager)
-        } else {
-            info!("ℹ️ MCP auto-init disabled or no servers configured");
-            None
+            manager
         };
 
         let (cron_registration_tx, cron_registration_rx) =
@@ -584,11 +591,7 @@ impl AppState {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize AgentRuntime: {}", e))?
         .with_skill_registry(skill_registry.clone())
-        .with_mcp(
-            mcp_manager
-                .clone()
-                .unwrap_or_else(|| Arc::new(beebotos_agents::mcp::MCPManager::new())),
-        )
+        .with_mcp(mcp_manager.clone())
         .with_llm_client(llm_client)
         .with_tool_work_dir(tool_work_dir);
         if let Some(ref sink) = react_trace_sink {
@@ -2657,7 +2660,19 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         // MCP API
         .route(
             "/api/v1/mcp/servers",
-            get(handlers::http::mcp::list_servers),
+            get(handlers::http::mcp::list_servers).post(handlers::http::mcp::create_server),
+        )
+        .route(
+            "/api/v1/mcp/servers/:name",
+            put(handlers::http::mcp::update_server).delete(handlers::http::mcp::delete_server),
+        )
+        .route(
+            "/api/v1/mcp/servers/:name/connect",
+            post(handlers::http::mcp::connect_server),
+        )
+        .route(
+            "/api/v1/mcp/servers/:name/disconnect",
+            post(handlers::http::mcp::disconnect_server),
         )
         .route(
             "/api/v1/mcp/servers/:name/tools",

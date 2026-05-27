@@ -3375,6 +3375,33 @@ body {
     align-items: center;
 }
 
+.mcp-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    max-width: 720px;
+}
+
+.mcp-summary-item {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.mcp-summary-item span {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.mcp-summary-item strong {
+    font-size: 20px;
+    line-height: 1;
+}
+
 .mcp-search-bar {
     position: relative;
     max-width: 400px;
@@ -3410,8 +3437,8 @@ body {
 }
 
 .mcp-server-grid {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
     gap: 16px;
 }
 
@@ -3421,36 +3448,12 @@ body {
     border-radius: var(--radius-md);
     overflow: hidden;
     transition: all var(--transition-fast);
-    max-width: 360px;
+    min-width: 0;
 }
 
 .mcp-server-card:hover {
     border-color: var(--border-light);
     box-shadow: var(--shadow-md);
-}
-
-.mcp-status-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 16px;
-    font-size: 13px;
-    font-weight: 500;
-    background: rgba(34, 197, 94, 0.1);
-    color: var(--success);
-    border-bottom: 1px solid rgba(34, 197, 94, 0.2);
-}
-
-.mcp-status-bar.error {
-    background: rgba(239, 68, 68, 0.1);
-    color: var(--danger);
-    border-bottom: 1px solid rgba(239, 68, 68, 0.2);
-}
-
-.mcp-status-bar.disconnected {
-    background: rgba(148, 163, 184, 0.1);
-    color: var(--text-muted);
-    border-bottom: 1px solid rgba(148, 163, 184, 0.2);
 }
 
 .mcp-card-body {
@@ -3487,48 +3490,62 @@ body {
     font-size: 15px;
     font-weight: 600;
     color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .mcp-card-subtitle {
     font-size: 12px;
     color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
-.status-dot {
+.mcp-status-badge {
     display: flex;
     align-items: center;
     gap: 6px;
     font-size: 12px;
     font-weight: 500;
+    border-radius: 999px;
+    padding: 4px 9px;
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
-.status-dot::before {
+.mcp-status-badge::before {
     content: '';
     width: 8px;
     height: 8px;
+    flex: 0 0 8px;
     border-radius: 50%;
     background: var(--text-muted);
 }
 
-.status-dot.connected {
+.mcp-status-badge.connected {
+    background: rgba(34, 197, 94, 0.1);
     color: var(--success);
 }
 
-.status-dot.connected::before {
+.mcp-status-badge.connected::before {
     background: var(--success);
     box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
 }
 
-.status-dot.error {
+.mcp-status-badge.error {
+    background: rgba(239, 68, 68, 0.1);
     color: var(--danger);
 }
 
-.status-dot.error::before {
+.mcp-status-badge.error::before {
     background: var(--danger);
     box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
 }
 
-.status-dot.disconnected {
+.mcp-status-badge.disconnected {
+    background: rgba(148, 163, 184, 0.1);
     color: var(--text-muted);
 }
 
@@ -3555,16 +3572,24 @@ body {
     font-weight: 500;
 }
 
-.mcp-command-block {
+.mcp-command-details {
     background: var(--bg-glass);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-sm);
-    padding: 12px;
+    padding: 10px 12px;
     margin-bottom: 12px;
 }
 
-.mcp-command-block pre {
+.mcp-command-details summary {
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.mcp-command-details pre {
     margin: 0;
+    padding-top: 10px;
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: 12px;
     color: var(--text-secondary);
@@ -3663,11 +3688,24 @@ body {
     gap: 8px;
 }
 
+.mcp-tools-toolbar {
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin-bottom: 10px;
+}
+
 .mcp-tool-item {
     background: var(--bg-glass);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-sm);
     padding: 12px;
+}
+
+.mcp-tool-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
 }
 
 .mcp-tool-name {
@@ -3677,9 +3715,58 @@ body {
     margin-bottom: 4px;
 }
 
+.mcp-tool-schema {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
 .mcp-tool-desc {
     font-size: 12px;
     color: var(--text-secondary);
+    margin-top: 8px;
+}
+
+.mcp-tool-runner {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    margin-top: 14px;
+    padding: 14px;
+}
+
+.mcp-tool-runner-header,
+.mcp-tool-runner-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.mcp-tool-runner-header span {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.mcp-tool-args {
+    min-height: 120px;
+    resize: vertical;
+}
+
+.mcp-tool-output {
+    background: var(--bg-glass);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    padding: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 /* Modal base styles (if not already defined) */
@@ -3738,8 +3825,8 @@ body {
 
 /* Responsive */
 @media (max-width: 768px) {
-    .mcp-server-card {
-        max-width: 100%;
+    .mcp-server-grid {
+        grid-template-columns: 1fr;
     }
 
     .modal {
