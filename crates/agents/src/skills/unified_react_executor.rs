@@ -670,9 +670,10 @@ impl UnifiedReActExecutor {
                  final_answer only when no tool is useful or after observations are \
                  sufficient.\n- Common choices: process_exec/bash_shell for commands, \
                  file_read/file_list/file_glob/text_grep for workspace files, \
-                 web_search/web_fetch for online info, skill_call for BeeBotOS/MCP abilities.\n- \
-                 final_answer.content must be only the user-facing answer; do not include \
-                 thought/action/tool JSON, commands, or internal process notes.",
+                 web_search/web_fetch for online info, skill_call for BeeBotOS skills, and \
+                 mcp_tool_search for MCP tools.\n- final_answer.content must be only the \
+                 user-facing answer; do not include thought/action/tool JSON, commands, or \
+                 internal process notes.",
                 user_request
             );
         }

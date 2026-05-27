@@ -2,9 +2,10 @@
 //!
 //! Manages MCP (Model Context Protocol) client configurations locally.
 
+use std::collections::HashMap;
+
 use gloo_storage::{LocalStorage, Storage};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use super::client::{ApiClient, ApiError};
 
@@ -178,9 +179,8 @@ impl McpServerService {
             None => configs.push(server),
         }
 
-        LocalStorage::set(MCP_STORAGE_KEY, &configs).map_err(|e| {
-            ApiError::Network(format!("Failed to save MCP config: {}", e))
-        })?;
+        LocalStorage::set(MCP_STORAGE_KEY, &configs)
+            .map_err(|e| ApiError::Network(format!("Failed to save MCP config: {}", e)))?;
 
         Ok(configs
             .into_iter()
@@ -193,9 +193,8 @@ impl McpServerService {
         let mut configs: Vec<McpServerConfig> =
             LocalStorage::get(MCP_STORAGE_KEY).unwrap_or_default();
         configs.retain(|c| c.key != key);
-        LocalStorage::set(MCP_STORAGE_KEY, &configs).map_err(|e| {
-            ApiError::Network(format!("Failed to delete MCP config: {}", e))
-        })?;
+        LocalStorage::set(MCP_STORAGE_KEY, &configs)
+            .map_err(|e| ApiError::Network(format!("Failed to delete MCP config: {}", e)))?;
         Ok(())
     }
 
@@ -261,9 +260,8 @@ impl McpServerService {
             }
         }
 
-        LocalStorage::set(MCP_STORAGE_KEY, &configs).map_err(|e| {
-            ApiError::Network(format!("Failed to import MCP config: {}", e))
-        })?;
+        LocalStorage::set(MCP_STORAGE_KEY, &configs)
+            .map_err(|e| ApiError::Network(format!("Failed to import MCP config: {}", e)))?;
 
         Ok(imported)
     }
@@ -302,14 +300,10 @@ impl McpServerService {
 
     /// Get tools for an MCP server
     pub async fn list_tools(&self, key: &str) -> Result<Vec<McpTool>, ApiError> {
-        let server = self
-            .get(key)?
-            .ok_or_else(|| ApiError::NotFound)?;
+        let server = self.get(key)?.ok_or_else(|| ApiError::NotFound)?;
 
         if server.status != McpServerStatus::Connected {
-            return Err(ApiError::Network(
-                "MCP client not connected".to_string(),
-            ));
+            return Err(ApiError::Network("MCP client not connected".to_string()));
         }
 
         // Return demo tools for connected servers

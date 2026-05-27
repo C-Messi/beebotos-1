@@ -55,8 +55,8 @@ use i18n::{init_i18n, I18nContext};
 use leptos_router::hooks::use_location;
 use pages::{
     AgentDetail, AgentsPage, AiCommercePage, AiStoreManagerPage, AiVideoMarketingPage,
-    ChannelsPage, DaoPage, Home, LlmConfigPage, LlmSettingsPage, LoginPage, McpServerPage, NotFound, RegisterPage,
-    SettingsPage, SetupPage, SkillInstancesPage, SkillsPage, TreasuryPage,
+    ChannelsPage, DaoPage, Home, LlmConfigPage, LlmSettingsPage, LoginPage, McpServerPage,
+    NotFound, RegisterPage, SettingsPage, SetupPage, SkillInstancesPage, SkillsPage, TreasuryPage,
     TreasuryTransactionsPage, WorkflowDashboardPage, WorkflowDetailPage,
 };
 use state::provide_app_state;

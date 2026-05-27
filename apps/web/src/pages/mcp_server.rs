@@ -34,18 +34,16 @@ pub fn McpServerPage() -> impl IntoView {
 
     let load_servers = {
         let servers = servers.clone();
-        move || {
-            match service.with_value(|s| s.list()) {
-                Ok(data) => {
-                    servers.set(data);
-                }
-                Err(e) => {
-                    app_state.notify(
-                        crate::state::notification::NotificationType::Error,
-                        "Load Failed",
-                        format!("Failed to load MCP servers: {}", e),
-                    );
-                }
+        move || match service.with_value(|s| s.list()) {
+            Ok(data) => {
+                servers.set(data);
+            }
+            Err(e) => {
+                app_state.notify(
+                    crate::state::notification::NotificationType::Error,
+                    "Load Failed",
+                    format!("Failed to load MCP servers: {}", e),
+                );
             }
         }
     };
@@ -401,7 +399,11 @@ fn McpServerCard(
         _ => "status-dot disconnected",
     };
 
-    let enabled_text = if server.config.enabled { "启用" } else { "禁用" };
+    let enabled_text = if server.config.enabled {
+        "启用"
+    } else {
+        "禁用"
+    };
     let transport_text = transport_display(&server.config.transport);
     let args_text = transport_args_display(&server.config.transport);
 
