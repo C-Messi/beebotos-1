@@ -1841,10 +1841,10 @@ async fn main() -> anyhow::Result<()> {
     // lifetime and can enforce a hard timeout.  Previously start_http_server
     // blocked forever with an internal shutdown_signal() and the code after it
     // (gateway.shutdown, telemetry cleanup) was unreachable dead code.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
     let tls_enabled = app_config.tls.as_ref().map(|t| t.enabled).unwrap_or(false);
     let server_handle = tokio::spawn(async move {
-        let shutdown = async {
+        let shutdown = async move {
             let _ = shutdown_rx.changed().await;
         };
         if tls_enabled {
@@ -3033,7 +3033,7 @@ async fn cleanup_workflow_instances(state: &Arc<AppState>) {
 async fn start_http_server(
     app: Router,
     addr: SocketAddr,
-    shutdown: impl std::future::Future<Output = ()>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     warn!("Starting HTTP server (TLS is disabled - not recommended for production)");
 
@@ -3055,7 +3055,7 @@ async fn start_https_server(
     app: Router,
     addr: SocketAddr,
     config: &AppConfig,
-    shutdown: impl std::future::Future<Output = ()>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     info!("Starting HTTPS server");
 

@@ -96,29 +96,24 @@ impl TaskMonitorService {
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(100);
 
-        let service = Self {
-            event_tx,
-            active_monitors: Arc::new(RwLock::new(HashMap::new())),
-            state_machine_service,
-            kernel,
-            processor_handle: Mutex::new(None),
-        };
-
         // Start background event processor
+        let active_monitors = Arc::new(RwLock::new(HashMap::new()));
         let processor = Self::start_event_processor(
             event_rx,
-            service.active_monitors.clone(),
-            service.state_machine_service.clone(),
+            active_monitors.clone(),
+            state_machine_service.clone(),
         );
 
-        // 🟢 P1 FIX: Store the processor handle so shutdown() can abort it.
-        // The previous code shadowed service.processor_handle with a local variable,
-        // leaving the field permanently None.
-        if let Ok(mut guard) = service.processor_handle.lock() {
-            *guard = Some(processor);
+        // 🟢 P1 FIX: Store the processor handle directly during construction
+        // so shutdown() can abort it. The previous code used a local variable
+        // that shadowed the field, leaving it permanently None.
+        Self {
+            event_tx,
+            active_monitors,
+            state_machine_service,
+            kernel,
+            processor_handle: Mutex::new(Some(processor)),
         }
-
-        service
     }
 
     /// Spawn and monitor a kernel task

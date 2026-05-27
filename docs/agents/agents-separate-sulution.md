@@ -305,5 +305,48 @@ if let Ok(mut guard) = service.processor_handle.lock() {
 
 以上修改已写入代码，重新编译后即可生效。
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+修复后的代码已通过编译验证，以下是本次修复的最终确认：
+
+---
+
+## 编译结果
+
+```bash
+cargo check -p beebotos-gateway   # ✅ 通过，0 errors
+cargo check -p beebotos-agents    # ✅ 通过，0 errors
+```
+
+---
+
+## 修复内容回顾（4 个文件）
+
+| 文件 | 修复问题 | 关键改动 |
+|------|----------|----------|
+| `crates/agents/src/skills/executor.rs` | WASM 同步调用阻塞 Tokio worker | 将 `compile_cached → instantiate → call_typed → read_memory` 整条同步链移入 `tokio::task::spawn_blocking`，使 `tokio::time::timeout` 能可靠触发 |
+| `apps/gateway/src/main.rs` | Shutdown 代码不可达、服务器关闭无限挂起 | ① `start_http_server`/`start_https_server` 改为接收外部 `shutdown` future；② 移除 `return Ok(())` 死代码；③ 主线程通过 `watch::channel` 控制服务器关闭，并设置 **30 秒硬超时** |
+| `crates/foreign-rt/src/process_path/mod.rs` | 超时后产生僵尸进程 | `start_kill()` 后补充 `child.wait().await` |
+| `apps/gateway/src/services/task_monitor.rs` | 后台处理器句柄丢失 | 改为在 `Self { ... }` 构造时直接传入 `Mutex::new(Some(processor))` |
+
+---
+
+## 核心根因总结
+
+1. **WASM 执行阻塞 Tokio Worker**：`wasmtime` 的 `call_typed()` 是纯同步调用，不 yield 给 async runtime。当 WASM skill 超时或用户点击停止时，外层的 `tokio::select!` 虽然能选中 timeout/cancel 分支，但被 drop 的 future 内部的 WASM 线程仍在阻塞运行，导致该 worker 线程无法回收。Gateway 停止时，Tokio runtime 会等待所有 worker 结束，因此进程**永远无法完全退出**，8000 端口持续被占用。
+
+2. **Gateway shutdown 逻辑是死代码**：`main.rs` 中 `start_http_server` 返回后直接 `return Ok(())`，后面的 `gateway.shutdown()`、`telemetry::shutdown_telemetry()`、gRPC 和 cleanup 启动等代码**永远不会执行**。
+
+---
+
+## 修复后效果
+
+- WASM skill 超时/取消时，同步执行运行在独立线程池（`spawn_blocking`），Tokio async worker 不再被卡住
+- Gateway 停止时，HTTP 服务器最多等待 30 秒，超时后强制继续执行清理流程
+- 所有后台任务（gRPC、cleanup）在退出前被显式 `abort`
+- 子进程超时后被正确 reap，不再产生僵尸进程
+
+重新编译部署后即可解决"超时/停止后 gateway 无法停止、端口占用"的问题。
+
 
 
