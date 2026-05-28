@@ -79,6 +79,16 @@ fn merge_messages(
     });
 }
 
+fn attach_streaming_tool_calls(
+    mut message: ChatMessage,
+    streaming_tool_calls: &[ToolCallEvent],
+) -> ChatMessage {
+    if message.role == MessageRole::Assistant && message.metadata.tool_calls.is_empty() {
+        message.metadata.tool_calls = streaming_tool_calls.to_vec();
+    }
+    message
+}
+
 /// WebSocket 连接状态
 #[derive(Clone, Debug, PartialEq)]
 pub enum WsConnectionStatus {
@@ -207,6 +217,10 @@ pub fn use_websocket_chat() -> ReadSignal<WsConnectionStatus> {
                             if let Some(msg_json) = json.get("message") {
                                 match serde_json::from_value::<ChatMessage>(msg_json.clone()) {
                                     Ok(message) => {
+                                        let message = attach_streaming_tool_calls(
+                                            message,
+                                            &chat_state_msg.streaming_tool_calls.get_untracked(),
+                                        );
                                         let msg_id = message.id.clone();
                                         if let Some(session_id) = session_id {
                                             merge_messages(
@@ -407,4 +421,54 @@ pub fn use_websocket_chat() -> ReadSignal<WsConnectionStatus> {
     });
 
     status
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assistant_message(tool_calls: Vec<ToolCallEvent>) -> ChatMessage {
+        ChatMessage {
+            id: "msg-1".to_string(),
+            role: MessageRole::Assistant,
+            content: "Done".to_string(),
+            timestamp: "2026-05-28T00:00:00Z".to_string(),
+            attachments: vec![],
+            metadata: MessageMetadata {
+                tool_calls,
+                ..Default::default()
+            },
+            token_usage: None,
+        }
+    }
+
+    fn tool_call() -> ToolCallEvent {
+        ToolCallEvent {
+            id: "tool-1".to_string(),
+            round: 1,
+            tool_name: "list_directory".to_string(),
+            reasoning: "check files".to_string(),
+            arguments: serde_json::json!({"path": "."}),
+            status: "started".to_string(),
+            timestamp: "2026-05-28T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn final_message_keeps_streaming_tool_calls_when_missing_metadata() {
+        let message = attach_streaming_tool_calls(assistant_message(vec![]), &[tool_call()]);
+
+        assert_eq!(message.metadata.tool_calls.len(), 1);
+        assert_eq!(message.metadata.tool_calls[0].tool_name, "list_directory");
+    }
+
+    #[test]
+    fn final_message_keeps_backend_tool_call_metadata() {
+        let backend_tool_call = tool_call();
+        let message =
+            attach_streaming_tool_calls(assistant_message(vec![backend_tool_call]), &[tool_call()]);
+
+        assert_eq!(message.metadata.tool_calls.len(), 1);
+        assert_eq!(message.metadata.tool_calls[0].id, "tool-1");
+    }
 }

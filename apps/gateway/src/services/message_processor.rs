@@ -23,6 +23,7 @@ use crate::clients::ClawHubClient;
 use crate::error::GatewayError;
 use crate::services::agent_resolver::AgentResolver;
 use crate::services::llm_service::LlmService;
+use crate::services::react_trace_ws::ToolCallTraceStore;
 use crate::services::webchat_service::WebchatService;
 
 /// 消息处理器
@@ -48,6 +49,7 @@ pub struct MessageProcessor {
         Option<Arc<tokio::sync::RwLock<beebotos_agents::workflow::WorkflowRegistry>>>,
     /// ClawHub 客户端（技能市场）
     clawhub_client: Option<ClawHubClient>,
+    tool_call_trace_store: Option<Arc<ToolCallTraceStore>>,
 }
 
 impl MessageProcessor {
@@ -62,6 +64,7 @@ impl MessageProcessor {
             Arc<tokio::sync::RwLock<beebotos_agents::workflow::WorkflowRegistry>>,
         >,
         clawhub_client: Option<ClawHubClient>,
+        tool_call_trace_store: Option<Arc<ToolCallTraceStore>>,
     ) -> Self {
         Self {
             deduplicator: Arc::new(MessageDeduplicator::default()),
@@ -74,6 +77,7 @@ impl MessageProcessor {
             skill_registry,
             workflow_registry,
             clawhub_client,
+            tool_call_trace_store,
         }
     }
 
@@ -729,6 +733,7 @@ impl MessageProcessor {
             skill_registry: self.skill_registry.as_ref().map(Arc::clone),
             workflow_registry: self.workflow_registry.as_ref().map(Arc::clone),
             clawhub_client: self.clawhub_client.clone(),
+            tool_call_trace_store: self.tool_call_trace_store.as_ref().map(Arc::clone),
         });
         // 🆕 FIX: Register cancellation token for this session before spawning
         // background task. The returned generation token prevents a slow old
@@ -742,6 +747,12 @@ impl MessageProcessor {
                 "cancellation_generation".to_string(),
                 serde_json::json!(cancel_gen.to_string()),
             );
+        }
+        if platform == PlatformType::WebChat {
+            if let Some(store) = &self.tool_call_trace_store {
+                let _ = store.drain(&db_session_id);
+                store.start_session(&db_session_id);
+            }
         }
 
         let task = gateway::TaskConfig {
@@ -942,7 +953,13 @@ impl MessageProcessor {
             // Capture tool calls only after the stream consumer has finished
             // draining the side-channel events, so the persisted message keeps
             // the complete tool-call list.
-            let tool_calls_snapshot = tool_calls_bg.lock().await.clone();
+            let trace_tool_calls = processor
+                .tool_call_trace_store
+                .as_ref()
+                .map(|store| store.finish_session(&db_session_id_bg))
+                .unwrap_or_default();
+            let tool_calls_snapshot =
+                merge_tool_call_snapshots(tool_calls_bg.lock().await.clone(), trace_tool_calls);
 
             // 持久化 AI 回复
             let mut saved_message_id: Option<String> = None;
@@ -1045,6 +1062,9 @@ impl MessageProcessor {
                     }
                 }
                 Err(e) if e.is_cancelled() => {
+                    if let Some(store) = processor_cleanup.tool_call_trace_store.as_ref() {
+                        let _ = store.finish_session(&db_session_id_cleanup);
+                    }
                     info!(
                         "[BG] Agent task interrupted for WebChat session {}",
                         channel_id_cleanup
@@ -1118,6 +1138,9 @@ impl MessageProcessor {
                     }
                 }
                 Err(e) => {
+                    if let Some(store) = processor_cleanup.tool_call_trace_store.as_ref() {
+                        let _ = store.finish_session(&db_session_id_cleanup);
+                    }
                     let err = format!("Agent task join failed: {}", e);
                     warn!("[BG] {} for session {}", err, channel_id_cleanup);
                     if let Some(tx) = completion_tx {
@@ -3149,6 +3172,27 @@ impl ImageFormat {
     }
 }
 
+fn merge_tool_call_snapshots(
+    stream_calls: Vec<serde_json::Value>,
+    trace_calls: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut calls = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for call in stream_calls.into_iter().chain(trace_calls) {
+        let key = serde_json::json!({
+            "round": call.get("round").cloned().unwrap_or(serde_json::Value::Null),
+            "tool_name": call.get("tool_name").cloned().unwrap_or(serde_json::Value::Null),
+            "arguments": call.get("arguments").cloned().unwrap_or(serde_json::Value::Null),
+            "status": call.get("status").cloned().unwrap_or(serde_json::Value::Null),
+        })
+        .to_string();
+        if seen.insert(key) {
+            calls.push(call);
+        }
+    }
+    calls
+}
+
 /// 消息部分
 enum MessagePart {
     Text(String),
@@ -3247,5 +3291,27 @@ mod tests {
         assert_eq!(facts[0].action, MemoryPromotionAction::Replace);
         assert_eq!(facts[0].file_type, MemoryFileType::User);
         assert_eq!(facts[0].replace_match.as_deref(), Some("打篮球"));
+    }
+
+    #[test]
+    fn merges_stream_and_trace_tool_calls() {
+        let calls = merge_tool_call_snapshots(
+            vec![serde_json::json!({
+                "round": 1,
+                "tool_name": "mcp_tool_search",
+                "arguments": {"q": "time"},
+                "status": "started"
+            })],
+            vec![serde_json::json!({
+                "round": 2,
+                "tool_name": "get_time",
+                "arguments": {"timezone": "Asia/Shanghai"},
+                "status": "started"
+            })],
+        );
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["tool_name"], "mcp_tool_search");
+        assert_eq!(calls[1]["tool_name"], "get_time");
     }
 }

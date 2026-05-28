@@ -10,27 +10,9 @@ pub fn SessionList(
     sessions: Signal<Vec<ChatSession>>,
     #[prop(into)] selected_id: Signal<String>,
     #[prop(optional)] on_select: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
-    #[prop(optional)] on_new: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 ) -> impl IntoView {
     view! {
         <div class="session-list-container">
-            <div class="session-list-header">
-                <h3>"Sessions"</h3>
-                <button
-                    class="btn btn-primary btn-sm"
-                    on:click={
-                        let on_new = on_new.clone();
-                        move |_| {
-                            if let Some(ref cb) = on_new {
-                                cb();
-                            }
-                        }
-                    }
-                >
-                    "+ New"
-                </button>
-            </div>
-
             <div class="session-list">
                 {move || {
                     let on_select = on_select.clone();
@@ -59,7 +41,7 @@ pub fn SessionList(
                                 key=|session| session.id.clone()
                                 children=move |session: ChatSession| {
                                     let id = session.id.clone();
-                                    let is_selected = selected_id.get() == id;
+                                    let selected_id = selected_id;
                                     let is_active = !session.is_archived;
 
                                     {
@@ -67,7 +49,7 @@ pub fn SessionList(
                                         view! {
                                             <SessionListItem
                                                 session=session
-                                                is_selected=is_selected
+                                                selected_id=selected_id
                                                 is_active=is_active
                                                 on_select={
                                                     let on_select = on_select.clone();
@@ -94,15 +76,22 @@ pub fn SessionList(
 #[component]
 fn SessionListItem(
     session: ChatSession,
-    is_selected: bool,
+    #[prop(into)] selected_id: Signal<String>,
     is_active: bool,
     #[prop(into)] on_select: Callback<()>,
 ) -> impl IntoView {
-    let class = format!(
-        "session-list-item {} {}",
-        if is_selected { "selected" } else { "" },
-        if !is_active { "archived" } else { "" }
-    );
+    let session_id = session.id.clone();
+    let class = Signal::derive(move || {
+        format!(
+            "session-list-item {} {}",
+            if selected_id.get() == session_id {
+                "selected"
+            } else {
+                ""
+            },
+            if !is_active { "archived" } else { "" }
+        )
+    });
 
     let preview = session
         .messages
@@ -118,6 +107,13 @@ fn SessionListItem(
     view! {
         <div
             class=class
+            aria-current=move || {
+                if selected_id.get() == session.id {
+                    "true"
+                } else {
+                    "false"
+                }
+            }
             on:click=move |_| {
                 on_select.run(());
             }
