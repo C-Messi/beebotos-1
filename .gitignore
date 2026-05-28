@@ -74,6 +74,7 @@ apps/gateway/data/
 .env
 .env.*
 !.env.example
+config/local.toml
 *.pem
 *.key
 *.crt
