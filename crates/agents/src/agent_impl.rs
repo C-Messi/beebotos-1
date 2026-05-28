@@ -868,7 +868,14 @@ impl Agent {
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(200)
                     .clamp(1, 1000);
-                self.execute_workspace_glob(pattern, path, max_results)
+                let root = self.resolve_tool_path(if path.is_empty() { "." } else { path })?;
+                let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
+                let pattern = pattern.to_string();
+                tokio::task::spawn_blocking(move || {
+                    Self::execute_workspace_glob_sync(&root, &workspace, &pattern, max_results)
+                })
+                .await
+                .map_err(|e| AgentError::Execution(format!("Glob blocking task panicked: {}", e)))?
             }
             "grep" => {
                 let pattern = get("pattern")
@@ -888,7 +895,22 @@ impl Agent {
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(200)
                     .clamp(1, 1000);
-                self.execute_workspace_grep(pattern, path, include, case_sensitive, max_matches)
+                let root = self.resolve_tool_path(if path.is_empty() { "." } else { path })?;
+                let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
+                let pattern = pattern.to_string();
+                let include = include.map(|s| s.to_string());
+                tokio::task::spawn_blocking(move || {
+                    Self::execute_workspace_grep_sync(
+                        &root,
+                        &workspace,
+                        &pattern,
+                        include.as_deref(),
+                        case_sensitive,
+                        max_matches,
+                    )
+                })
+                .await
+                .map_err(|e| AgentError::Execution(format!("Grep blocking task panicked: {}", e)))?
             }
             "create_cron_job" => {
                 let provider = self.system_info_provider.as_ref().ok_or_else(|| {
@@ -1807,8 +1829,7 @@ impl Agent {
         inner(pattern.as_bytes(), text.as_bytes())
     }
 
-    fn collect_workspace_files(
-        &self,
+    fn collect_workspace_files_sync(
         root: &Path,
         limit: usize,
     ) -> Result<Vec<PathBuf>, AgentError> {
@@ -1839,19 +1860,17 @@ impl Agent {
         Ok(files)
     }
 
-    fn execute_workspace_glob(
-        &self,
+    fn execute_workspace_glob_sync(
+        root: &Path,
+        workspace: &Path,
         pattern: &str,
-        path: &str,
         max_results: usize,
     ) -> Result<String, AgentError> {
-        let root = self.resolve_tool_path(if path.is_empty() { "." } else { path })?;
-        let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
-        let files = self.collect_workspace_files(&root, max_results.saturating_mul(20).max(200))?;
+        let files = Self::collect_workspace_files_sync(root, max_results.saturating_mul(20).max(200))?;
         let mut matches = Vec::new();
         for file in files {
             let rel = file
-                .strip_prefix(&workspace)
+                .strip_prefix(workspace)
                 .unwrap_or(&file)
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -1886,16 +1905,14 @@ impl Agent {
         }
     }
 
-    fn execute_workspace_grep(
-        &self,
+    fn execute_workspace_grep_sync(
+        root: &Path,
+        workspace: &Path,
         pattern: &str,
-        path: &str,
         include: Option<&str>,
         case_sensitive: bool,
         max_matches: usize,
     ) -> Result<String, AgentError> {
-        let root = self.resolve_tool_path(if path.is_empty() { "." } else { path })?;
-        let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
         let regex_pattern = if case_sensitive {
             pattern.to_string()
         } else {
@@ -1904,15 +1921,15 @@ impl Agent {
         let re = regex::Regex::new(&regex_pattern)
             .map_err(|e| AgentError::Execution(format!("Invalid grep regex: {}", e)))?;
         let files = if root.is_file() {
-            vec![root.clone()]
+            vec![root.to_path_buf()]
         } else {
-            self.collect_workspace_files(&root, max_matches.saturating_mul(50).max(500))?
+            Self::collect_workspace_files_sync(root, max_matches.saturating_mul(50).max(500))?
         };
 
         let mut lines = Vec::new();
         for file in files {
             let rel = file
-                .strip_prefix(&workspace)
+                .strip_prefix(workspace)
                 .unwrap_or(&file)
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -1963,6 +1980,30 @@ impl Agent {
                 lines.join("\n")
             ))
         }
+    }
+
+    fn execute_workspace_glob(
+        &self,
+        pattern: &str,
+        path: &str,
+        max_results: usize,
+    ) -> Result<String, AgentError> {
+        let root = self.resolve_tool_path(if path.is_empty() { "." } else { path })?;
+        let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
+        Self::execute_workspace_glob_sync(&root, &workspace, pattern, max_results)
+    }
+
+    fn execute_workspace_grep(
+        &self,
+        pattern: &str,
+        path: &str,
+        include: Option<&str>,
+        case_sensitive: bool,
+        max_matches: usize,
+    ) -> Result<String, AgentError> {
+        let root = self.resolve_tool_path(if path.is_empty() { "." } else { path })?;
+        let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
+        Self::execute_workspace_grep_sync(&root, &workspace, pattern, include, case_sensitive, max_matches)
     }
 
     fn is_blocked_web_host(host: &str) -> bool {
@@ -7835,84 +7876,122 @@ impl Agent {
             optimize: true,
         };
 
-        // Create sandboxed engine
-        let engine = match beebotos_kernel::wasm::WasmEngine::new(engine_config) {
-            Ok(e) => e,
-            Err(e) => {
-                warn!("Failed to create sandboxed WASM engine: {}", e);
-                return Ok(None);
-            }
-        };
+        let config_id = self.config.id.clone();
+        let entry_point = entry_point.to_string();
+        let input = input.to_string();
+        let timeout_ms = limits.max_execution_time_secs.saturating_mul(1000);
 
-        // Compile WASM module
-        let module = match engine.compile(&wasm_bytes) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("WASM compilation failed: {}", e);
-                return Ok(None);
-            }
-        };
-
-        // Instantiate with host functions
-        let mut instance = match engine.instantiate_with_host(&module, &self.config.id) {
-            Ok(i) => i,
-            Err(e) => {
-                warn!("WASM instantiation failed: {}", e);
-                return Ok(None);
-            }
-        };
-
-        // Write input to WASM memory
-        let input_bytes = input.as_bytes();
-        if let Err(e) = instance.write_memory(0, input_bytes) {
-            warn!("Failed to write input to WASM memory: {}", e);
-            return Ok(None);
-        }
-
-        // Execute with fuel metering (CPU limit enforced by wasmtime engine config)
-        const MAX_OUTPUT_SIZE: usize = 65536;
-        let call_result =
-            instance.call_typed::<(i32, i32), i32>(entry_point, (0i32, input_bytes.len() as i32));
-
-        match call_result {
-            Ok(output_ptr) => {
-                let output_addr = output_ptr as usize;
-                // Read output length (first 4 bytes)
-                match instance.read_memory(output_addr, 4) {
-                    Ok(len_bytes) => {
-                        let output_len = u32::from_le_bytes([
-                            len_bytes[0],
-                            len_bytes[1],
-                            len_bytes[2],
-                            len_bytes[3],
-                        ]) as usize;
-                        if output_len <= MAX_OUTPUT_SIZE {
-                            match instance.read_memory(output_addr + 4, output_len) {
-                                Ok(output_bytes) => {
-                                    if let Ok(output) = String::from_utf8(output_bytes) {
-                                        return Ok(Some(skills::executor::SkillExecutionResult {
-                                            task_id: entry_point.to_string(),
-                                            success: true,
-                                            output,
-                                            structured_output: None,
-                                            execution_time_ms: start_time.elapsed().as_millis()
-                                                as u64,
-                                        }));
-                                    }
-                                }
-                                Err(e) => warn!("Failed to read WASM output: {}", e),
-                            }
-                        } else {
-                            warn!("WASM output too large: {} bytes", output_len);
-                        }
-                    }
-                    Err(e) => warn!("Failed to read WASM output length: {}", e),
+        // 🟢 P0 FIX: Move the entire synchronous WASM execution chain into
+        // tokio::task::spawn_blocking.  Wasmtime's call_typed() runs synchronously
+        // and never yields to the Tokio runtime.  When a WASM guest enters an
+        // infinite loop the tokio worker thread is pinned, which means outer
+        // tokio::time::timeout / tokio::select! cancellation cannot fire promptly.
+        // Running on a dedicated blocking thread allows the async runtime to stay
+        // responsive so the task can be dropped and locks released.
+        let blocking_task = tokio::task::spawn_blocking(move || {
+            // Create sandboxed engine
+            let engine = match beebotos_kernel::wasm::WasmEngine::new(engine_config) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("Failed to create sandboxed WASM engine: {}", e);
+                    return Ok(None);
                 }
-            }
-            Err(e) => warn!("WASM function call failed: {}", e),
-        }
+            };
 
-        Ok(None)
+            // Compile WASM module
+            let module = match engine.compile(&wasm_bytes) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("WASM compilation failed: {}", e);
+                    return Ok(None);
+                }
+            };
+
+            // Instantiate with host functions
+            let mut instance = match engine.instantiate_with_host(&module, &config_id) {
+                Ok(i) => i,
+                Err(e) => {
+                    warn!("WASM instantiation failed: {}", e);
+                    return Ok(None);
+                }
+            };
+
+            // Write input to WASM memory
+            let input_bytes = input.as_bytes();
+            if let Err(e) = instance.write_memory(0, input_bytes) {
+                warn!("Failed to write input to WASM memory: {}", e);
+                return Ok(None);
+            }
+
+            // Execute with fuel metering (CPU limit enforced by wasmtime engine config)
+            const MAX_OUTPUT_SIZE: usize = 65536;
+            let call_result = instance
+                .call_typed::<(i32, i32), i32>(&entry_point, (0i32, input_bytes.len() as i32));
+
+            match call_result {
+                Ok(output_ptr) => {
+                    let output_addr = output_ptr as usize;
+                    // Read output length (first 4 bytes)
+                    match instance.read_memory(output_addr, 4) {
+                        Ok(len_bytes) => {
+                            let output_len = u32::from_le_bytes([
+                                len_bytes[0],
+                                len_bytes[1],
+                                len_bytes[2],
+                                len_bytes[3],
+                            ]) as usize;
+                            if output_len <= MAX_OUTPUT_SIZE {
+                                match instance.read_memory(output_addr + 4, output_len) {
+                                    Ok(output_bytes) => {
+                                        if let Ok(output) = String::from_utf8(output_bytes) {
+                                            return Ok(Some(
+                                                skills::executor::SkillExecutionResult {
+                                                    task_id: entry_point,
+                                                    success: true,
+                                                    output,
+                                                    structured_output: None,
+                                                    execution_time_ms: start_time
+                                                        .elapsed()
+                                                        .as_millis()
+                                                        as u64,
+                                                },
+                                            ));
+                                        }
+                                    }
+                                    Err(e) => warn!("Failed to read WASM output: {}", e),
+                                }
+                            } else {
+                                warn!("WASM output too large: {} bytes", output_len);
+                            }
+                        }
+                        Err(e) => warn!("Failed to read WASM output length: {}", e),
+                    }
+                }
+                Err(e) => warn!("WASM function call failed: {}", e),
+            }
+
+            Ok(None)
+        });
+
+        if timeout_ms > 0 {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(timeout_ms),
+                blocking_task,
+            )
+            .await
+            .map_err(|_| {
+                AgentError::Timeout("WASM sandbox execution timed out".to_string())
+            })?
+            .map_err(|e| {
+                AgentError::Execution(format!("WASM blocking task panicked: {}", e))
+            })?
+        } else {
+            blocking_task
+                .await
+                .map_err(|e| {
+                    AgentError::Execution(format!("WASM blocking task panicked: {}", e))
+                })?
+        }
     }
 
     async fn execute_registered_skill(

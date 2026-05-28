@@ -2,11 +2,11 @@
 //!
 //! 管理多轮对话上下文，支持跨消息的记忆和状态保持
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
 use uuid::Uuid;
 
@@ -51,12 +51,35 @@ pub struct SessionMessage {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+/// 会话处理锁 Guard
+///
+/// 在获取时将会话 ID 加入 processing 集合，在 Drop 时自动移除。
+pub struct ProcessingGuard {
+    processing: Arc<Mutex<HashSet<String>>>,
+    session_id: String,
+}
+
+impl Drop for ProcessingGuard {
+    fn drop(&mut self) {
+        let processing = self.processing.clone();
+        let session_id = self.session_id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut guard = processing.lock().await;
+                guard.remove(&session_id);
+            });
+        }
+    }
+}
+
 /// 会话管理器
 pub struct SessionManager {
     /// 会话存储
     sessions: RwLock<HashMap<String, Session>>,
     /// 用户当前会话映射 (user_id -> session_id)
     user_sessions: RwLock<HashMap<String, String>>,
+    /// 正在处理消息的会话 ID 集合
+    processing: Arc<Mutex<HashSet<String>>>,
     /// 会话超时时间（秒）
     timeout_seconds: u64,
     /// 最大消息历史数
@@ -69,6 +92,7 @@ impl SessionManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             user_sessions: RwLock::new(HashMap::new()),
+            processing: Arc::new(Mutex::new(HashSet::new())),
             timeout_seconds,
             max_history,
         }
@@ -140,6 +164,24 @@ impl SessionManager {
 
         info!("🆕 创建新会话: {} (用户: {})", session_id, user_id);
         Ok(session)
+    }
+
+    /// 尝试获取会话的处理锁
+    ///
+    /// 如果该会话当前没有正在处理的消息，则获取锁并返回 guard；
+    /// 如果已经有消息在处理中，则返回 None。
+    /// guard 会在 Drop 时自动释放锁。
+    pub async fn try_start_processing(&self, session_id: &str) -> Option<ProcessingGuard> {
+        let mut processing = self.processing.lock().await;
+        if processing.contains(session_id) {
+            None
+        } else {
+            processing.insert(session_id.to_string());
+            Some(ProcessingGuard {
+                processing: self.processing.clone(),
+                session_id: session_id.to_string(),
+            })
+        }
     }
 
     /// 添加消息到会话

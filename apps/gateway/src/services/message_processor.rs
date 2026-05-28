@@ -136,6 +136,13 @@ impl MessageProcessor {
 
         info!("💬 会话 {} - 用户 {} 发送消息", session.id, user_id);
 
+        // 2.1 会话并发保护：同一 session 同时只能处理一条消息
+        let _processing_guard = self.session_manager.try_start_processing(&session.id).await;
+        if _processing_guard.is_none() {
+            info!("⏳ 会话 {} 正在处理中，跳过新消息", session.id);
+            return Ok(());
+        }
+
         // 2.5 统一获取/创建 DB session
         let db_session_id = if let Some(ref svc) = self.webchat_service {
             if platform == PlatformType::WebChat {
@@ -425,6 +432,13 @@ impl MessageProcessor {
             })?;
 
         info!("💬 会话 {} - 用户 {} 发送消息", session.id, user_id);
+
+        // 2.1 会话并发保护：同一 session 同时只能处理一条消息
+        let _processing_guard = self.session_manager.try_start_processing(&session.id).await;
+        if _processing_guard.is_none() {
+            info!("⏳ 会话 {} 正在处理中，跳过新消息", session.id);
+            return Ok(());
+        }
 
         // 2.5 统一获取/创建 DB session
         let db_session_id = if let Some(ref svc) = self.webchat_service {

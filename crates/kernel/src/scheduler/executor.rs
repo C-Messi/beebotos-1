@@ -363,6 +363,8 @@ pub struct ThreadPoolExecutor {
     shutdown: Arc<AtomicBool>,
     task_map: Arc<RwLock<HashMap<TaskId, Arc<ExecutableTask>>>>,
     num_workers: usize,
+    /// Isolated tokio runtime for kernel workers to avoid blocking the HTTP runtime
+    runtime: std::sync::Mutex<Option<tokio::runtime::Runtime>>,
 }
 
 impl ThreadPoolExecutor {
@@ -395,25 +397,39 @@ impl ThreadPoolExecutor {
             workers.push(worker);
         }
 
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(num_workers)
+            .thread_name("kernel-worker")
+            .enable_all()
+            .build()
+            .expect("Failed to create kernel thread pool runtime");
+
         Self {
             workers,
             queues,
             shutdown,
             task_map: Arc::new(RwLock::new(HashMap::new())),
             num_workers,
+            runtime: std::sync::Mutex::new(Some(runtime)),
         }
     }
 
-    /// Start all workers
+    /// Start all workers on the isolated runtime
     pub fn start(&self) {
-        for worker in &self.workers {
-            let worker = worker.clone();
-            tokio::spawn(async move {
-                worker.run().await;
-            });
+        let handle = {
+            let guard = self.runtime.lock().unwrap();
+            guard.as_ref().map(|rt| rt.handle().clone())
+        };
+        if let Some(handle) = handle {
+            for worker in &self.workers {
+                let worker = worker.clone();
+                handle.spawn(async move {
+                    worker.run().await;
+                });
+            }
         }
         debug!(
-            "Thread pool executor started with {} workers",
+            "Thread pool executor started with {} workers on isolated runtime",
             self.num_workers
         );
     }
@@ -482,6 +498,11 @@ impl ThreadPoolExecutor {
         // Wake all workers
         for queue in &self.queues {
             queue.notify.notify_one();
+        }
+        // Shut down the isolated runtime
+        let mut guard = self.runtime.lock().unwrap();
+        if let Some(runtime) = guard.take() {
+            runtime.shutdown_background();
         }
     }
 
