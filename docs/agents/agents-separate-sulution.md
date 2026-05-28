@@ -840,6 +840,424 @@ if _processing_guard.is_none() {
 
 三项修复代码质量良好，公共 API 无破坏性变更，**`beebotos-kernel` 全部 182 个单元测试通过**，修改完整可用。
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+基于对 `beebotos` 项目代码和运行环境的深入分析，**问题不是 OKX CLI 本身没有网络权限，而是 `beebotos` 的 Skill 进程沙箱（Sandbox）在特定条件下会隔离网络命名空间，导致 OKX CLI 子进程无法访问网络。**
+
+以下是详细分析：
+
+---
+
+## 1. 直接诊断：OKX CLI 网络完全正常
+
+当前环境中，OKX CLI 的网络访问没有任何问题：
+
+| 检查项 | 结果 |
+|-------|------|
+| `okx diagnose` DNS 解析 | ✅ `www.okx.com` → 198.18.2.55 |
+| `okx diagnose` TCP 443 | ✅ 5ms 连通 |
+| `okx diagnose` TLS 握手 | ✅ 正常 |
+| `okx diagnose` API /public/time | ✅ HTTP 200 |
+| `okx market ticker BTC-USDT` | ✅ 成功获取数据 |
+| `curl https://www.okx.com/api/v5/public/time` | ✅ HTTP 200 |
+
+**结论：OKX CLI 二进制本身有完整的网络权限。**
+
+---
+
+## 2. 根本原因：beebotos Skill Sandbox 的网络隔离
+
+在 `beebotos/crates/agents/src/skills/process_sandbox.rs` 中，所有 Skill 子进程（包括调用 OKX CLI 的进程）启动前都会被施加沙箱约束：
+
+```rust
+// 第 35-51 行
+pub fn apply(command: &mut tokio::process::Command) {
+    unsafe {
+        command.pre_exec(|| {
+            let allow_network = std::env::var("BEE_ALLOW_NETWORK").is_ok();
+            let flags = libc::CLONE_NEWNS
+                | libc::CLONE_NEWPID
+                | (if allow_network { 0 } else { libc::CLONE_NEWNET })  // ← 关键
+                | libc::CLONE_NEWIPC
+                | libc::CLONE_NEWUTS;
+            if libc::unshare(flags) != 0 {
+                // 非致命：继续运行（例如在 Docker 无特权时）
+            }
+            // ... seccomp、权限降级等
+        });
+    }
+}
+```
+
+**核心机制：**
+- 当 `BEE_ALLOW_NETWORK` **环境变量不存在**时，沙箱会设置 `CLONE_NEWNET` 标志
+- 这会创建一个**全新的网络命名空间**，该命名空间默认没有任何网络接口（除了 loopback），导致子进程完全无法访问外部网络
+- `BEE_ALLOW_NETWORK` 的检查使用的是 `.is_ok()`，意味着只要变量**存在**即可，不在乎值是 `1` 还是 `0`
+
+---
+
+## 3. 为什么 `.env` 中设置了却可能不生效
+
+你的 `.env` 文件中确实写了：
+```env
+BEE_ALLOW_NETWORK=1
+```
+
+**但问题在于：环境变量是否被加载到运行 beebotos 的进程中？**
+
+| 入口 | 是否加载 `.env` | 风险 |
+|-----|----------------|------|
+| `apps/gateway/src/main.rs` | ✅ 有 `dotenvy::dotenv().ok()` | 如果 `.env` 不在启动目录，可能加载失败 |
+| `apps/cli/src/main.rs` | ❌ **没有 `dotenvy` 调用** | **CLI 模式下几乎一定不加载 `.env`** |
+| 直接运行 `cargo run` | 取决于代码 | 可能不加载 |
+
+**这意味着：**
+- 如果你通过 `beebotos` CLI 工具运行，由于 CLI 没有调用 `dotenvy`，`BEE_ALLOW_NETWORK` 不会被加载，Skill 沙箱就会阻断网络
+- 如果你通过 Gateway 服务运行，Gateway 会尝试加载 `.env`，但如果启动目录不对（比如从项目子目录启动），加载可能失败
+
+---
+
+## 4. 调用链路验证：OKX Skill 如何被执行
+
+`beebotos` 调用 OKX CLI 的链路是：
+
+1. Agent 执行 Skill（如 `okx-cex-market`）
+2. Skill 通过 `bash_shell` 或 `process_exec` 工具执行 `okx` 命令
+3. `BashShellTool` 内部委托给 `ProcessExecTool`
+4. `ProcessExecTool::execute()` 在 spawn 前调用 `apply_sandbox()`
+5. `apply_sandbox()` 根据 `BEE_ALLOW_NETWORK` 决定是否隔离网络
+
+```rust
+// crates/agents/src/skills/tool_set.rs 第 451 行
+apply_sandbox(&mut cmd, &default_dir);
+```
+
+---
+
+## 5. 其他可能因素
+
+| 因素 | 状态 | 影响 |
+|-----|------|------|
+| 系统防火墙 (`ufw`) | 未激活 (`inactive`) | 无影响 |
+| HTTP 代理 | 未配置 | 无影响 |
+| DNS 解析 | 正常 (127.0.0.53) | 无影响 |
+| `okx-pilot` 二进制 | 已安装，checksum 校验通过 | 无影响 |
+| Pilot 连接模式 | `direct`（直连） | 正常 |
+| Docker 特权 | 如果运行在无特权容器 | `unshare` 会失败，sandbox 不生效，网络反而**不会**被阻断 |
+
+---
+
+## 6. 结论与修复建议
+
+**结论：OKX CLI 本身有网络权限。"访问网络被阻断"的原因是 `beebotos` 的 Linux 进程沙箱在未检测到 `BEE_ALLOW_NETWORK` 环境变量时，通过 `CLONE_NEWNET` 隔离了 Skill 子进程的网络命名空间。**
+
+**修复方案（按优先级）：**
+
+1. **确保环境变量被加载**（最可能的原因）：
+   ```bash
+   export BEE_ALLOW_NETWORK=1
+   ```
+   或者在启动 beebotos 前显式加载：
+   ```bash
+   set -a && source /root/beebotos/.env && set +a
+   ```
+
+2. **如果通过 CLI 启动**：由于 CLI 不自动加载 `.env`，需要手动导出上述变量，或者修改 `apps/cli/src/main.rs` 添加 `dotenvy::dotenv().ok();`
+
+3. **验证环境变量是否生效**：
+   ```bash
+   env | grep BEE_ALLOW_NETWORK
+   ```
+
+4. **验证沙箱是否生效**：在有网络权限的环境中，如果 `unshare(CLONE_NEWNET)` 成功，但没有 `BEE_ALLOW_NETWORK`，你会看到命令超时或网络不可达的错误。如果 `unshare` 失败（如 Docker 无特权），你会在日志中看到 `beebotos-sandbox: unshare failed, continuing without namespaces`，此时网络不会被阻断。
+
+5. **可选：升级 OKX CLI**：
+   ```bash
+   npm install -g @okx_ai/okx-trade-cli@latest
+   ```
+   当前版本 1.3.2，最新 1.3.5，虽不是网络阻断的根因，但建议保持更新。
+
+---
+
+**简而言之：这不是 OKX CLI 的权限问题，而是 beebotos 的运行环境没有正确将 `BEE_ALLOW_NETWORK=1` 传递给 Skill Sandbox。**
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+根据两边环境的对比，问题**不在 OKX CLI 本身，而在 Windows 电脑的网络环境**。
+
+---
+
+## 1. 关键差异：服务器位置不同
+
+当前 Ubuntu 环境的位置：
+
+```json
+"city": "Tokyo",
+"country": "JP",
+"org": "AS150318 Tokyo Online Co.,Ltd."
+```
+
+- **Ubuntu（日本东京）**：直连 `www.okx.com` → DNS 解析正常 → TCP 443 连通 → TLS 握手成功 → API 返回 200
+- **Windows（你的本地电脑）**：连接失败，提示 `Please check network connectivity`
+
+---
+
+## 2. 最可能的原因
+
+### 原因 A：中国大陆网络屏蔽（概率最高）
+如果你的 Windows 电脑在中国大陆，`www.okx.com` 及其 API 域名被防火墙（GFW）屏蔽：
+- DNS 解析可能被污染或返回无效 IP
+- TCP 连接会被重置或超时
+- 这与 OKX CLI 版本无关，任何工具直连都会失败
+
+### 原因 B：Windows 代理配置未生效
+Ubuntu 端 diagnose 显示 `Proxy: (none)`，说明是直连。如果 Windows 端有系统代理（Clash/V2Ray/SSR 等），但 OKX CLI **没有正确读取代理设置**，也会导致连接失败。
+
+OKX CLI 读取代理的优先级：
+1. 命令行 `--proxy` 参数
+2. `HTTP_PROXY` / `HTTPS_PROXY` 环境变量
+3. 系统代理（取决于 Node.js 底层实现，不一定能读到）
+
+### 原因 C：DNS 污染
+Windows 端的 DNS 可能被污染，将 `www.okx.com` 解析到了无法访问的 IP。
+
+### 原因 D：本地安全软件
+Windows Defender、360、火绒等可能拦截了 `okx` 或 `okx-pilot` 进程的网络请求。
+
+---
+
+## 3. Windows 端诊断步骤
+
+在 Windows PowerShell 中依次执行：
+
+```powershell
+# 1. 基础连通性测试
+ping www.okx.com
+nslookup www.okx.com
+
+# 2. 用 curl 测试 API（Windows 10+ 自带 curl）
+curl -v https://www.okx.com/api/v5/public/time
+
+# 3. OKX CLI 诊断
+okx diagnose
+
+# 4. 检查系统代理
+netsh winhttp show proxy
+
+# 5. 检查环境变量
+$env:HTTP_PROXY
+$env:HTTPS_PROXY
+```
+
+**预期结果判断：**
+- 如果 `ping` 不通或 `nslookup` 返回异常 IP → **DNS 污染 / GFW 阻断**
+- 如果 `curl` 返回超时或连接重置 → **网络层被墙**
+- 如果 `okx diagnose` 显示 `DNS resolve` 失败或 `TCP connect` 失败 → **确认网络不可达**
+
+---
+
+## 4. 解决方案
+
+### 方案 1：配置代理（推荐）
+
+如果 Windows 电脑已有代理工具（Clash/V2RayN 等），让 OKX CLI 走代理：
+
+```powershell
+# PowerShell 临时设置（当前窗口有效）
+$env:HTTP_PROXY="http://127.0.0.1:7890"
+$env:HTTPS_PROXY="http://127.0.0.1:7890"
+okx market ticker ETH-USDT
+```
+
+注意：端口号根据你的代理工具实际端口调整（Clash 默认 7890，V2RayN 默认 10809）。
+
+如果要永久生效，在系统环境变量中添加 `HTTP_PROXY` 和 `HTTPS_PROXY`。
+
+### 方案 2：TUN 模式 / 系统代理
+将代理工具设置为**系统代理**或开启 **TUN 模式**，让 `okx` 进程无需额外配置即可走代理。
+
+### 方案 3：换网络环境
+如果在中国大陆且没有代理，考虑：
+- 使用境外 VPS（如当前 Ubuntu 环境）
+- 使用香港/海外网络
+
+---
+
+## 5. 与 beebotos 的关联
+
+如果你打算在 Windows 上运行 beebotos + OKX skill：
+1. 必须确保 Windows 上 `okx` 命令能独立正常工作
+2. beebotos 的 `.env` 中虽然有 `BEE_ALLOW_NETWORK=1`，但这只控制 **beebotos sandbox 是否隔离网络**，不解决 Windows 本身能否访问 OKX 的问题
+3. 如果 Windows 无法直连 OKX，需要在系统层面配置代理，或者在 beebotos 启动前设置 `HTTP_PROXY` 环境变量
+
+---
+
+## 结论
+
+| 检查项 | Ubuntu（日本） | Windows（你的电脑） |
+|-------|--------------|------------------|
+| 地理位置 | 日本东京 | 未知（推测中国大陆） |
+| 到 OKX 网络 | 直连畅通 | 被阻断 |
+| 根因 | 无 | **网络环境问题**（GFW/代理/DNS） |
+| 修复对象 | 无需修复 | **Windows 网络/代理配置** |
+
+**请先在 Windows PowerShell 中运行 `okx diagnose`，把输出贴出来，可以精确定位是 DNS、TCP 还是 TLS 层面的问题。**
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&7
+
+
+根据 `beebotos` 代码库的检索，LLM 输出内容的最大数量**没有单一的全局硬编码上限**，而是分多个层级限制。以下是完整的分层分析：
+
+---
+
+## 1. 各 LLM Provider 的模型能力上限
+
+代码中各 Provider 声明的 `max_output_tokens`（即模型本身支持的最大输出 token 数）：
+
+| Provider | 最大输出 Tokens |
+|---------|----------------|
+| OpenAI (GPT-4o 等) | 4,096 |
+| OpenAI (o1/o3 系列) | 32,768 ~ 100,000 |
+| Anthropic (Claude) | 8,192 |
+| DeepSeek | 8,192 |
+| Kimi | 8,192 |
+| Qwen | 8,192 (部分模型 2,048) |
+| Gemini | 8,192 |
+| Zhipu | 4,096 |
+| Doubao | 4,096 |
+| Ollama | 4,096 |
+
+**这是物理层面的天花板**——即使你把 `max_tokens` 配置成 100 万，模型本身也只支持到上表中的数值。
+
+---
+
+## 2. 系统默认配置
+
+### 通用模型配置默认值
+```rust
+// crates/agents/src/models/mod.rs:43
+pub struct ModelConfig {
+    pub max_tokens: u32,  // 默认 = 2048
+}
+```
+
+### Gateway 运行时默认值
+```rust
+// crates/gateway-lib/src/agent_runtime.rs:133
+pub max_tokens: u32,  // 默认 = 2000
+```
+
+### Web 配置向导默认值
+```rust
+// apps/web/src/state/wizard.rs
+max_tokens: 4096
+```
+
+**结论：如果不做任何自定义配置，系统默认的 `max_tokens` 是 `2048`。**
+
+---
+
+## 3. Agent 上下文窗口与响应预留
+
+这是**整个对话（输入 + 输出）**的总容量限制：
+
+```rust
+// crates/agents/src/context/assembler.rs:17
+pub const DEFAULT_CONTEXT_WINDOW: usize = 258_000;  // 25.8 万 tokens
+
+// crates/agents/src/context/assembler.rs:199
+pub response_reserve: usize,  // 默认 = 4096
+```
+
+- **上下文总窗口**：`258,000` tokens
+- **为 LLM 响应预留**：`4,096` tokens
+- **可用于输入的历史消息**：`258,000 - 4,096 = 253,904` tokens
+
+这意味着：即使你把 `max_tokens` 设成 8,000，上下文组装器也最多只给响应预留 4,096 个 token 的"预算"。超出这个预算的历史消息会被截断或摘要。
+
+---
+
+## 4. 不同子系统的动态限制
+
+Agent 内部会根据任务类型**动态调整** `max_tokens`，避免小任务浪费 token：
+
+| 场景 | 动态 max_tokens |
+|-----|----------------|
+| Skill 选择（ranking） | `256` |
+| 意图分析（intent） | `512` |
+| 内存刷新（memory flush） | `500` |
+| 直接回答（direct answer） | `1,024` |
+| 普通 Agent 任务 | `1,600` |
+| 基于输入长度的动态分配 | `<30 字→300` / `<100 字→600` / `其他→1,200` |
+| 子 Agent 资源配额 | `10,000` |
+
+---
+
+## 5. 验证规则
+
+系统对配置的校验非常宽松：
+```rust
+// crates/agents/src/models/mod.rs:58
+if self.max_tokens == 0 {
+    return Err("max_tokens cannot be 0".to_string());
+}
+```
+
+**只检查了不能为 0，没有设置上限。** 所以理论上你可以在配置里写 `max_tokens = 100000`，但实际生效值会受 Provider 模型能力限制。
+
+---
+
+## 总结
+
+| 层级 | 数值 | 说明 |
+|-----|------|------|
+| **系统默认值** | `2,048` tokens | 不配置时的默认输出限制 |
+| **上下文总窗口** | `258,000` tokens | 输入+输出的总容量 |
+| **响应预留** | `4,096` tokens | 上下文组装器给输出预留的预算 |
+| **Provider 上限** | `4,096 ~ 100,000` | 取决于你调用的具体模型 |
+| **动态任务限制** | `256 ~ 10,000` | Agent 内部根据任务复杂度自动调整 |
+| **全局硬编码上限** | **无** | 代码中没有 `if max_tokens > X` 的绝对上限 |
+
+**如果你想知道"我当前配置下 LLM 最多能输出多少"，答案是：取 `{你的 max_tokens 配置, Provider 模型 max_output_tokens, 上下文响应预留 4096}` 三者的最小值。**
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&77
+
+## 2. 系统默认配置
+
+### 通用模型配置默认值
+```rust
+// crates/agents/src/models/mod.rs:43
+pub struct ModelConfig {
+    pub max_tokens: u32,  // 默认 = 2048
+}
+```
+
+### Gateway 运行时默认值
+```rust
+// crates/gateway-lib/src/agent_runtime.rs:133
+pub max_tokens: u32,  // 默认 = 2000
+```
+
+### Web 配置向导默认值
+```rust
+// apps/web/src/state/wizard.rs
+max_tokens: 4096
+```
+
+**结论：如果不做任何自定义配置，系统默认的 `max_tokens` 是 `2048`。**
+
+---
+
+系统默认的 `max_tokens` 是 `2048`，修改为“4096”。执行
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+已修改完成，两处系统默认配置均已更新：
+
+| 文件 | 原值 | 新值 |
+|-----|------|------|
+| `crates/agents/src/models/mod.rs:43` | `2048` | `4096` |
+| `crates/gateway-lib/src/agent_runtime.rs:133` | `2000` | `4096` |
+
+现在系统默认的 `max_tokens` 统一为 `4096`。
 
 

@@ -40,7 +40,7 @@ impl Default for ModelConfig {
             provider: "openai".to_string(),
             model: "gpt-4o-mini".to_string(),
             temperature: 0.7,
-            max_tokens: 2048,
+            max_tokens: 4096,
             top_p: 1.0,
         }
     }

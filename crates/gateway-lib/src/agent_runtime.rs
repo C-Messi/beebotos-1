@@ -130,7 +130,7 @@ impl Default for LlmConfig {
             model: "gpt-4".to_string(),
             api_key: None,
             temperature: 0.7,
-            max_tokens: 2000,
+            max_tokens: 4096,
         }
     }
 }
