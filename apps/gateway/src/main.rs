@@ -204,6 +204,7 @@ pub struct AppState {
     >,
     /// Message processor for channel events
     pub message_processor: Option<Arc<MessageProcessor>>,
+    pub tool_call_trace_store: Option<Arc<crate::services::react_trace_ws::ToolCallTraceStore>>,
     /// Agent resolver for mapping channels/users to agents
     pub agent_resolver: Option<Arc<AgentResolver>>,
     /// Channel-to-agent binding store
@@ -452,10 +453,17 @@ impl AppState {
             sandbox_level: SandboxLevel::Kernel,
             database_url: config.database.url.clone(),
         };
-        let react_trace_sink: Option<Arc<dyn beebotos_agents::ReActTraceSink>> =
-            ws_manager.as_ref().map(|ws| {
-                Arc::new(crate::services::react_trace_ws::WebSocketReActTraceSink::new(ws.clone()))
-                    as Arc<dyn beebotos_agents::ReActTraceSink>
+        let tool_call_trace_store = ws_manager
+            .as_ref()
+            .map(|_| Arc::new(crate::services::react_trace_ws::ToolCallTraceStore::default()));
+        let react_trace_sink: Option<Arc<dyn beebotos_agents::ReActTraceSink>> = ws_manager
+            .as_ref()
+            .zip(tool_call_trace_store.as_ref())
+            .map(|(ws, store)| {
+                Arc::new(
+                    crate::services::react_trace_ws::WebSocketReActTraceSink::new(ws.clone())
+                        .with_tool_call_store(store.clone()),
+                ) as Arc<dyn beebotos_agents::ReActTraceSink>
             });
         let mut gateway_llm_interface =
             crate::services::agent_runtime_manager::GatewayLLMInterface::new(llm_service.clone());
@@ -925,6 +933,7 @@ impl AppState {
                 std::collections::HashMap::new(),
             )),
             message_processor: None,
+            tool_call_trace_store,
             agent_resolver: Some(agent_resolver),
             channel_binding_store: Some(channel_binding_store),
             webchat_service,
@@ -1430,6 +1439,7 @@ async fn main() -> anyhow::Result<()> {
             app_state.skill_registry.clone(),
             app_state.workflow_registry.clone(),
             clawhub_client,
+            app_state.tool_call_trace_store.clone(),
         )));
     }
     let mut app_state = Arc::new(app_state);

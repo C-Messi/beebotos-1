@@ -9,6 +9,13 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{Element, HtmlElement};
 
+fn render_markdown_html(raw: &str) -> String {
+    let parser = pulldown_cmark::Parser::new_ext(raw, pulldown_cmark::Options::ENABLE_TABLES);
+    let mut html_output = String::new();
+    pulldown_cmark::html::push_html(&mut html_output, parser);
+    html_output
+}
+
 /// Markdown 渲染视图
 #[component]
 pub fn MarkdownView(
@@ -18,12 +25,7 @@ pub fn MarkdownView(
     let container_ref = NodeRef::<leptos::html::Div>::new();
 
     // 将 Markdown 解析为 HTML
-    let html_content = Signal::derive(move || {
-        let parser = pulldown_cmark::Parser::new(&raw);
-        let mut html_output = String::new();
-        pulldown_cmark::html::push_html(&mut html_output, parser);
-        html_output
-    });
+    let html_content = Signal::derive(move || render_markdown_html(&raw));
 
     // DOM 后处理：为代码块添加复制按钮和语言标签
     Effect::new(move |_| {
@@ -149,4 +151,18 @@ fn create_copy_button(pre: &HtmlElement, document: &web_sys::Document) -> Elemen
     onclick.forget();
 
     btn
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renders_markdown_tables() {
+        let html = render_markdown_html("| Tool | Result |\n| --- | --- |\n| list | ok |\n");
+
+        assert!(html.contains("<table>"));
+        assert!(html.contains("<th>Tool</th>"));
+        assert!(html.contains("<td>ok</td>"));
+    }
 }

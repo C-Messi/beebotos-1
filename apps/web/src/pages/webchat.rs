@@ -404,30 +404,25 @@ pub fn WebchatPage() -> impl IntoView {
         }
     });
 
-    let ui_state_sessions = ui_state.clone();
+    let show_sessions_panel = RwSignal::new(true);
     let ui_state_usage_show = ui_state.clone();
     let ui_state_usage_toggle = ui_state.clone();
     let ui_state_side_show = ui_state.clone();
     let ui_state_side_toggle = ui_state.clone();
-    let _ui_state_header = ui_state.clone();
     let chat_state_messages = chat_state.clone();
 
     view! {
         <Title text="Chat - BeeBotOS" />
         <div class="webchat-page">
             <div class="webchat-container">
-                {move || {
-                    if ui_state_sessions.show_sessions_panel.get() {
-                        view! {
-                            <SessionsSidebar on_select=on_select_session.clone() on_new=on_new_session.clone() />
-                        }.into_any()
-                    } else {
-                        view! { <div class="sidebar-collapsed" /> }.into_any()
-                    }
-                }}
+                <SessionsSidebar
+                    on_select=on_select_session.clone()
+                    on_new=on_new_session.clone()
+                    show_sessions_panel=show_sessions_panel
+                />
 
                 <main class="chat-main">
-                    <ChatHeader title=current_title />
+                    <ChatHeader title=current_title show_sessions_panel=show_sessions_panel />
                     {move || view! {
                         <MessageList
                             messages=chat_state_messages.current_messages.into()
@@ -507,52 +502,54 @@ pub fn WebchatPage() -> impl IntoView {
 fn SessionsSidebar(
     #[prop(into)] on_select: std::sync::Arc<dyn Fn(String) + Send + Sync>,
     #[prop(into)] on_new: std::sync::Arc<dyn Fn() + Send + Sync>,
+    show_sessions_panel: RwSignal<bool>,
 ) -> impl IntoView {
-    let ui_state = use_chat_ui_state();
     let chat_state = use_webchat_state();
 
     let on_new_chat = {
         let on_new = on_new.clone();
-        move |_| {
+        move |ev: leptos::ev::MouseEvent| {
+            ev.stop_propagation();
             on_new();
         }
     };
 
     view! {
-        <aside class="sessions-sidebar">
-            <div class="sidebar-header">
+        <aside
+            class="sessions-sidebar"
+            class:collapsed=move || !show_sessions_panel.get()
+            aria-hidden=move || if show_sessions_panel.get() { "false" } else { "true" }
+        >
+            <div
+                class="sidebar-header"
+                title="Collapse sessions"
+                on:click=move |_| show_sessions_panel.set(false)
+            >
                 <h3>"Sessions"</h3>
-                <button class="btn btn-icon" on:click=move |_| ui_state.toggle_sessions_panel()>
-                    "◀"
-                </button>
+                <div class="sidebar-header-actions">
+                    <button class="btn btn-primary btn-sm" on:click=on_new_chat>
+                        "+ New"
+                    </button>
+                    <button class="btn btn-icon" title="Collapse sessions">
+                        "◀"
+                    </button>
+                </div>
             </div>
 
-            <div class="sidebar-actions">
-                <button class="btn btn-primary btn-block" on:click=on_new_chat>
-                    "+ New Chat"
-                </button>
-            </div>
-
-            <div class="search-box">
-                <input
-                    type="text"
-                    placeholder="Search sessions..."
+            <div class="session-list-panel">
+                <SessionList
+                    sessions=chat_state.sessions.into()
+                    selected_id=Signal::derive(move || chat_state.current_session_id.get().unwrap_or_default())
+                    on_select=on_select.clone()
                 />
             </div>
-
-            <SessionList
-                sessions=chat_state.sessions.into()
-                selected_id=Signal::derive(move || chat_state.current_session_id.get().unwrap_or_default())
-                on_select=on_select.clone()
-                on_new=on_new.clone()
-            />
         </aside>
     }
 }
 
 /// 聊天头部
 #[component]
-fn ChatHeader(title: Signal<String>) -> impl IntoView {
+fn ChatHeader(title: Signal<String>, show_sessions_panel: RwSignal<bool>) -> impl IntoView {
     let ui_state = use_chat_ui_state();
 
     view! {
@@ -562,10 +559,9 @@ fn ChatHeader(title: Signal<String>) -> impl IntoView {
             </div>
 
             <div class="header-actions">
-                <button class="btn btn-icon" title="New Chat" on:click={
-                    let ui_state = ui_state.clone();
+                <button class="btn btn-icon" title="Sessions" on:click={
                     move |_| {
-                        ui_state.toggle_sessions_panel();
+                        show_sessions_panel.update(|v| *v = !*v);
                     }
                 }>
                     "+"
