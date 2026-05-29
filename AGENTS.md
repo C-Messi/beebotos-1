@@ -28,6 +28,9 @@
 - 不要长期使用临时 Web 端口替代 `8090`；聊天 WebSocket 对 `8090 -> 8000` 有特判。
 - 当前 `8090` 服务静态目录可能是 `data/run/web-static`，源码改完若要让现有服务看到，需要重新构建并同步静态文件。
 - 本地测试账号用户名为 `user`；密码需要时由用户临时提供，不写入文件。
+- 日常开发避免反复跑 release 构建；优先用 `cargo check -p ...`、`cargo run -p ...` 和 `trunk serve`。
+- `beebotos-dev.sh build` 当前偏发布构建，gateway/web 会走 `--release`，web 还会 `trunk build --release`。
+- 裸 `nightly` 工具链更新会导致 Rust 缓存失效；若频繁全量重编，优先考虑固定 nightly 日期。
 
 ## 常用命令
 

@@ -71,7 +71,7 @@ const STORE_MANAGER_MODULES: [StoreManagerModule; 3] = [
         status_key: "ai-store-manager-graphic-core",
         icon: "🖼️",
         action_key: "ai-store-manager-create-graphic",
-        href: None,
+        href: Some("/ai-store-manager/graphic-marketing"),
     },
     StoreManagerModule {
         title_key: "ai-store-manager-phone-marketing",
@@ -248,10 +248,19 @@ mod tests {
             .map(|module| module.title_key)
             .collect();
 
-        assert_eq!(modules, vec![
-            "ai-store-manager-video-marketing",
-            "ai-store-manager-graphic-marketing",
-            "ai-store-manager-phone-marketing"
-        ]);
+        assert_eq!(
+            modules,
+            vec![
+                "ai-store-manager-video-marketing",
+                "ai-store-manager-graphic-marketing",
+                "ai-store-manager-phone-marketing"
+            ]
+        );
+
+        let graphic = ai_store_manager_modules()
+            .iter()
+            .find(|module| module.title_key == "ai-store-manager-graphic-marketing")
+            .expect("graphic marketing module exists");
+        assert_eq!(graphic.href, Some("/ai-store-manager/graphic-marketing"));
     }
 }

@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 
 use config::{Config, ConfigError, Environment, File};
 use secrecy::{ExposeSecret, SecretString};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::color_theme::WizardConfig;
 
@@ -29,6 +29,8 @@ pub struct BeeBotOSConfig {
     pub tls: Option<TlsConfig>,
     #[serde(default)]
     pub models: ModelsConfig,
+    #[serde(default)]
+    pub image_generation: ImageGenerationConfig,
     #[serde(default)]
     pub channels: ChannelsConfig,
     #[serde(default)]
@@ -137,6 +139,7 @@ impl Default for BeeBotOSConfig {
             jwt: JwtConfig::default(),
             tls: None,
             models: ModelsConfig::default(),
+            image_generation: ImageGenerationConfig::default(),
             channels: ChannelsConfig::default(),
             logging: LoggingConfig::default(),
             metrics: MetricsConfig::default(),
@@ -426,6 +429,55 @@ pub struct ModelProviderConfig {
     pub reasoning_effort: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImageGenerationConfig {
+    #[serde(default = "default_image_generation_base_url")]
+    pub base_url: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_empty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub api_key: Option<String>,
+    #[serde(default = "default_image_generation_model")]
+    pub model: String,
+    #[serde(default = "default_image_generation_timeout")]
+    pub timeout_seconds: u64,
+}
+
+impl Default for ImageGenerationConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_image_generation_base_url(),
+            api_key: None,
+            model: default_image_generation_model(),
+            timeout_seconds: default_image_generation_timeout(),
+        }
+    }
+}
+
+fn default_image_generation_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+
+fn default_image_generation_model() -> String {
+    "gpt-image-2".to_string()
+}
+
+fn default_image_generation_timeout() -> u64 {
+    180
+}
+
+fn deserialize_optional_non_empty_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.filter(|value| !value.trim().is_empty()))
+}
+
 /// Channels configuration - flattened structure like beebot
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ChannelsConfig {
@@ -639,6 +691,7 @@ impl BeeBotOSConfig {
             .build()?;
 
         let mut cfg: Self = config.try_deserialize()?;
+        cfg.apply_image_generation_env();
 
         // 数据库路径归一化：如果是相对路径，则转换为基于配置文件目录的绝对路径
         if cfg.database.url.starts_with("sqlite:") && !cfg.database.url.starts_with("sqlite://") {
@@ -691,6 +744,26 @@ impl BeeBotOSConfig {
             }
         }
         result
+    }
+
+    fn apply_image_generation_env(&mut self) {
+        if let Ok(base_url) = std::env::var("IMAGE_GENERATION_BASE_URL") {
+            if !base_url.trim().is_empty() {
+                self.image_generation.base_url = base_url;
+            }
+        }
+
+        if let Ok(api_key) = std::env::var("IMAGE_GENERATION_API_KEY") {
+            if !api_key.trim().is_empty() {
+                self.image_generation.api_key = Some(api_key);
+            }
+        }
+
+        if let Ok(model) = std::env::var("IMAGE_GENERATION_MODEL") {
+            if !model.trim().is_empty() {
+                self.image_generation.model = model;
+            }
+        }
     }
 
     /// Migrate non-prefixed environment variables to BEE__ prefixed ones
@@ -921,7 +994,88 @@ impl gateway::config::app_config::AppConfig for BeeBotOSConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    static IMAGE_GENERATION_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        values: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvVarGuard {
+        fn new(keys: &[&'static str]) -> Self {
+            Self {
+                values: keys
+                    .iter()
+                    .map(|key| (*key, std::env::var(key).ok()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.values {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_image_generation_config_is_empty_and_safe() {
+        let config = ImageGenerationConfig::default();
+
+        assert_eq!(config.base_url, "https://api.openai.com/v1");
+        assert!(config.api_key.is_none());
+        assert_eq!(config.model, "gpt-image-2");
+        assert_eq!(config.timeout_seconds, 180);
+    }
+
+    #[test]
+    fn image_generation_config_reads_env_override() {
+        let _lock = IMAGE_GENERATION_ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::new(&[
+            "IMAGE_GENERATION_BASE_URL",
+            "IMAGE_GENERATION_API_KEY",
+            "IMAGE_GENERATION_MODEL",
+        ]);
+
+        std::env::set_var("IMAGE_GENERATION_BASE_URL", "https://relay.example/v1");
+        std::env::set_var("IMAGE_GENERATION_API_KEY", "img-test-key");
+        std::env::set_var("IMAGE_GENERATION_MODEL", "gpt-image-2");
+
+        let mut config = BeeBotOSConfig::default();
+        config.apply_image_generation_env();
+
+        assert_eq!(config.image_generation.base_url, "https://relay.example/v1");
+        assert_eq!(
+            config.image_generation.api_key.as_deref(),
+            Some("img-test-key")
+        );
+        assert_eq!(config.image_generation.model, "gpt-image-2");
+    }
+
+    #[test]
+    fn image_generation_config_toml_empty_api_key_is_none() {
+        let config = Config::builder()
+            .add_source(File::from_str(
+                r#"
+[image_generation]
+api_key = ""
+"#,
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap();
+        let config: BeeBotOSConfig = config.try_deserialize().unwrap();
+
+        assert!(config.image_generation.api_key.is_none());
+    }
 
     #[test]
     fn default_llm_provider_is_deepseek() {
@@ -989,6 +1143,7 @@ mod tests {
                     map
                 },
             },
+            image_generation: ImageGenerationConfig::default(),
             channels: ChannelsConfig {
                 auto_download_media: true,
                 media_storage_path: "./data/media".to_string(),

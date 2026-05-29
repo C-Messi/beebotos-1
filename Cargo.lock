@@ -2304,6 +2304,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
+ "base64 0.22.1",
  "beebotos-update-client",
  "chrono",
  "clap",

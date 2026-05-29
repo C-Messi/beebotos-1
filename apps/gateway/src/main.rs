@@ -2248,8 +2248,20 @@ async fn liveness_handler() -> axum::Json<serde_json::Value> {
     }))
 }
 
+fn graphic_image_route_timeout(config: &BeeBotOSConfig) -> Duration {
+    Duration::from_secs(
+        config
+            .server
+            .timeout_seconds
+            .max(config.image_generation.timeout_seconds),
+    )
+}
+
 /// Create API router combining gateway-lib middleware with business handlers
 pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>) -> Router {
+    let standard_request_timeout = Duration::from_secs(app_state.config.server.timeout_seconds);
+    let graphic_image_request_timeout = graphic_image_route_timeout(&app_state.config);
+
     // Public routes (no auth required)
     let public_routes = Router::new()
         .route("/health", get(health_handler))
@@ -2297,7 +2309,8 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         .route(
             "/webhook/:platform",
             post(handlers::http::webhooks::webhook_handler),
-        );
+        )
+        .layer(TimeoutLayer::new(standard_request_timeout));
 
     // Protected API routes
     let api_routes = Router::new()
@@ -2372,6 +2385,14 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         .route(
             "/api/v1/ai-store-manager/video-tasks/:id",
             get(handlers::http::ai_store_manager::get_video_task),
+        )
+        .route(
+            "/api/v1/ai-store-manager/graphic-packages",
+            post(handlers::http::ai_store_manager::create_graphic_package_handler),
+        )
+        .route(
+            "/api/v1/ai-store-manager/graphic-images/:id",
+            get(handlers::http::ai_store_manager::get_graphic_image),
         )
         // Admin Config API
         .route(
@@ -2944,19 +2965,32 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         // WebSocket upgrade endpoint (auth required)
         .route("/ws", get(handlers::websocket::ws_handler))
         // Layer: Authentication from gateway-lib
-        .layer(from_fn_with_state(gateway_state.clone(), auth_middleware));
+        .layer(from_fn_with_state(gateway_state.clone(), auth_middleware))
+        .layer(TimeoutLayer::new(standard_request_timeout));
+
+    let graphic_image_routes = Router::new()
+        .route(
+            "/api/v1/ai-store-manager/graphic-images",
+            post(handlers::http::ai_store_manager::create_graphic_image),
+        )
+        .route(
+            "/api/v1/ai-store-manager/graphic-image-edits",
+            post(handlers::http::ai_store_manager::create_graphic_image_edit),
+        )
+        .layer(from_fn_with_state(gateway_state.clone(), auth_middleware))
+        .layer(TimeoutLayer::new(graphic_image_request_timeout));
 
     // Combine routes and apply global middleware from gateway-lib
-    let app = Router::new().merge(public_routes).merge(api_routes);
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(api_routes)
+        .merge(graphic_image_routes);
 
     // Apply layers one by one
     let app = app
         .layer(trace_layer())
         .layer(cors_layer(&gateway_state.config.cors))
         .layer(CompressionLayer::new())
-        .layer(TimeoutLayer::new(Duration::from_secs(
-            app_state.config.server.timeout_seconds,
-        )))
         .layer(axum::extract::DefaultBodyLimit::max(
             app_state.config.server.max_body_size_mb * 1024 * 1024,
         ))
@@ -3252,6 +3286,7 @@ mod tests {
                     map
                 },
             },
+            image_generation: config::ImageGenerationConfig::default(),
             channels: config::ChannelsConfig {
                 auto_download_media: true,
                 media_storage_path: "./data/media".to_string(),
@@ -3507,6 +3542,18 @@ entry_point: handle
     /// Build an Authorization header with the demo token
     fn demo_auth_header() -> (String, String) {
         ("Authorization".to_string(), "Bearer demo-token".to_string())
+    }
+
+    #[test]
+    fn graphic_image_route_timeout_uses_image_generation_timeout() {
+        let mut config = create_test_config();
+        config.server.timeout_seconds = 30;
+        config.image_generation.timeout_seconds = 180;
+
+        assert_eq!(
+            graphic_image_route_timeout(&config),
+            Duration::from_secs(180)
+        );
     }
 
     #[tokio::test]

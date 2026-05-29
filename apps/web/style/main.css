@@ -1391,6 +1391,167 @@ body {
     }
 }
 
+/* ==================== AI GRAPHIC MARKETING PAGE ==================== */
+.ai-graphic-marketing-page {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+
+.ai-graphic-workspace {
+    display: grid;
+    grid-template-columns: 340px minmax(0, 1fr) 360px;
+    gap: 20px;
+    align-items: start;
+}
+
+.ai-graphic-image-panel {
+    display: grid;
+    gap: 12px;
+}
+
+.ai-graphic-preview {
+    background: var(--bg-glass);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    padding: 14px;
+    display: grid;
+    gap: 12px;
+}
+
+.ai-graphic-preview p {
+    color: var(--text-secondary);
+    font-size: 13px;
+    margin: 0;
+}
+
+.ai-graphic-prompt-input {
+    width: 100%;
+    min-height: 132px;
+    margin-top: 6px;
+    padding: 10px;
+    resize: vertical;
+    background: var(--bg-glass);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.ai-graphic-upload-field input[type="file"] {
+    padding: 9px 10px;
+}
+
+.ai-graphic-product-image {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    padding: 10px;
+    background: var(--bg-glass);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+}
+
+.ai-graphic-product-image img {
+    width: 72px;
+    height: 72px;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+}
+
+.ai-graphic-product-image strong {
+    color: var(--text-primary);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.ai-graphic-product-image .btn {
+    width: fit-content;
+    margin-top: 8px;
+}
+
+.ai-graphic-upload-error {
+    color: var(--danger);
+    font-size: 12px;
+    margin: 0;
+}
+
+.ai-graphic-image-open {
+    grid-column: 1 / -1;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    cursor: zoom-in;
+}
+
+.ai-graphic-preview img {
+    width: 100%;
+    max-height: 760px;
+    object-fit: contain;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+}
+
+.ai-graphic-image-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: flex-end;
+}
+
+.ai-graphic-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    padding: 24px;
+    background: rgba(2, 6, 23, 0.84);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.ai-graphic-modal-content {
+    width: min(92vw, 980px);
+    max-height: 92vh;
+    display: grid;
+    gap: 12px;
+}
+
+.ai-graphic-modal-close {
+    justify-self: end;
+}
+
+.ai-graphic-modal img {
+    width: 100%;
+    max-height: calc(92vh - 56px);
+    object-fit: contain;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+}
+
+@media (max-width: 1280px) {
+    .ai-graphic-workspace {
+        grid-template-columns: 340px minmax(0, 1fr);
+    }
+
+    .ai-graphic-workspace > :last-child {
+        grid-column: 1 / -1;
+    }
+}
+
+@media (max-width: 900px) {
+    .ai-graphic-workspace {
+        grid-template-columns: 1fr;
+    }
+
+    .ai-graphic-workspace > :last-child {
+        grid-column: auto;
+    }
+}
+
 /* ==================== ACCESSIBILITY ==================== */
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
