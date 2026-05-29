@@ -57,6 +57,18 @@ pub struct CreateGraphicImageRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateGraphicImageEditRequest {
+    pub product: String,
+    pub platform: String,
+    pub prompt: String,
+    pub size: String,
+    pub quality: String,
+    pub image_b64: String,
+    pub image_mime_type: String,
+    pub image_filename: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphicImageResponse {
     pub id: String,
     pub provider: String,
@@ -104,6 +116,15 @@ impl AiStoreManagerService {
     ) -> Result<GraphicImageResponse, ApiError> {
         self.client
             .post("/ai-store-manager/graphic-images", req)
+            .await
+    }
+
+    pub async fn create_graphic_image_edit(
+        &self,
+        req: &CreateGraphicImageEditRequest,
+    ) -> Result<GraphicImageResponse, ApiError> {
+        self.client
+            .post("/ai-store-manager/graphic-image-edits", req)
             .await
     }
 }

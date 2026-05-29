@@ -1440,6 +1440,46 @@ body {
     line-height: 1.6;
 }
 
+.ai-graphic-upload-field input[type="file"] {
+    padding: 9px 10px;
+}
+
+.ai-graphic-product-image {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    padding: 10px;
+    background: var(--bg-glass);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+}
+
+.ai-graphic-product-image img {
+    width: 72px;
+    height: 72px;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+}
+
+.ai-graphic-product-image strong {
+    color: var(--text-primary);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.ai-graphic-product-image .btn {
+    width: fit-content;
+    margin-top: 8px;
+}
+
+.ai-graphic-upload-error {
+    color: var(--danger);
+    font-size: 12px;
+    margin: 0;
+}
+
 .ai-graphic-image-open {
     grid-column: 1 / -1;
     padding: 0;

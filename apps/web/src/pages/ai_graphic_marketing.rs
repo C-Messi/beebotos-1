@@ -1,15 +1,23 @@
+#[cfg(target_arch = "wasm32")]
+use base64::{engine::general_purpose, Engine as _};
+#[cfg(target_arch = "wasm32")]
+use gloo_storage::{LocalStorage, Storage};
+#[cfg(target_arch = "wasm32")]
+use js_sys::Uint8Array;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::view;
 use leptos_meta::Title;
 use serde::{Deserialize, Serialize};
-
 #[cfg(target_arch = "wasm32")]
-use gloo_storage::{LocalStorage, Storage};
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::JsFuture;
 
 use crate::api::{
-    create_ai_store_manager_service, CreateGraphicImageRequest, CreateGraphicPackageRequest,
-    GraphicImageResponse, GraphicMarketingCheck, GraphicPackageResponse,
+    create_ai_store_manager_service, CreateGraphicImageEditRequest, CreateGraphicImageRequest,
+    CreateGraphicPackageRequest, GraphicImageResponse, GraphicMarketingCheck,
+    GraphicPackageResponse,
 };
 use crate::state::use_app_state;
 use crate::utils::event_target_value;
@@ -23,6 +31,8 @@ pub const GRAPHIC_IMAGE_PANEL_SECTION_CLASS: &str =
 pub const GRAPHIC_PREVIEW_CLASS: &str = "ai-graphic-preview";
 #[cfg(target_arch = "wasm32")]
 const GRAPHIC_DRAFT_STORAGE_KEY: &str = "beebotos_ai_graphic_marketing_draft";
+#[cfg(target_arch = "wasm32")]
+const PRODUCT_IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GraphicMarketingTask {
@@ -37,6 +47,13 @@ pub struct GraphicMarketingTask {
     pub quality: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct GraphicProductImage {
+    filename: String,
+    mime_type: String,
+    b64_json: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct GraphicMarketingDraft {
     task: GraphicMarketingTask,
@@ -44,6 +61,8 @@ struct GraphicMarketingDraft {
     package_ready: bool,
     task_status: String,
     image_result: Option<GraphicImageResponse>,
+    #[serde(default)]
+    product_image: Option<GraphicProductImage>,
 }
 
 pub fn default_graphic_marketing_task() -> GraphicMarketingTask {
@@ -68,6 +87,7 @@ fn default_graphic_marketing_draft() -> GraphicMarketingDraft {
         package_ready: false,
         task_status: "待生成".to_string(),
         image_result: None,
+        product_image: None,
     }
 }
 
@@ -134,6 +154,52 @@ fn update_graphic_image_prompt(package: &mut GraphicPackageResponse, prompt: Str
     package.image_prompt = prompt;
 }
 
+fn product_image_data_url(image: &GraphicProductImage) -> String {
+    format!("data:{};base64,{}", image.mime_type, image.b64_json)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn normalize_product_image_mime(filename: &str, mime_type: &str) -> Option<String> {
+    let mime = mime_type.trim();
+    if matches!(mime, "image/png" | "image/jpeg" | "image/webp") {
+        return Some(mime.to_string());
+    }
+
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        Some("image/png".to_string())
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        Some("image/jpeg".to_string())
+    } else if lower.ends_with(".webp") {
+        Some("image/webp".to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn product_image_from_file(file: web_sys::File) -> Result<GraphicProductImage, String> {
+    let filename = file.name();
+    let mime_type = normalize_product_image_mime(&filename, &file.type_())
+        .ok_or_else(|| "仅支持 PNG、JPG、WebP 产品图。".to_string())?;
+    let array_buffer = JsFuture::from(file.array_buffer())
+        .await
+        .map_err(|_| "产品图读取失败。".to_string())?;
+    let bytes = Uint8Array::new(&array_buffer).to_vec();
+    if bytes.is_empty() {
+        return Err("产品图不能为空。".to_string());
+    }
+    if bytes.len() > PRODUCT_IMAGE_MAX_BYTES {
+        return Err("产品图不能超过 5MB。".to_string());
+    }
+
+    Ok(GraphicProductImage {
+        filename,
+        mime_type,
+        b64_json: general_purpose::STANDARD.encode(bytes),
+    })
+}
+
 fn graphic_image_src(image: &GraphicImageResponse) -> Option<String> {
     image
         .b64_json
@@ -194,6 +260,10 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
     let (package, set_package) = signal(initial_draft.package);
     let (package_ready, set_package_ready) = signal(initial_draft.package_ready);
     let (task_status, set_task_status) = signal(initial_draft.task_status);
+    let (product_image, set_product_image) = signal(initial_draft.product_image);
+    let (product_image_error, set_product_image_error) = signal::<Option<String>>(None);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = set_product_image_error;
     let (package_error, set_package_error) = signal::<Option<String>>(None);
     let (package_loading, set_package_loading) = signal(false);
     let (image_result, set_image_result) = signal(initial_draft.image_result);
@@ -218,6 +288,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
             package_ready: package_ready.get(),
             task_status: task_status.get(),
             image_result: image_result.get(),
+            product_image: product_image.get(),
         });
     });
 
@@ -284,6 +355,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
         let current_task = task.get();
         let current_package = package.get();
         let image_prompt = current_package.image_prompt.clone();
+        let product_image_snapshot = product_image.get();
         let req = CreateGraphicImageRequest {
             product: current_task.product.clone(),
             platform: current_task.platform.clone(),
@@ -299,12 +371,28 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
         set_task_status.set("图片生成中".to_string());
 
         spawn_local(async move {
-            let response = service.create_graphic_image(&req).await;
+            let response = if let Some(product_image) = product_image_snapshot.clone() {
+                service
+                    .create_graphic_image_edit(&CreateGraphicImageEditRequest {
+                        product: req.product.clone(),
+                        platform: req.platform.clone(),
+                        prompt: req.prompt.clone(),
+                        size: req.size.clone(),
+                        quality: req.quality.clone(),
+                        image_b64: product_image.b64_json,
+                        image_mime_type: product_image.mime_type,
+                        image_filename: product_image.filename,
+                    })
+                    .await
+            } else {
+                service.create_graphic_image(&req).await
+            };
             if !graphic_image_request_matches_task_and_prompt(
                 &task.get_untracked(),
                 &package.get_untracked().image_prompt,
                 &req,
-            ) {
+            ) || product_image.get_untracked() != product_image_snapshot
+            {
                 set_image_loading.set(false);
                 return;
             }
@@ -458,6 +546,68 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                                 set_task_status.set("待生成".to_string());
                             }
                         />
+                        <div class="ai-video-field ai-graphic-upload-field">
+                            <span>"产品图"</span>
+                            <input
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                on:change=move |event| {
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        let input = event
+                                            .target()
+                                            .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok());
+                                        let file = input
+                                            .and_then(|input| input.files())
+                                            .and_then(|files| files.get(0));
+                                        if let Some(file) = file {
+                                            set_product_image_error.set(None);
+                                            spawn_local(async move {
+                                                match product_image_from_file(file).await {
+                                                    Ok(image) => {
+                                                        set_product_image.set(Some(image));
+                                                        set_image_result.set(None);
+                                                        set_image_error.set(None);
+                                                        set_image_preview_src.set(None);
+                                                        if package_ready.get_untracked() {
+                                                            set_task_status.set("待生成图片".to_string());
+                                                        }
+                                                    }
+                                                    Err(err) => set_product_image_error.set(Some(err)),
+                                                }
+                                            });
+                                        }
+                                    }
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        let _ = event;
+                                    }
+                                }
+                            />
+                            {move || product_image.get().map(|image| view! {
+                                <div class="ai-graphic-product-image">
+                                    <img src=product_image_data_url(&image) alt="产品图预览" />
+                                    <div>
+                                        <strong>{image.filename}</strong>
+                                        <button
+                                            type="button"
+                                            class="btn btn-secondary"
+                                            on:click=move |_| {
+                                                set_product_image.set(None);
+                                                set_image_result.set(None);
+                                                set_image_error.set(None);
+                                                set_image_preview_src.set(None);
+                                            }
+                                        >
+                                            "移除"
+                                        </button>
+                                    </div>
+                                </div>
+                            })}
+                            {move || product_image_error.get().map(|error| view! {
+                                <p class="ai-graphic-upload-error">{error}</p>
+                            })}
+                        </div>
                     </div>
                 </div>
 
@@ -499,11 +649,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                         } else if let Some(error) = image_error.get() {
                             view! { <div class="ai-video-task-card error">{error}</div> }.into_any()
                         } else {
-                            view! {
-                                <div class="ai-video-task-card">
-                                    "点击生成图片后，会使用当前图文包的图片 prompt 调用图片中转站。"
-                                </div>
-                            }.into_any()
+                            view! { <></> }.into_any()
                         }
                     }}
                 </section>
@@ -744,9 +890,14 @@ mod tests {
     fn graphic_draft_keeps_generated_package_and_image() {
         let task = default_graphic_marketing_task();
         let package = fallback_graphic_package(&task);
+        let product_image = GraphicProductImage {
+            filename: "product.png".to_string(),
+            mime_type: "image/png".to_string(),
+            b64_json: "abc123".to_string(),
+        };
         let image = GraphicImageResponse {
             id: "graphic-image-1".to_string(),
-            provider: "relay".to_string(),
+            provider: "gpt-image-2".to_string(),
             status: "completed".to_string(),
             message: "图片已生成。".to_string(),
             image_url: None,
@@ -758,13 +909,18 @@ mod tests {
             package_ready: true,
             task_status: "图片已生成".to_string(),
             image_result: Some(image.clone()),
+            product_image: Some(product_image.clone()),
         };
 
         assert_eq!(draft.task, task);
         assert_eq!(draft.package.image_prompt, package.image_prompt);
         assert!(draft.package_ready);
+        assert_eq!(draft.product_image, Some(product_image));
         assert_eq!(
-            draft.image_result.as_ref().map(|image| image.b64_json.clone()),
+            draft
+                .image_result
+                .as_ref()
+                .map(|image| image.b64_json.clone()),
             Some(image.b64_json)
         );
     }

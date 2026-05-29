@@ -17,9 +17,9 @@ pub mod webchat;
 
 // Re-export 浏览器 API
 pub use ai_store_manager::{
-    AiStoreManagerService, CreateGraphicImageRequest, CreateGraphicPackageRequest,
-    CreateVideoTaskRequest, GraphicImageResponse, GraphicMarketingCheck, GraphicPackageResponse,
-    VideoTaskResponse,
+    AiStoreManagerService, CreateGraphicImageEditRequest, CreateGraphicImageRequest,
+    CreateGraphicPackageRequest, CreateVideoTaskRequest, GraphicImageResponse,
+    GraphicMarketingCheck, GraphicPackageResponse, VideoTaskResponse,
 };
 pub use browser::{
     BrowserApiService, ClickRequest, EvaluateResponse, InputRequest, NavigationResponse,
