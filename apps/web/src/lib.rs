@@ -54,10 +54,10 @@ use components::{AccessDenied, AuthGuard, ContentSecurityPolicy, GlobalErrorHand
 use i18n::{init_i18n, I18nContext};
 use leptos_router::hooks::use_location;
 use pages::{
-    AgentDetail, AgentsPage, AiCommercePage, AiStoreManagerPage, AiVideoMarketingPage,
-    ChannelsPage, DaoPage, Home, LlmConfigPage, LlmSettingsPage, LoginPage, McpServerPage,
-    NotFound, RegisterPage, SettingsPage, SetupPage, SkillInstancesPage, SkillsPage, TreasuryPage,
-    TreasuryTransactionsPage, WorkflowDashboardPage, WorkflowDetailPage,
+    AgentDetail, AgentsPage, AiCommercePage, AiGraphicMarketingPage, AiStoreManagerPage,
+    AiVideoMarketingPage, ChannelsPage, DaoPage, Home, LlmConfigPage, LlmSettingsPage, LoginPage,
+    McpServerPage, NotFound, RegisterPage, SettingsPage, SetupPage, SkillInstancesPage, SkillsPage,
+    TreasuryPage, TreasuryTransactionsPage, WorkflowDashboardPage, WorkflowDetailPage,
 };
 use state::provide_app_state;
 use utils::provide_theme;
@@ -261,6 +261,14 @@ pub fn App() -> impl IntoView {
                                     view=move || view! {
                                         <AuthGuard>
                                             <AiCommercePage />
+                                        </AuthGuard>
+                                    }
+                                />
+                                <Route
+                                    path=(StaticSegment("ai-store-manager"), StaticSegment("graphic-marketing"))
+                                    view=move || view! {
+                                        <AuthGuard>
+                                            <AiGraphicMarketingPage />
                                         </AuthGuard>
                                     }
                                 />
