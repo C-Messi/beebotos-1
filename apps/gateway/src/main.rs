@@ -2373,6 +2373,10 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
             "/api/v1/ai-store-manager/video-tasks/:id",
             get(handlers::http::ai_store_manager::get_video_task),
         )
+        .route(
+            "/api/v1/ai-store-manager/graphic-packages",
+            post(handlers::http::ai_store_manager::create_graphic_package_handler),
+        )
         // Admin Config API
         .route(
             "/api/v1/admin/config",
