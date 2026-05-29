@@ -10,6 +10,14 @@ use crate::api::{
 };
 use crate::utils::event_target_value;
 
+pub const GRAPHIC_PAGE_CLASS: &str = "page ai-graphic-marketing-page";
+pub const GRAPHIC_WORKSPACE_CLASS: &str = "ai-graphic-workspace";
+pub const GRAPHIC_PANEL_CLASS: &str = "ai-video-marketing-panel";
+pub const GRAPHIC_IMAGE_PANEL_CLASS: &str = "ai-graphic-image-panel";
+pub const GRAPHIC_IMAGE_PANEL_SECTION_CLASS: &str =
+    "ai-video-marketing-section ai-graphic-image-panel";
+pub const GRAPHIC_PREVIEW_CLASS: &str = "ai-graphic-preview";
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct GraphicMarketingTask {
     pub product: String,
@@ -111,6 +119,15 @@ fn graphic_image_request_matches_task_and_prompt(
         && current.size == req.size
         && current.quality == req.quality
         && current_prompt == req.prompt
+}
+
+#[cfg(test)]
+fn graphic_workspace_child_classes() -> [&'static str; 3] {
+    [
+        GRAPHIC_PANEL_CLASS,
+        GRAPHIC_PANEL_CLASS,
+        GRAPHIC_IMAGE_PANEL_SECTION_CLASS,
+    ]
 }
 
 #[component]
@@ -238,7 +255,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
 
     view! {
         <Title text="AI 图文营销 - BeeBotOS" />
-        <div class="page ai-video-marketing-page">
+        <div class=GRAPHIC_PAGE_CLASS>
             <div class="page-header ai-video-marketing-header">
                 <div>
                     <h2>"AI 图文营销"</h2>
@@ -255,8 +272,8 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                 </div>
             </div>
 
-            <section class="ai-video-marketing-workspace">
-                <div class="ai-video-marketing-panel">
+            <section class=GRAPHIC_WORKSPACE_CLASS>
+                <div class=GRAPHIC_PANEL_CLASS>
                     <div class="section-title compact">
                         <h2>"任务配置"</h2>
                     </div>
@@ -374,7 +391,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                     </div>
                 </div>
 
-                <div class="ai-video-marketing-panel">
+                <div class=GRAPHIC_PANEL_CLASS>
                     <div class="section-title compact">
                         <h2>"图文营销包"</h2>
                     </div>
@@ -383,25 +400,25 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                     })}
                     <GraphicPackageCard package=Signal::derive(move || package.get()) />
                 </div>
-            </section>
 
-            <section class="ai-video-marketing-section">
-                <div class="section-title compact">
-                    <h2>"图片素材"</h2>
-                </div>
-                {move || {
-                    if let Some(image) = image_result.get() {
-                        view! { <GraphicImageCard image=image /> }.into_any()
-                    } else if let Some(error) = image_error.get() {
-                        view! { <div class="ai-video-task-card error">{error}</div> }.into_any()
-                    } else {
-                        view! {
-                            <div class="ai-video-task-card">
-                                "点击生成图片后，会使用当前图文包的图片 prompt 调用图片中转站。"
-                            </div>
-                        }.into_any()
-                    }
-                }}
+                <section class=GRAPHIC_IMAGE_PANEL_SECTION_CLASS>
+                    <div class="section-title compact">
+                        <h2>"图片素材"</h2>
+                    </div>
+                    {move || {
+                        if let Some(image) = image_result.get() {
+                            view! { <GraphicImageCard image=image /> }.into_any()
+                        } else if let Some(error) = image_error.get() {
+                            view! { <div class="ai-video-task-card error">{error}</div> }.into_any()
+                        } else {
+                            view! {
+                                <div class="ai-video-task-card">
+                                    "点击生成图片后，会使用当前图文包的图片 prompt 调用图片中转站。"
+                                </div>
+                            }.into_any()
+                        }
+                    }}
+                </section>
             </section>
 
             <section class="ai-video-marketing-section">
@@ -495,7 +512,7 @@ fn GraphicImageCard(image: GraphicImageResponse) -> impl IntoView {
     let src = graphic_image_src(&image);
 
     view! {
-        <article class="ai-video-task-card">
+        <article class=format!("ai-video-task-card {}", GRAPHIC_PREVIEW_CLASS)>
             <div>
                 <span>"任务 ID"</span>
                 <strong>{image.id}</strong>
@@ -537,6 +554,26 @@ mod tests {
         assert_eq!(task.product, "云柑礼盒");
         assert_eq!(task.platform, "小红书");
         assert_eq!(task.size, "1024x1536");
+    }
+
+    #[test]
+    fn graphic_layout_classes_match_css() {
+        assert_eq!(GRAPHIC_PAGE_CLASS, "page ai-graphic-marketing-page");
+        assert_eq!(GRAPHIC_WORKSPACE_CLASS, "ai-graphic-workspace");
+        assert_eq!(GRAPHIC_IMAGE_PANEL_CLASS, "ai-graphic-image-panel");
+        assert_eq!(GRAPHIC_PREVIEW_CLASS, "ai-graphic-preview");
+    }
+
+    #[test]
+    fn graphic_workspace_children_include_image_panel_as_third_column() {
+        assert_eq!(
+            graphic_workspace_child_classes(),
+            [
+                "ai-video-marketing-panel",
+                "ai-video-marketing-panel",
+                "ai-video-marketing-section ai-graphic-image-panel"
+            ]
+        );
     }
 
     #[test]
