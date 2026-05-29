@@ -94,6 +94,25 @@ fn can_generate_graphic_image(
     package_ready && !package_loading && !image_loading
 }
 
+fn graphic_task_matches_snapshot(
+    current: &GraphicMarketingTask,
+    snapshot: &GraphicMarketingTask,
+) -> bool {
+    current == snapshot
+}
+
+fn graphic_image_request_matches_task_and_prompt(
+    current: &GraphicMarketingTask,
+    current_prompt: &str,
+    req: &CreateGraphicImageRequest,
+) -> bool {
+    current.product == req.product
+        && current.platform == req.platform
+        && current.size == req.size
+        && current.quality == req.quality
+        && current_prompt == req.prompt
+}
+
 #[component]
 pub fn AiGraphicMarketingPage() -> impl IntoView {
     let (task, set_task) = signal(default_graphic_marketing_task());
@@ -124,6 +143,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
 
         let service = service.get_value();
         let current_task = task.get();
+        let task_snapshot = current_task.clone();
         let req = CreateGraphicPackageRequest {
             product: current_task.product.clone(),
             selling_points: current_task.selling_points.clone(),
@@ -142,7 +162,14 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
         set_task_status.set("图文包生成中".to_string());
 
         spawn_local(async move {
-            match service.create_graphic_package(&req).await {
+            let response = service.create_graphic_package(&req).await;
+            if !graphic_task_matches_snapshot(&task.get_untracked(), &task_snapshot) {
+                set_package_ready.set(false);
+                set_package_loading.set(false);
+                return;
+            }
+
+            match response {
                 Ok(created) => {
                     set_package.set(created);
                     set_package_ready.set(true);
@@ -170,12 +197,13 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
         let service = service.get_value();
         let current_task = task.get();
         let current_package = package.get();
+        let image_prompt = current_package.image_prompt.clone();
         let req = CreateGraphicImageRequest {
-            product: current_task.product,
-            platform: current_task.platform,
-            prompt: current_package.image_prompt,
-            size: current_task.size,
-            quality: current_task.quality,
+            product: current_task.product.clone(),
+            platform: current_task.platform.clone(),
+            prompt: image_prompt,
+            size: current_task.size.clone(),
+            quality: current_task.quality.clone(),
         };
 
         set_image_loading.set(true);
@@ -184,7 +212,17 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
         set_task_status.set("图片生成中".to_string());
 
         spawn_local(async move {
-            match service.create_graphic_image(&req).await {
+            let response = service.create_graphic_image(&req).await;
+            if !graphic_image_request_matches_task_and_prompt(
+                &task.get_untracked(),
+                &package.get_untracked().image_prompt,
+                &req,
+            ) {
+                set_image_loading.set(false);
+                return;
+            }
+
+            match response {
                 Ok(created) => {
                     set_image_result.set(Some(created));
                     set_task_status.set("图片已生成".to_string());
@@ -548,5 +586,46 @@ mod tests {
         assert!(!can_generate_graphic_image(false, false, false));
         assert!(!can_generate_graphic_image(true, true, false));
         assert!(!can_generate_graphic_image(true, false, true));
+    }
+
+    #[test]
+    fn graphic_task_matches_snapshot_rejects_stale_package_response() {
+        let snapshot = default_graphic_marketing_task();
+        let mut changed = snapshot.clone();
+        changed.product = "山茶礼盒".to_string();
+
+        assert!(graphic_task_matches_snapshot(&snapshot, &snapshot));
+        assert!(!graphic_task_matches_snapshot(&changed, &snapshot));
+    }
+
+    #[test]
+    fn graphic_image_request_matches_task_and_prompt_rejects_stale_response() {
+        let task = default_graphic_marketing_task();
+        let package = fallback_graphic_package(&task);
+        let req = CreateGraphicImageRequest {
+            product: task.product.clone(),
+            platform: task.platform.clone(),
+            prompt: package.image_prompt.clone(),
+            size: task.size.clone(),
+            quality: task.quality.clone(),
+        };
+        let mut changed_task = task.clone();
+        changed_task.platform = "朋友圈".to_string();
+
+        assert!(graphic_image_request_matches_task_and_prompt(
+            &task,
+            &package.image_prompt,
+            &req
+        ));
+        assert!(!graphic_image_request_matches_task_and_prompt(
+            &changed_task,
+            &package.image_prompt,
+            &req
+        ));
+        assert!(!graphic_image_request_matches_task_and_prompt(
+            &task,
+            "new prompt",
+            &req
+        ));
     }
 }
