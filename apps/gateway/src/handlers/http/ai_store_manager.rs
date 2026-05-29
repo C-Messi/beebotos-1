@@ -3,6 +3,7 @@ use axum::Json;
 use gateway::middleware::{require_any_role, AuthUser};
 use serde::{Deserialize, Serialize};
 
+use crate::config::BeeBotOSConfig;
 use crate::error::GatewayError;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -134,6 +135,118 @@ pub fn create_graphic_package(req: &CreateGraphicPackageRequest) -> GraphicPacka
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CreateGraphicImageRequest {
+    pub product: String,
+    pub platform: String,
+    pub prompt: String,
+    pub size: String,
+    pub quality: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GraphicImageResponse {
+    pub id: String,
+    pub provider: String,
+    pub status: String,
+    pub message: String,
+    pub image_url: Option<String>,
+    pub b64_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct OpenAIImageRequest {
+    model: String,
+    prompt: String,
+    size: String,
+    quality: String,
+    n: u8,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct OpenAIImageResponse {
+    data: Vec<OpenAIImageData>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct OpenAIImageData {
+    b64_json: Option<String>,
+    url: Option<String>,
+}
+
+fn build_image_generation_payload(
+    model: &str,
+    req: &CreateGraphicImageRequest,
+) -> OpenAIImageRequest {
+    OpenAIImageRequest {
+        model: model.to_string(),
+        prompt: req.prompt.trim().to_string(),
+        size: req.size.trim().to_string(),
+        quality: req.quality.trim().to_string(),
+        n: 1,
+    }
+}
+
+fn validate_graphic_image_request(req: &CreateGraphicImageRequest) -> Result<(), GatewayError> {
+    if req.product.trim().is_empty() {
+        return Err(GatewayError::bad_request("商品不能为空"));
+    }
+    if req.platform.trim().is_empty() {
+        return Err(GatewayError::bad_request("平台不能为空"));
+    }
+    if req.prompt.trim().is_empty() {
+        return Err(GatewayError::bad_request("图片生成提示词不能为空"));
+    }
+    if req.size.trim().is_empty() {
+        return Err(GatewayError::bad_request("图片尺寸不能为空"));
+    }
+    if req.quality.trim().is_empty() {
+        return Err(GatewayError::bad_request("图片质量不能为空"));
+    }
+
+    if !matches!(req.size.trim(), "1024x1536" | "1024x1024" | "1536x1024") {
+        return Err(GatewayError::bad_request("不支持的图片尺寸"));
+    }
+    if !matches!(req.quality.trim(), "low" | "medium" | "high" | "auto") {
+        return Err(GatewayError::bad_request("不支持的图片质量"));
+    }
+
+    Ok(())
+}
+
+fn image_response_to_graphic_result(
+    product: &str,
+    platform: &str,
+    response: OpenAIImageResponse,
+) -> Result<GraphicImageResponse, GatewayError> {
+    let first = response
+        .data
+        .into_iter()
+        .next()
+        .ok_or_else(|| GatewayError::internal("图片生成结果为空"))?;
+
+    if first.b64_json.is_none() && first.url.is_none() {
+        return Err(GatewayError::internal("图片生成结果为空"));
+    }
+
+    Ok(GraphicImageResponse {
+        id: format!("graphic-image-{}-{}", platform, product).replace(' ', "-"),
+        provider: "openai-compatible-image".to_string(),
+        status: "completed".to_string(),
+        message: "图片已生成。".to_string(),
+        image_url: first.url,
+        b64_json: first.b64_json,
+    })
+}
+
+fn image_generation_url(base_url: &str) -> String {
+    format!("{}/images/generations", base_url.trim_end_matches('/'))
+}
+
+fn image_model_unavailable_message(status: reqwest::StatusCode) -> String {
+    format!("图片模型不可用: HTTP {}", status)
+}
+
 pub async fn create_video_task(
     user: AuthUser,
     Json(req): Json<CreateVideoTaskRequest>,
@@ -150,12 +263,79 @@ pub async fn create_graphic_package_handler(
     Ok(Json(create_graphic_package(&req)))
 }
 
+pub async fn create_graphic_image(
+    user: AuthUser,
+    Json(req): Json<CreateGraphicImageRequest>,
+) -> Result<Json<GraphicImageResponse>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+
+    validate_graphic_image_request(&req)?;
+
+    let config = BeeBotOSConfig::load()
+        .map_err(|err| GatewayError::internal(format!("加载图片生成配置失败: {}", err)))?;
+    let api_key = config
+        .image_generation
+        .api_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| GatewayError::bad_request("图片生成未配置"))?;
+
+    let payload = build_image_generation_payload(&config.image_generation.model, &req);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            config.image_generation.timeout_seconds,
+        ))
+        .build()
+        .map_err(|err| GatewayError::internal(format!("图片生成客户端创建失败: {}", err)))?;
+
+    let response = client
+        .post(image_generation_url(&config.image_generation.base_url))
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|err| GatewayError::internal(format!("图片生成请求失败: {}", err)))?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(GatewayError::bad_request("图片生成鉴权失败"));
+    }
+    if !status.is_success() {
+        return Err(GatewayError::internal(image_model_unavailable_message(
+            status,
+        )));
+    }
+
+    let image_response = response
+        .json::<OpenAIImageResponse>()
+        .await
+        .map_err(|err| GatewayError::internal(format!("图片生成响应解析失败: {}", err)))?;
+    let result = image_response_to_graphic_result(&req.product, &req.platform, image_response)?;
+
+    Ok(Json(result))
+}
+
 pub async fn get_video_task(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<VideoTaskResponse>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
     Ok(Json(mock_video_task_status(&id)))
+}
+
+pub async fn get_graphic_image(
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<GraphicImageResponse>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+    Ok(Json(GraphicImageResponse {
+        id,
+        provider: "openai-compatible-image".to_string(),
+        status: "completed".to_string(),
+        message: "同步图片任务已完成。".to_string(),
+        image_url: None,
+        b64_json: None,
+    }))
 }
 
 #[cfg(test)]
@@ -222,5 +402,81 @@ mod tests {
 
         assert_ne!(xhs.title_options[0], moments.title_options[0]);
         assert!(moments.image_prompt.contains("朋友圈"));
+    }
+
+    #[test]
+    fn image_payload_uses_configured_model_and_prompt() {
+        let req = CreateGraphicImageRequest {
+            product: "云柑礼盒".to_string(),
+            platform: "小红书".to_string(),
+            prompt: "生成海报".to_string(),
+            size: "1024x1536".to_string(),
+            quality: "medium".to_string(),
+        };
+
+        let payload = build_image_generation_payload("gpt-image-1", &req);
+
+        assert_eq!(payload.model, "gpt-image-1");
+        assert_eq!(payload.prompt, "生成海报");
+        assert_eq!(payload.size, "1024x1536");
+        assert_eq!(payload.quality, "medium");
+        assert_eq!(payload.n, 1);
+    }
+
+    #[test]
+    fn image_result_normalizes_base64_response() {
+        let response = OpenAIImageResponse {
+            data: vec![OpenAIImageData {
+                b64_json: Some("abc123".to_string()),
+                url: None,
+            }],
+        };
+
+        let result = image_response_to_graphic_result("云柑礼盒", "小红书", response).unwrap();
+
+        assert_eq!(result.provider, "openai-compatible-image");
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.image_url, None);
+        assert_eq!(result.b64_json.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn image_result_rejects_empty_response() {
+        let response = OpenAIImageResponse { data: vec![] };
+
+        let result = image_response_to_graphic_result("云柑礼盒", "小红书", response);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn image_upstream_error_message_omits_provider_body() {
+        let message = image_model_unavailable_message(reqwest::StatusCode::BAD_REQUEST);
+
+        assert_eq!(message, "图片模型不可用: HTTP 400 Bad Request");
+        assert!(!message.contains("secret"));
+    }
+
+    #[test]
+    fn image_request_validation_rejects_empty_and_invalid_options() {
+        let mut req = CreateGraphicImageRequest {
+            product: "云柑礼盒".to_string(),
+            platform: "小红书".to_string(),
+            prompt: "生成海报".to_string(),
+            size: "1024x1536".to_string(),
+            quality: "medium".to_string(),
+        };
+        assert!(validate_graphic_image_request(&req).is_ok());
+
+        req.product = " ".to_string();
+        assert!(validate_graphic_image_request(&req).is_err());
+
+        req.product = "云柑礼盒".to_string();
+        req.size = "512x512".to_string();
+        assert!(validate_graphic_image_request(&req).is_err());
+
+        req.size = "1024x1536".to_string();
+        req.quality = "best".to_string();
+        assert!(validate_graphic_image_request(&req).is_err());
     }
 }

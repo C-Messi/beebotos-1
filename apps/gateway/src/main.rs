@@ -2377,6 +2377,14 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
             "/api/v1/ai-store-manager/graphic-packages",
             post(handlers::http::ai_store_manager::create_graphic_package_handler),
         )
+        .route(
+            "/api/v1/ai-store-manager/graphic-images",
+            post(handlers::http::ai_store_manager::create_graphic_image),
+        )
+        .route(
+            "/api/v1/ai-store-manager/graphic-images/:id",
+            get(handlers::http::ai_store_manager::get_graphic_image),
+        )
         // Admin Config API
         .route(
             "/api/v1/admin/config",
