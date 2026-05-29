@@ -3252,6 +3252,7 @@ mod tests {
                     map
                 },
             },
+            image_generation: config::ImageGenerationConfig::default(),
             channels: config::ChannelsConfig {
                 auto_download_media: true,
                 media_storage_path: "./data/media".to_string(),
