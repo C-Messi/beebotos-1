@@ -451,20 +451,6 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                     </div>
                 </div>
             })}
-
-            <section class="ai-video-marketing-section">
-                <div class="section-title compact">
-                    <h2>"发布前检查"</h2>
-                </div>
-                <div class="ai-video-check-grid">
-                    {move || package
-                        .get()
-                        .checks
-                        .into_iter()
-                        .map(|check| view! { <CheckItem check=check /> })
-                        .collect_view()}
-                </div>
-            </section>
         </div>
     }
 }
@@ -568,16 +554,6 @@ fn GraphicImageCard(
                     <a class="btn btn-secondary" href=href download=download_filename>"下载图片"</a>
                 })}
             </div>
-        </article>
-    }
-}
-
-#[component]
-fn CheckItem(check: GraphicMarketingCheck) -> impl IntoView {
-    view! {
-        <article class="ai-video-check-item">
-            <span>{check.label}</span>
-            <strong>{check.status}</strong>
         </article>
     }
 }
