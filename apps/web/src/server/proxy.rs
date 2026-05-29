@@ -28,6 +28,9 @@ impl ProxyState {
     /// 创建新的代理状态
     pub fn new(gateway_url: String, timeout_secs: u64, forward_host: bool) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(
+                timeout_secs.max(GRAPHIC_IMAGE_PROXY_TIMEOUT_SECS),
+            ))
             .connect_timeout(Duration::from_secs(10))
             .pool_idle_timeout(Duration::from_secs(300))
             .pool_max_idle_per_host(32)
@@ -43,7 +46,9 @@ impl ProxyState {
 }
 
 fn proxy_timeout_secs(path: &str, default_secs: u64) -> u64 {
-    if path == "/v1/ai-store-manager/graphic-images" {
+    if path.contains("/ai-store-manager/graphic-images")
+        || path.contains("/ai-store-manager/graphic-image-edits")
+    {
         default_secs.max(GRAPHIC_IMAGE_PROXY_TIMEOUT_SECS)
     } else {
         default_secs
@@ -77,13 +82,11 @@ pub async fn proxy_handler(
         tracing::error!("Invalid HTTP method: {}", req.method());
         StatusCode::BAD_REQUEST
     })?;
+    let request_timeout_secs = proxy_timeout_secs(&path, state.timeout_secs);
     let mut proxy_req = state
         .client
         .request(method, &target_url)
-        .timeout(Duration::from_secs(proxy_timeout_secs(
-            &path,
-            state.timeout_secs,
-        )));
+        .timeout(Duration::from_secs(request_timeout_secs));
 
     // 复制请求头
     let mut headers = HeaderMap::new();
@@ -118,7 +121,12 @@ pub async fn proxy_handler(
 
     // 发送请求
     let response = proxy_req.send().await.map_err(|e| {
-        tracing::error!("Proxy request failed: {}", e);
+        tracing::error!(
+            "Proxy request failed: path={}, timeout_secs={}, error={}",
+            path,
+            request_timeout_secs,
+            e
+        );
         StatusCode::BAD_GATEWAY
     })?;
 
@@ -199,6 +207,18 @@ mod tests {
     fn test_proxy_timeout_for_graphic_image_generation() {
         assert_eq!(
             proxy_timeout_secs("/v1/ai-store-manager/graphic-images", 30),
+            180
+        );
+        assert_eq!(
+            proxy_timeout_secs("/v1/ai-store-manager/graphic-image-edits", 30),
+            180
+        );
+        assert_eq!(
+            proxy_timeout_secs("/api/v1/ai-store-manager/graphic-image-edits", 30),
+            180
+        );
+        assert_eq!(
+            proxy_timeout_secs("/api/v1/ai-store-manager/graphic-image-edits/", 30),
             180
         );
         assert_eq!(proxy_timeout_secs("/v1/agents", 30), 30);
