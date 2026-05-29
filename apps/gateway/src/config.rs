@@ -461,7 +461,7 @@ fn default_image_generation_base_url() -> String {
 }
 
 fn default_image_generation_model() -> String {
-    "gpt-image-1".to_string()
+    "gpt-image-2".to_string()
 }
 
 fn default_image_generation_timeout() -> u64 {
@@ -1032,7 +1032,7 @@ mod tests {
 
         assert_eq!(config.base_url, "https://api.openai.com/v1");
         assert!(config.api_key.is_none());
-        assert_eq!(config.model, "gpt-image-1");
+        assert_eq!(config.model, "gpt-image-2");
         assert_eq!(config.timeout_seconds, 180);
     }
 

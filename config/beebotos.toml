@@ -133,5 +133,5 @@ mutual_tls = false
 [image_generation]
 base_url = "https://api.openai.com/v1"
 api_key = ""
-model = "gpt-image-1"
+model = "gpt-image-2"
 timeout_seconds = 180
