@@ -4,10 +4,10 @@ use leptos::view;
 use leptos_meta::Title;
 
 use crate::api::{
-    create_ai_store_manager_service, create_client, CreateGraphicImageRequest,
-    CreateGraphicPackageRequest, GraphicImageResponse, GraphicMarketingCheck,
-    GraphicPackageResponse,
+    create_ai_store_manager_service, CreateGraphicImageRequest, CreateGraphicPackageRequest,
+    GraphicImageResponse, GraphicMarketingCheck, GraphicPackageResponse,
 };
+use crate::state::use_app_state;
 use crate::utils::event_target_value;
 
 pub const GRAPHIC_PAGE_CLASS: &str = "page ai-graphic-marketing-page";
@@ -142,7 +142,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
     let (image_result, set_image_result) = signal::<Option<GraphicImageResponse>>(None);
     let (image_error, set_image_error) = signal::<Option<String>>(None);
     let (image_loading, set_image_loading) = signal(false);
-    let service = create_ai_store_manager_service(create_client());
+    let service = create_ai_store_manager_service(use_app_state().api_client());
     let service = StoredValue::new(service);
     let busy = Signal::derive(move || package_loading.get() || image_loading.get());
     let image_action_enabled = Signal::derive(move || {
