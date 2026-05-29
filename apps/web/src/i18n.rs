@@ -639,7 +639,7 @@ pub fn init_i18n() -> I18nContext {
     // Browser page
     zh.insert("browser-title", "浏览器");
     zh.insert("browser-automation", "浏览器自动化");
-    zh.insert("browser-subtitle", "Chrome DevTools MCP 控制 - 兼容 OpenClaw V2026.3.13");
+    zh.insert("browser-subtitle", "Chrome DevTools MCP 控制");
     zh.insert("browser-profiles", "配置文件");
     zh.insert("browser-add-profile", "+ 添加配置");
     zh.insert("browser-sandboxes", "沙盒");
@@ -1391,7 +1391,7 @@ pub fn init_i18n() -> I18nContext {
     // Browser page
     en.insert("browser-title", "Browser");
     en.insert("browser-automation", "Browser Automation");
-    en.insert("browser-subtitle", "Chrome DevTools MCP Control - Compatible with OpenClaw V2026.3.13");
+    en.insert("browser-subtitle", "Chrome DevTools MCP Control");
     en.insert("browser-profiles", "Profiles");
     en.insert("browser-add-profile", "+ Add Profile");
     en.insert("browser-sandboxes", "Sandboxes");

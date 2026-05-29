@@ -262,3 +262,88 @@ bug 修复：
 
 **需要重新编译部署前端（wasm）和后端（gateway）才能生效。**
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+编译通过！**这是第4次修复，但我找到了真正的 root cause。**
+
+## Root Cause 分析
+
+**核心 Bug**：在 Leptos 0.8 中，`spawn_local` 创建的异步任务**不会继承父组件的 `Owner` 上下文**。因此 `spawn_local` 内部调用 `use_context::<I18nContext>()` 返回 `None`，`.expect(...)` 立即 **panic**，导致：
+
+1. `service.uninstall()` / `service.install()` **从未执行**
+2. `is_uninstalling.set(false)` **从未执行** → 按钮永远 disabled
+3. 没有任何通知弹出
+4. 列表永远不会刷新
+
+这就是前3次修复都失败的原因——每次都在修复"症状"（缓存、刷新机制），但从未发现真正的"病因"（`spawn_local` 内部 panic）。
+
+## 本次修复
+
+### 前端 `skills.rs` ✅
+- 将 `i18n` 在 `spawn_local` **外部**通过 `i18n.get()` 获取，再传递到异步闭包中
+- 修复了**卸载按钮**和**两个安装按钮**（ClawHub/BeeHub + Local/All）共3处
+
+### 前端 `skill_instances.rs` ✅
+- 同样修复了创建实例、删除实例、执行实例共3处
+
+### 后端（之前已修复）✅
+- ZIP 解压目录嵌套问题（ClawHub 安装后不显示）
+- `SkillRegistry::unregister`（卸载后 registry 未注销）
+
+**需要重新编译部署前端 WASM 才能生效。**
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+编译成功！`SkillCard` 组件已重写完成。
+
+**关键修改：**
+
+1. **移除了 `RwSignal::new(skill)`** — 不再用信号存储 skill prop，直接在组件开头提取所有需要的值（`skill_id`, `skill_name`, `skill_desc`, `is_installed`, `tab` 等）
+
+2. **用 `if/else` 静态分支替代 `move ||` 动态闭包** — 按钮区域不再依赖运行时闭包求值，而是在组件创建时就确定好要渲染的视图：
+   - `is_installed == true` → 显示 **Uninstall** 按钮
+   - `is_hub == true`（clawhub/beehub）→ 显示 **View on Hub** + **Install** 按钮
+   - 其他 tab → 显示 **Install** 按钮
+
+3. **提前捕获 i18n** — `let i18n_ctx = i18n.get();` 在 `spawn_local` 之前捕获，彻底避免 Leptos 0.8 `use_context` 在 async 块中 panic 的问题
+
+这解决了 ClawHub tab 中按钮区域可能因复杂嵌套动态闭包而渲染失败的问题。请刷新页面测试 ClawHub tab 的卡片布局是否正确。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+但等等，之前搜索"电商"后的截图显示，按钮在 flex 布局中能正常显示！
+
+这说明 flex 布局本身不是问题。问题只发生在第一次进入 ClawHub 时。
+
+这就是关键！第一次进入 ClawHub 和搜索后的区别是什么？
+
+第一次进入：从其他 tab（如 Local）切换到 ClawHub
+搜索后：在 ClawHub tab 内搜索
+当从其他 tab 切换到 ClawHub 时，skills 资源会重新获取。但 skills 资源可能保留了旧值，导致 Leptos 的 diff 算法在更新时出现问题。
+
+具体来说：
+
+旧 SkillCard 在 Local tab 下创建，skill-actions 内部有按钮
+切换到 ClawHub 后，skills 资源更新，SkillCard 被更新
+Leptos 的 diff 算法尝试更新 skill-actions 的内容
+但由于 flex/grid 布局和动态闭包的交互，diff 算法失败，导致 skill-actions 变成空的
+当搜索"电商"时：
+
+skills 资源重新获取
+旧的 SkillCard 被销毁，新的 SkillCard 被创建
+新的 SkillCard 从头渲染，没有 diff 问题
+按钮正常显示
+这就是问题的根源！
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+编译完成。关键改动：**使用 `For` 组件替代 `into_iter().map()`**，并为每个 `SkillCard` 添加 `key=skill.id`。
+
+这确保了 Leptos 在切换 tab 时正确重新创建组件，而不是尝试 diff 更新（这是导致 `skill-actions` 内容丢失的根本原因）。
+
+请刷新页面测试，验证：
+1. 第一次进入 ClawHub 时，按钮是否正确显示？
+2. 布局是否为两列？
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+

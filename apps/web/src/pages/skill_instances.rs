@@ -47,7 +47,7 @@ pub fn SkillInstancesPage() -> impl IntoView {
             let skill_id = create_skill_id.get();
             let agent_id = create_agent_id.get();
             if skill_id.is_empty() || agent_id.is_empty() {
-                let i18n = use_context::<I18nContext>().expect("i18n context not found");
+                let i18n = i18n.get();
                 app_state.notify(
                     crate::state::notification::NotificationType::Warning,
                     &i18n.t("skill-instances-missing-fields"),
@@ -59,6 +59,7 @@ pub fn SkillInstancesPage() -> impl IntoView {
             let service = app_state.skill_service();
             let app_state = app_state.clone();
             let reload = reload.clone();
+            let i18n = i18n.get();
             leptos::task::spawn_local(async move {
                 let req = CreateInstanceRequest {
                     skill_id,
@@ -67,7 +68,6 @@ pub fn SkillInstancesPage() -> impl IntoView {
                 };
                 match service.create_instance(req).await {
                     Ok(instance) => {
-                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
                         app_state.notify(
                             crate::state::notification::NotificationType::Success,
                             &i18n.t("skill-instances-created"),
@@ -79,8 +79,7 @@ pub fn SkillInstancesPage() -> impl IntoView {
                         reload();
                     }
                     Err(e) => {
-                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
-                    app_state.notify(
+                        app_state.notify(
                             crate::state::notification::NotificationType::Error,
                             &i18n.t("skill-instances-creation-failed"),
                             format!("{}: {}", i18n.t("skill-instances-creation-failed"), e),
@@ -100,10 +99,10 @@ pub fn SkillInstancesPage() -> impl IntoView {
             let service = app_state.skill_service();
             let app_state = app_state.clone();
             let reload = reload.clone();
+            let i18n = i18n.get();
             leptos::task::spawn_local(async move {
                 match service.delete_instance(&instance_id).await {
                     Ok(()) => {
-                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
                         app_state.notify(
                             crate::state::notification::NotificationType::Success,
                             &i18n.t("skill-instances-deleted"),
@@ -112,8 +111,7 @@ pub fn SkillInstancesPage() -> impl IntoView {
                         reload();
                     }
                     Err(e) => {
-                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
-                    app_state.notify(
+                        app_state.notify(
                             crate::state::notification::NotificationType::Error,
                             &i18n.t("skill-instances-delete-failed"),
                             format!("{}: {}", i18n.t("skill-instances-delete-failed"), e),
@@ -131,6 +129,7 @@ pub fn SkillInstancesPage() -> impl IntoView {
             is_executing.set(Some(instance_id.clone()));
             let service = app_state.skill_service();
             let app_state = app_state.clone();
+            let i18n = i18n.get();
             leptos::task::spawn_local(async move {
                 match service.execute_instance(&instance_id).await {
                     Ok(resp) => {
@@ -139,7 +138,6 @@ pub fn SkillInstancesPage() -> impl IntoView {
                         } else {
                             format!("Execution failed: {}", resp.output)
                         };
-                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
                         app_state.notify(
                             crate::state::notification::NotificationType::Success,
                             &i18n.t("skill-instances-execution-result"),
@@ -147,8 +145,7 @@ pub fn SkillInstancesPage() -> impl IntoView {
                         );
                     }
                     Err(e) => {
-                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
-                    app_state.notify(
+                        app_state.notify(
                             crate::state::notification::NotificationType::Error,
                             &i18n.t("skill-instances-execution-failed"),
                             format!("{}: {}", i18n.t("skill-instances-execution-failed"), e),

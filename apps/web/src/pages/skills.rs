@@ -209,41 +209,48 @@ pub fn SkillsPage() -> impl IntoView {
                 </div>
             </section>
 
-            <Suspense fallback=|| view! { <SkillsLoading/> }>
-                {move || {
-                    let skills = skills.clone();
-                    let reload_skills = reload_skills.clone();
-                    let selected_tab = selected_tab.clone();
-                    let show_details = show_details.clone();
-                    Suspend::new(async move {
-                        match skills.await {
-                            Ok(data) => {
-                                let filtered: Vec<_> = data.into_iter()
-                                    .filter(|s| {
-                                        let matches_category = selected_category.with(|c| {
-                                            c.as_ref().map(|cat| {
-                                                let tag = format!("{:?}", cat).to_lowercase();
-                                                s.tags.iter().any(|t| t.to_lowercase() == tag) ||
-                                                s.capabilities.iter().any(|cap| cap.to_lowercase().contains(&tag))
-                                            }).unwrap_or(true)
-                                        });
-                                        matches_category
-                                    })
-                                    .collect();
+            {move || {
+                match skills.get() {
+                    None => view! { <SkillsLoading tab=selected_tab.get()/> }.into_any(),
+                    Some(Ok(data)) => {
+                        let filtered: Vec<_> = data.into_iter()
+                            .filter(|s| {
+                                let matches_category = selected_category.with(|c| {
+                                    c.as_ref().map(|cat| {
+                                        let tag = format!("{:?}", cat).to_lowercase();
+                                        s.tags.iter().any(|t| t.to_lowercase() == tag) ||
+                                        s.capabilities.iter().any(|cap| cap.to_lowercase().contains(&tag))
+                                    }).unwrap_or(true)
+                                });
+                                matches_category
+                            })
+                            .collect();
 
-                                if filtered.is_empty() {
-                                    view! { <SkillsEmpty tab=selected_tab.get() search=active_search.get()/> }.into_any()
-                                } else {
-                                    view! {
-                                        <SkillsGrid skills=filtered reload=reload_skills.clone() selected_tab=selected_tab.clone() on_show_details=move |s| show_details.set(Some(s)) />
-                                    }.into_any()
-                                }
-                            }
-                            Err(e) => view! { <SkillsError message=e.to_string() /> }.into_any(),
+                        if filtered.is_empty() {
+                            view! { <SkillsEmpty tab=selected_tab.get() search=active_search.get()/> }.into_any()
+                        } else {
+                            let reload = reload_skills.clone();
+                            let selected_tab = selected_tab.clone();
+                            let on_show_details = {
+                                let show_details = show_details.clone();
+                                move |s: SkillInfo| show_details.set(Some(s))
+                            };
+                            view! {
+                                <div class="skills-grid">
+                                    <For
+                                        each=move || filtered.clone()
+                                        key=|skill: &SkillInfo| skill.id.clone()
+                                        let:skill
+                                    >
+                                        <SkillCard skill=skill reload=reload.clone() selected_tab=selected_tab.clone() on_show_details=on_show_details.clone() />
+                                    </For>
+                                </div>
+                            }.into_any()
                         }
-                    })
-                }}
-            </Suspense>
+                    }
+                    Some(Err(e)) => view! { <SkillsError message=e.to_string() /> }.into_any(),
+                }
+            }}
 
             // === Skill Detail Modal ===
             {move || show_details.get().map(|skill| {
@@ -317,49 +324,45 @@ fn SkillCard(
     let is_installing = RwSignal::new(false);
     let is_uninstalling = RwSignal::new(false);
 
-    let skill_sig = RwSignal::new(skill);
-    let is_installed = move || skill_sig.get().installed;
+    // Capture values from skill prop upfront
+    let skill_id = skill.id.clone();
+    let skill_name = skill.name.clone();
+    let skill_desc = skill.description.clone();
+    let skill_author = skill.author.clone();
+    let skill_version = skill.version.clone();
+    let is_installed = skill.installed;
+    let tab = selected_tab.get();
+    let is_hub = tab == "clawhub" || tab == "beehub";
+    let hub_url = if tab == "clawhub" {
+        format!("https://clawhub.ai/skills/{}", skill_id)
+    } else if tab == "beehub" {
+        format!("https://beehub.io/skills/{}", skill_id)
+    } else {
+        String::new()
+    };
 
-    let category_icon = {
-        let skill = skill_sig.get();
-        if skill.tags.iter().any(|t| t.to_lowercase() == "trading")
-            || skill
-                .capabilities
-                .iter()
-                .any(|c| c.to_lowercase().contains("trade"))
-        {
-            "📈"
-        } else if skill.tags.iter().any(|t| t.to_lowercase() == "data")
-            || skill
-                .capabilities
-                .iter()
-                .any(|c| c.to_lowercase().contains("data"))
-        {
-            "📊"
-        } else if skill.tags.iter().any(|t| t.to_lowercase() == "social")
-            || skill
-                .capabilities
-                .iter()
-                .any(|c| c.to_lowercase().contains("social"))
-        {
-            "💬"
-        } else if skill.tags.iter().any(|t| t.to_lowercase() == "automation")
-            || skill
-                .capabilities
-                .iter()
-                .any(|c| c.to_lowercase().contains("auto"))
-        {
-            "⚙️"
-        } else if skill.tags.iter().any(|t| t.to_lowercase() == "analysis")
-            || skill
-                .capabilities
-                .iter()
-                .any(|c| c.to_lowercase().contains("analy"))
-        {
-            "🔍"
-        } else {
-            "📦"
-        }
+    let category_icon = if skill.tags.iter().any(|t| t.to_lowercase() == "trading")
+        || skill.capabilities.iter().any(|c| c.to_lowercase().contains("trade"))
+    {
+        "📈"
+    } else if skill.tags.iter().any(|t| t.to_lowercase() == "data")
+        || skill.capabilities.iter().any(|c| c.to_lowercase().contains("data"))
+    {
+        "📊"
+    } else if skill.tags.iter().any(|t| t.to_lowercase() == "social")
+        || skill.capabilities.iter().any(|c| c.to_lowercase().contains("social"))
+    {
+        "💬"
+    } else if skill.tags.iter().any(|t| t.to_lowercase() == "automation")
+        || skill.capabilities.iter().any(|c| c.to_lowercase().contains("auto"))
+    {
+        "⚙️"
+    } else if skill.tags.iter().any(|t| t.to_lowercase() == "analysis")
+        || skill.capabilities.iter().any(|c| c.to_lowercase().contains("analy"))
+    {
+        "🔍"
+    } else {
+        "📦"
     };
 
     view! {
@@ -367,12 +370,12 @@ fn SkillCard(
             <div class="skill-header">
                 <div class="skill-icon">{category_icon}</div>
                 <div class="skill-meta">
-                    <h3>{skill_sig.get().name.clone()}</h3>
+                    <h3>{skill_name.clone()}</h3>
                     <div class="skill-stats">
-                        <span class="skill-version">{format!("v{}", skill_sig.get().version)}</span>
+                        <span class="skill-version">{format!("v{}", skill_version)}</span>
                     </div>
                 </div>
-                {move || if is_installed() {
+                {if is_installed {
                     view! {
                         <span class="installed-badge">{format!("✓ {}", i18n.get().t("skill-installed"))}</span>
                     }.into_any()
@@ -381,24 +384,23 @@ fn SkillCard(
                 }}
             </div>
 
-            <p class="skill-description">{skill_sig.get().description.clone()}</p>
+            <p class="skill-description">{skill_desc.clone()}</p>
 
             <div class="skill-footer">
-                <span class="skill-author">{format!("by {}", skill_sig.get().author)}</span>
+                <span class="skill-author">{format!("by {}", skill_author)}</span>
                 <div class="skill-actions">
                     <button
                         class="btn btn-secondary btn-sm"
-                        on:click={
-                            let skill = skill_sig.get();
-                            move |_| on_show_details(skill.clone())
-                        }
+                        on:click={let skill=skill.clone();move|_|on_show_details(skill.clone())}
                     >
                         {move || i18n.get().t("skill-details")}
                     </button>
-                    {move || if is_installed() {
+                    {if is_installed {
                         let app_state = app_state.clone();
-                        let skill = skill_sig.get();
+                        let skill_id = skill_id.clone();
+                        let skill_name = skill_name.clone();
                         let reload = reload.clone();
+                        let i18n_ctx = i18n.get();
                         view! {
                             <button
                                 class="btn btn-danger btn-sm"
@@ -407,17 +409,17 @@ fn SkillCard(
                                     is_uninstalling.set(true);
                                     let service = app_state.skill_service();
                                     let app_state = app_state.clone();
-                                    let skill_name = skill.name.clone();
-                                    let skill_id = skill.id.clone();
+                                    let skill_name = skill_name.clone();
+                                    let skill_id = skill_id.clone();
                                     let reload = reload.clone();
+                                    let i18n_ctx = i18n_ctx.clone();
                                     leptos::task::spawn_local(async move {
-                                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
                                         match service.uninstall(&skill_id).await {
                                             Ok(()) => {
                                                 app_state.notify(
                                                     crate::state::notification::NotificationType::Success,
-                                                    &i18n.t("notification-success"),
-                                                    format!("{} {}", skill_name, i18n.t("skill-uninstall")),
+                                                    &i18n_ctx.t("notification-success"),
+                                                    format!("{} {}", skill_name, i18n_ctx.t("skill-uninstall")),
                                                 );
                                                 app_state.skill_service().client().clear_cache();
                                                 reload();
@@ -425,8 +427,8 @@ fn SkillCard(
                                             Err(e) => {
                                                 app_state.notify(
                                                     crate::state::notification::NotificationType::Error,
-                                                    &i18n.t("notification-error"),
-                                                    format!("{} {}: {}", i18n.t("skill-uninstall"), skill_name, e),
+                                                    &i18n_ctx.t("notification-error"),
+                                                    format!("{} {}: {}", i18n_ctx.t("skill-uninstall"), skill_name, e),
                                                 );
                                             }
                                         }
@@ -441,96 +443,36 @@ fn SkillCard(
                                 }}
                             </button>
                         }.into_any()
-                    } else {
-                        let tab = selected_tab.get();
-                        if tab == "clawhub" || tab == "beehub" {
-                            let skill_id = skill_sig.get().id.clone();
-                            let hub_url = match tab.as_str() {
-                                "clawhub" => format!("https://clawhub.ai/skills/{}", skill_id),
-                                "beehub" => format!("https://beehub.io/skills/{}", skill_id),
-                                _ => String::new(),
-                            };
-                            let app_state = app_state.clone();
-                            let skill = skill_sig.get();
-                            let reload = reload.clone();
-                            let tab = tab.clone();
-                            view! {
-                                <>
-                                    <a
-                                        class="btn btn-primary btn-sm"
-                                        href=hub_url
-                                        target="_blank"
-                                    >
-                                        {move || i18n.get().t("skill-view-on-hub")}
-                                    </a>
-                                    <button
-                                        class="btn btn-success btn-sm"
-                                        disabled=move || is_installing.get()
-                                        on:click=move |_| {
-                                            is_installing.set(true);
-                                            let service = app_state.skill_service();
-                                            let app_state = app_state.clone();
-                                            let skill_name = skill.name.clone();
-                                            let skill_id = skill.id.clone();
-                                            let reload = reload.clone();
-                                            let tab = tab.clone();
-                                            leptos::task::spawn_local(async move {
-                                                let i18n = use_context::<I18nContext>().expect("i18n context not found");
-                                                let req = InstallSkillRequest {
-                                                    source: skill_id.clone(),
-                                                    agent_id: None,
-                                                    version: None,
-                                                    hub: Some(tab).filter(|h| !h.is_empty()),
-                                                };
-                                                match service.install(req).await {
-                                                    Ok(resp) => {
-                                                        app_state.notify(
-                                                            crate::state::notification::NotificationType::Success,
-                                                            &i18n.t("notification-success"),
-                                                            format!("{} {}", resp.name, i18n.t("skill-install")),
-                                                        );
-                                                        app_state.skill_service().client().clear_cache();
-                                                        reload();
-                                                    }
-                                                    Err(e) => {
-                                                        app_state.notify(
-                                                            crate::state::notification::NotificationType::Error,
-                                                            &i18n.t("notification-error"),
-                                                            format!("{} {}: {}", i18n.t("skill-install"), skill_name, e),
-                                                        );
-                                                    }
-                                                }
-                                                is_installing.set(false);
-                                            });
-                                        }
-                                    >
-                                        {move || if is_installing.get() {
-                                            i18n.get().t("skill-installing")
-                                        } else {
-                                            i18n.get().t("skill-install")
-                                        }}
-                                    </button>
-                                </>
-                            }.into_any()
-                        } else {
-                            let app_state = app_state.clone();
-                            let skill = skill_sig.get();
-                            let reload = reload.clone();
-                            let tab = tab.clone();
-                            view! {
-                                <button
+                    } else if is_hub {
+                        let app_state = app_state.clone();
+                        let skill_id = skill_id.clone();
+                        let skill_name = skill_name.clone();
+                        let reload = reload.clone();
+                        let tab = tab.clone();
+                        let hub_url = hub_url.clone();
+                        let i18n_ctx = i18n.get();
+                        view! {
+                            <>
+                                <a
                                     class="btn btn-primary btn-sm"
+                                    href=hub_url
+                                    target="_blank"
+                                >
+                                    {move || i18n.get().t("skill-view-on-hub")}
+                                </a>
+                                <button
+                                    class="btn btn-success btn-sm"
                                     disabled=move || is_installing.get()
                                     on:click=move |_| {
                                         is_installing.set(true);
                                         let service = app_state.skill_service();
                                         let app_state = app_state.clone();
-                                        let skill_name = skill.name.clone();
-                                        let skill_id = skill.id.clone();
+                                        let skill_name = skill_name.clone();
+                                        let skill_id = skill_id.clone();
                                         let reload = reload.clone();
                                         let tab = tab.clone();
+                                        let i18n_ctx = i18n_ctx.clone();
                                         leptos::task::spawn_local(async move {
-                                            let i18n = use_context::<I18nContext>().expect("i18n context not found");
                                             let req = InstallSkillRequest {
                                                 source: skill_id.clone(),
                                                 agent_id: None,
@@ -541,8 +483,8 @@ fn SkillCard(
                                                 Ok(resp) => {
                                                     app_state.notify(
                                                         crate::state::notification::NotificationType::Success,
-                                                        &i18n.t("notification-success"),
-                                                        format!("{} {}", resp.name, i18n.t("skill-install")),
+                                                        &i18n_ctx.t("notification-success"),
+                                                        format!("{} {}", resp.name, i18n_ctx.t("skill-install")),
                                                     );
                                                     app_state.skill_service().client().clear_cache();
                                                     reload();
@@ -550,8 +492,8 @@ fn SkillCard(
                                                 Err(e) => {
                                                     app_state.notify(
                                                         crate::state::notification::NotificationType::Error,
-                                                        &i18n.t("notification-error"),
-                                                        format!("{} {}: {}", i18n.t("skill-install"), skill_name, e),
+                                                        &i18n_ctx.t("notification-error"),
+                                                        format!("{} {}: {}", i18n_ctx.t("skill-install"), skill_name, e),
                                                     );
                                                 }
                                             }
@@ -565,8 +507,64 @@ fn SkillCard(
                                         i18n.get().t("skill-install")
                                     }}
                                 </button>
-                            }.into_any()
-                        }
+                            </>
+                        }.into_any()
+                    } else {
+                        let app_state = app_state.clone();
+                        let skill_id = skill_id.clone();
+                        let skill_name = skill_name.clone();
+                        let reload = reload.clone();
+                        let tab = tab.clone();
+                        let i18n_ctx = i18n.get();
+                        view! {
+                            <button
+                                class="btn btn-primary btn-sm"
+                                disabled=move || is_installing.get()
+                                on:click=move |_| {
+                                    is_installing.set(true);
+                                    let service = app_state.skill_service();
+                                    let app_state = app_state.clone();
+                                    let skill_name = skill_name.clone();
+                                    let skill_id = skill_id.clone();
+                                    let reload = reload.clone();
+                                    let tab = tab.clone();
+                                    let i18n_ctx = i18n_ctx.clone();
+                                    leptos::task::spawn_local(async move {
+                                        let req = InstallSkillRequest {
+                                            source: skill_id.clone(),
+                                            agent_id: None,
+                                            version: None,
+                                            hub: Some(tab).filter(|h| !h.is_empty()),
+                                        };
+                                        match service.install(req).await {
+                                            Ok(resp) => {
+                                                app_state.notify(
+                                                    crate::state::notification::NotificationType::Success,
+                                                    &i18n_ctx.t("notification-success"),
+                                                    format!("{} {}", resp.name, i18n_ctx.t("skill-install")),
+                                                );
+                                                app_state.skill_service().client().clear_cache();
+                                                reload();
+                                            }
+                                            Err(e) => {
+                                                app_state.notify(
+                                                    crate::state::notification::NotificationType::Error,
+                                                    &i18n_ctx.t("notification-error"),
+                                                    format!("{} {}: {}", i18n_ctx.t("skill-install"), skill_name, e),
+                                                );
+                                            }
+                                        }
+                                        is_installing.set(false);
+                                    });
+                                }
+                            >
+                                {move || if is_installing.get() {
+                                    i18n.get().t("skill-installing")
+                                } else {
+                                    i18n.get().t("skill-install")
+                                }}
+                            </button>
+                        }.into_any()
                     }}
                 </div>
             </div>
@@ -638,28 +636,40 @@ fn SkillDetailModal(
 }
 
 #[component]
-fn SkillsLoading() -> impl IntoView {
+fn SkillsLoading(#[prop(default = String::new())] tab: String) -> impl IntoView {
+    let i18n = use_context::<I18nContext>().expect("i18n context not found");
+    let loading_text = match tab.as_str() {
+        "clawhub" => "正在从 ClawHub 加载技能...",
+        "beehub" => "正在从 BeeHub 加载技能...",
+        _ => "正在加载技能...",
+    };
     view! {
-        <div class="skills-grid">
-            <div class="card skill-card skeleton">
-                <div class="skeleton-header"></div>
-                <div class="skeleton-line"></div>
-                <div class="skeleton-line"></div>
+        <div class="skills-loading-container">
+            <div class="skills-loading-spinner">
+                <div class="spinner"></div>
+                <p class="skills-loading-text">{loading_text}</p>
             </div>
-            <div class="card skill-card skeleton">
-                <div class="skeleton-header"></div>
-                <div class="skeleton-line"></div>
-                <div class="skeleton-line"></div>
-            </div>
-            <div class="card skill-card skeleton">
-                <div class="skeleton-header"></div>
-                <div class="skeleton-line"></div>
-                <div class="skeleton-line"></div>
-            </div>
-            <div class="card skill-card skeleton">
-                <div class="skeleton-header"></div>
-                <div class="skeleton-line"></div>
-                <div class="skeleton-line"></div>
+            <div class="skills-grid">
+                <div class="card skill-card skeleton">
+                    <div class="skeleton-header"></div>
+                    <div class="skeleton-line"></div>
+                    <div class="skeleton-line"></div>
+                </div>
+                <div class="card skill-card skeleton">
+                    <div class="skeleton-header"></div>
+                    <div class="skeleton-line"></div>
+                    <div class="skeleton-line"></div>
+                </div>
+                <div class="card skill-card skeleton">
+                    <div class="skeleton-header"></div>
+                    <div class="skeleton-line"></div>
+                    <div class="skeleton-line"></div>
+                </div>
+                <div class="card skill-card skeleton">
+                    <div class="skeleton-header"></div>
+                    <div class="skeleton-line"></div>
+                    <div class="skeleton-line"></div>
+                </div>
             </div>
         </div>
     }
