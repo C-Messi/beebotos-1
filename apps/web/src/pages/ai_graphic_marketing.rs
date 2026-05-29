@@ -86,11 +86,20 @@ fn graphic_image_src(image: &GraphicImageResponse) -> Option<String> {
         .or_else(|| image.image_url.clone())
 }
 
+fn can_generate_graphic_image(
+    package_ready: bool,
+    package_loading: bool,
+    image_loading: bool,
+) -> bool {
+    package_ready && !package_loading && !image_loading
+}
+
 #[component]
 pub fn AiGraphicMarketingPage() -> impl IntoView {
     let (task, set_task) = signal(default_graphic_marketing_task());
     let initial_package = fallback_graphic_package(&task.get_untracked());
     let (package, set_package) = signal(initial_package);
+    let (package_ready, set_package_ready) = signal(false);
     let (task_status, set_task_status) = signal("待生成".to_string());
     let (package_error, set_package_error) = signal::<Option<String>>(None);
     let (package_loading, set_package_loading) = signal(false);
@@ -99,8 +108,20 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
     let (image_loading, set_image_loading) = signal(false);
     let service = create_ai_store_manager_service(create_client());
     let service = StoredValue::new(service);
+    let busy = Signal::derive(move || package_loading.get() || image_loading.get());
+    let image_action_enabled = Signal::derive(move || {
+        can_generate_graphic_image(
+            package_ready.get(),
+            package_loading.get(),
+            image_loading.get(),
+        )
+    });
 
     let generate_package = move || {
+        if busy.get_untracked() {
+            return;
+        }
+
         let service = service.get_value();
         let current_task = task.get();
         let req = CreateGraphicPackageRequest {
@@ -115,12 +136,16 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
 
         set_package_loading.set(true);
         set_package_error.set(None);
+        set_package_ready.set(false);
+        set_image_result.set(None);
+        set_image_error.set(None);
         set_task_status.set("图文包生成中".to_string());
 
         spawn_local(async move {
             match service.create_graphic_package(&req).await {
                 Ok(created) => {
                     set_package.set(created);
+                    set_package_ready.set(true);
                     set_task_status.set("待审核".to_string());
                 }
                 Err(err) => {
@@ -133,6 +158,15 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
     };
 
     let generate_image = move || {
+        if busy.get_untracked() {
+            return;
+        }
+        if !package_ready.get_untracked() {
+            set_image_error.set(Some("请先重新生成图文包。".to_string()));
+            set_task_status.set("待生成".to_string());
+            return;
+        }
+
         let service = service.get_value();
         let current_task = task.get();
         let current_package = package.get();
@@ -174,10 +208,10 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                 </div>
                 <div class="ai-store-manager-actions">
                     <a class="btn btn-secondary" href="/ai-store-manager">"返回 AI 店长"</a>
-                    <button class="btn btn-primary" disabled=move || package_loading.get() on:click=move |_| generate_package()>
+                    <button class="btn btn-primary" disabled=move || busy.get() on:click=move |_| generate_package()>
                         {move || if package_loading.get() { "生成中..." } else { "生成图文包" }}
                     </button>
-                    <button class="btn btn-secondary" disabled=move || image_loading.get() on:click=move |_| generate_image()>
+                    <button class="btn btn-secondary" disabled=move || !image_action_enabled.get() on:click=move |_| generate_image()>
                         {move || if image_loading.get() { "生成中..." } else { "生成图片" }}
                     </button>
                 </div>
@@ -195,18 +229,38 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                     <div class="ai-video-form-grid">
                         <TextField label="商品" value=Signal::derive(move || task.get().product) on_input=move |value| {
                             set_task.update(|task| task.product = value);
+                            let current_task = task.get_untracked();
+                            set_package.set(fallback_graphic_package(&current_task));
+                            set_package_ready.set(false);
+                            set_image_result.set(None);
+                            set_image_error.set(None);
                             set_task_status.set("待生成".to_string());
                         } />
                         <TextField label="核心卖点" value=Signal::derive(move || task.get().selling_points) on_input=move |value| {
                             set_task.update(|task| task.selling_points = value);
+                            let current_task = task.get_untracked();
+                            set_package.set(fallback_graphic_package(&current_task));
+                            set_package_ready.set(false);
+                            set_image_result.set(None);
+                            set_image_error.set(None);
                             set_task_status.set("待生成".to_string());
                         } />
                         <TextField label="目标人群" value=Signal::derive(move || task.get().audience) on_input=move |value| {
                             set_task.update(|task| task.audience = value);
+                            let current_task = task.get_untracked();
+                            set_package.set(fallback_graphic_package(&current_task));
+                            set_package_ready.set(false);
+                            set_image_result.set(None);
+                            set_image_error.set(None);
                             set_task_status.set("待生成".to_string());
                         } />
                         <TextField label="价格区间" value=Signal::derive(move || task.get().price_range) on_input=move |value| {
                             set_task.update(|task| task.price_range = value);
+                            let current_task = task.get_untracked();
+                            set_package.set(fallback_graphic_package(&current_task));
+                            set_package_ready.set(false);
+                            set_image_result.set(None);
+                            set_image_error.set(None);
                             set_task_status.set("待生成".to_string());
                         } />
                         <SelectField
@@ -215,6 +269,11 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                             options=vec!["小红书", "朋友圈"]
                             on_change=move |value| {
                                 set_task.update(|task| task.platform = value);
+                                let current_task = task.get_untracked();
+                                set_package.set(fallback_graphic_package(&current_task));
+                                set_package_ready.set(false);
+                                set_image_result.set(None);
+                                set_image_error.set(None);
                                 set_task_status.set("待生成".to_string());
                             }
                         />
@@ -224,6 +283,11 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                             options=vec!["新品种草", "促销转化", "老客复购", "私域引流"]
                             on_change=move |value| {
                                 set_task.update(|task| task.goal = value);
+                                let current_task = task.get_untracked();
+                                set_package.set(fallback_graphic_package(&current_task));
+                                set_package_ready.set(false);
+                                set_image_result.set(None);
+                                set_image_error.set(None);
                                 set_task_status.set("待生成".to_string());
                             }
                         />
@@ -233,6 +297,11 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                             options=vec!["真实测评", "情绪种草", "痛点解决", "礼赠场景"]
                             on_change=move |value| {
                                 set_task.update(|task| task.style = value);
+                                let current_task = task.get_untracked();
+                                set_package.set(fallback_graphic_package(&current_task));
+                                set_package_ready.set(false);
+                                set_image_result.set(None);
+                                set_image_error.set(None);
                                 set_task_status.set("待生成".to_string());
                             }
                         />
@@ -242,6 +311,12 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                             options=vec!["1024x1536", "1024x1024", "1536x1024"]
                             on_change=move |value| {
                                 set_task.update(|task| task.size = value);
+                                let current_task = task.get_untracked();
+                                set_package.set(fallback_graphic_package(&current_task));
+                                set_package_ready.set(false);
+                                set_image_result.set(None);
+                                set_image_error.set(None);
+                                set_task_status.set("待生成".to_string());
                             }
                         />
                         <SelectField
@@ -250,6 +325,12 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                             options=vec!["medium", "low", "high"]
                             on_change=move |value| {
                                 set_task.update(|task| task.quality = value);
+                                let current_task = task.get_untracked();
+                                set_package.set(fallback_graphic_package(&current_task));
+                                set_package_ready.set(false);
+                                set_image_result.set(None);
+                                set_image_error.set(None);
+                                set_task_status.set("待生成".to_string());
                             }
                         />
                     </div>
@@ -428,5 +509,44 @@ mod tests {
         assert_eq!(package.title_options.len(), 3);
         assert!(package.body.contains("云柑礼盒"));
         assert!(package.image_prompt.contains("小红书"));
+    }
+
+    #[test]
+    fn image_src_prefers_b64_and_falls_back_to_url() {
+        let with_b64 = GraphicImageResponse {
+            id: "img-1".to_string(),
+            provider: "relay".to_string(),
+            status: "completed".to_string(),
+            message: "ok".to_string(),
+            image_url: Some("https://cdn.example/image.png".to_string()),
+            b64_json: Some("abc123".to_string()),
+        };
+        let with_url = GraphicImageResponse {
+            b64_json: None,
+            ..with_b64.clone()
+        };
+        let empty = GraphicImageResponse {
+            image_url: None,
+            b64_json: None,
+            ..with_b64.clone()
+        };
+
+        assert_eq!(
+            graphic_image_src(&with_b64),
+            Some("data:image/png;base64,abc123".to_string())
+        );
+        assert_eq!(
+            graphic_image_src(&with_url),
+            Some("https://cdn.example/image.png".to_string())
+        );
+        assert_eq!(graphic_image_src(&empty), None);
+    }
+
+    #[test]
+    fn image_generation_requires_ready_package_and_idle_state() {
+        assert!(can_generate_graphic_image(true, false, false));
+        assert!(!can_generate_graphic_image(false, false, false));
+        assert!(!can_generate_graphic_image(true, true, false));
+        assert!(!can_generate_graphic_image(true, false, true));
     }
 }
