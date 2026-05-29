@@ -14,6 +14,7 @@ use crate::api::{
 };
 use crate::components::Modal;
 use crate::state::use_app_state;
+use crate::i18n::I18nContext;
 
 const POLL_INTERVAL_MS: u32 = 10_000;
 
@@ -23,6 +24,7 @@ const POLL_INTERVAL_MS: u32 = 10_000;
 
 #[component]
 pub fn WorkflowDashboardPage() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let app_state = use_app_state();
     let active_tab = RwSignal::new("workflows".to_string());
 
@@ -107,22 +109,22 @@ pub fn WorkflowDashboardPage() -> impl IntoView {
     };
 
     view! {
-        <Title text="Workflows - BeeBotOS" />
+        <Title text={move || format!("{} - BeeBotOS", i18n.get().t("workflows-title"))} />
         <div class="page workflow-dashboard">
             <div class="page-header">
                 <div>
-                    <h1>"Workflow Dashboard"</h1>
-                    <p class="page-description">"Monitor workflow definitions, executions, and skill compositions"</p>
+                    <h1>{move || i18n.get().t("workflows-title")}</h1>
+                    <p class="page-description">{move || i18n.get().t("workflows-subtitle")}</p>
                 </div>
                 <button class="btn btn-secondary" on:click=move |_| refresh_all()>
-                    "🔄 Refresh"
+                    {move || format!("🔄 {}", i18n.get().t("workflows-refresh"))}
                 </button>
             </div>
 
             // ---- Tab Selector ----
             <div class="hub-selector" style="margin-bottom: 1.5rem;">
                 <TabButton
-                    label="📋 Workflow 编排"
+                    label={move || i18n.get().t("workflows-tab-orchestration")}
                     is_active={
                         let tab = active_tab.clone();
                         move || tab.get() == "workflows"
@@ -133,7 +135,7 @@ pub fn WorkflowDashboardPage() -> impl IntoView {
                     }
                 />
                 <TabButton
-                    label="🔗 Skill 组合"
+                    label={move || i18n.get().t("workflows-tab-composition")}
                     is_active={
                         let tab = active_tab.clone();
                         move || tab.get() == "compositions"
@@ -175,7 +177,7 @@ pub fn WorkflowDashboardPage() -> impl IntoView {
 
 #[component]
 fn TabButton(
-    #[prop(into)] label: String,
+    label: impl IntoView,
     is_active: impl Fn() -> bool + Clone + Send + Sync + 'static,
     on_click: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
@@ -200,6 +202,7 @@ fn WorkflowTab(
     workflows: LocalResource<Option<Vec<WorkflowInfo>>>,
     refresh_all: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let show_install_modal = RwSignal::new(false);
     let refresh_all_for_modal = refresh_all.clone();
 
@@ -217,7 +220,7 @@ fn WorkflowTab(
         // ---- Two-column layout: Recent instances + Workflow list ----
         <div class="dashboard-grid">
             <div class="dashboard-panel">
-                <h2>"Recent Instances"</h2>
+                <h2>{move || i18n.get().t("workflows-recent-instances")}</h2>
                 <Suspense fallback=|| view! { <TableSkeleton rows=5 /> }>
                     {move || {
                         recent.get().map(|r| {
@@ -230,12 +233,12 @@ fn WorkflowTab(
 
             <div class="dashboard-panel">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-                    <h2 style="margin: 0;">"Workflow Definitions"</h2>
+                    <h2 style="margin: 0;">{move || i18n.get().t("workflows-definitions")}</h2>
                     <button
                         class="btn btn-primary"
                         on:click=move |_| show_install_modal.set(true)
                     >
-                        "➕ 添加 Workflow"
+                        {move || format!("➕ {}", i18n.get().t("workflows-add"))}
                     </button>
                 </div>
                 <Suspense fallback=|| view! { <TableSkeleton rows=5 /> }>
@@ -276,9 +279,10 @@ fn CompositionTab(
     compositions: LocalResource<Option<Vec<CompositionInfo>>>,
     refresh_all: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
         <div class="dashboard-panel" style="margin-top: 0;">
-            <h2>"Skill Compositions"</h2>
+            <h2>{move || i18n.get().t("workflows-skill-compositions")}</h2>
             <Suspense fallback=|| view! { <TableSkeleton rows=5 /> }>
                 {move || {
                     compositions.get().map(|c| {
@@ -297,40 +301,41 @@ fn CompositionTab(
 
 #[component]
 fn StatsCards(stats: DashboardStats) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
         <div class="stats-grid">
             <StatCard
-                label="Total Workflows".to_string()
+                label={move || i18n.get().t("workflows-stat-total")}
                 value=stats.total_workflows.to_string()
                 icon="📋"
                 color="blue"
             />
             <StatCard
-                label="Total Instances".to_string()
+                label={move || i18n.get().t("workflows-stat-instances")}
                 value=stats.total_instances.to_string()
                 icon="🔄"
                 color="purple"
             />
             <StatCard
-                label="Completed".to_string()
+                label={move || i18n.get().t("workflows-stat-completed")}
                 value=stats.completed.to_string()
                 icon="✅"
                 color="green"
             />
             <StatCard
-                label="Failed".to_string()
+                label={move || i18n.get().t("workflows-stat-failed")}
                 value=stats.failed.to_string()
                 icon="❌"
                 color="red"
             />
             <StatCard
-                label="Running".to_string()
+                label={move || i18n.get().t("workflows-stat-running")}
                 value=stats.running.to_string()
                 icon="▶️"
                 color="yellow"
             />
             <StatCard
-                label="Pending".to_string()
+                label={move || i18n.get().t("workflows-stat-pending")}
                 value=stats.pending.to_string()
                 icon="⏳"
                 color="gray"
@@ -341,8 +346,8 @@ fn StatsCards(stats: DashboardStats) -> impl IntoView {
 
 #[component]
 fn StatCard(
-    label: String,
-    value: String,
+    label: impl IntoView,
+    value: impl IntoView,
     icon: &'static str,
     color: &'static str,
 ) -> impl IntoView {
@@ -362,11 +367,12 @@ fn StatCard(
 
 #[component]
 fn RecentInstancesTable(instances: Vec<WorkflowInstanceSummary>) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     if instances.is_empty() {
         return Either::Left(view! {
             <div class="empty-state">
                 <span class="empty-icon">"📝"</span>
-                <p>"No workflow instances yet"</p>
+                <p>{move || i18n.get().t("workflows-no-instances")}</p>
             </div>
         });
     }
@@ -376,11 +382,11 @@ fn RecentInstancesTable(instances: Vec<WorkflowInstanceSummary>) -> impl IntoVie
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>"Workflow"</th>
-                        <th>"Status"</th>
-                        <th>"Progress"</th>
-                        <th>"Duration"</th>
-                        <th>"Started"</th>
+                        <th>{move || i18n.get().t("workflows-table-workflow")}</th>
+                        <th>{move || i18n.get().t("workflows-table-status")}</th>
+                        <th>{move || i18n.get().t("workflows-table-progress")}</th>
+                        <th>{move || i18n.get().t("workflows-table-duration")}</th>
+                        <th>{move || i18n.get().t("workflows-table-started")}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -422,11 +428,12 @@ fn WorkflowList(
     workflows: Vec<WorkflowInfo>,
     refresh: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     if workflows.is_empty() {
         return Either::Left(view! {
             <div class="empty-state">
                 <span class="empty-icon">"📋"</span>
-                <p>"No workflows defined yet"</p>
+                <p>{move || i18n.get().t("workflows-no-definitions")}</p>
             </div>
         });
     }
@@ -447,6 +454,7 @@ fn WorkflowCard(
     workflow: WorkflowInfo,
     refresh: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let refresh = RwSignal::new(refresh);
     let wf_sig = RwSignal::new(workflow);
     let show_execute_modal = RwSignal::new(false);
@@ -473,7 +481,7 @@ fn WorkflowCard(
             <p class="workflow-description">{wf_sig.get().description.clone()}</p>
             <div class="workflow-meta">
                 <span class="workflow-steps">{format!("{} steps", wf_sig.get().steps_count)}</span>
-                <span class="workflow-triggers">{if trigger_types.is_empty() { "No triggers".to_string() } else { trigger_types }}</span>
+                <span class="workflow-triggers">{if trigger_types.is_empty() { i18n.get().t("workflows-no-triggers") } else { trigger_types }}</span>
             </div>
             <div class="workflow-tags">
                 {wf_sig.get().tags.into_iter().map(|tag| {
@@ -487,10 +495,10 @@ fn WorkflowCard(
                     on:click=move |_| {
                         show_execute_modal.set(true);
                     }
-                    title="Manual execute"
+                    title={move || i18n.get().t("workflows-manual-execute")}
                 >
                     {move || if is_executing.get() { "⏳" } else { "▶️" }}
-                    {move || if is_executing.get() { "Running..." } else { "Start" }}
+                    {move || if is_executing.get() { i18n.get().t("workflows-starting") } else { i18n.get().t("workflows-start") }}
                 </button>
                 <button
                     class="btn btn-sm btn-danger"
@@ -512,14 +520,14 @@ fn WorkflowCard(
                                                 if success {
                                                     app_state.notify(
                                                         crate::state::notification::NotificationType::Success,
-                                                        "Workflow Stopped",
+                            &use_context::<I18nContext>().expect("i18n context not found").t("workflows-stop-success"),
                                                         format!("Instance {} cancelled", inst.instance_id),
                                                     );
                                                 } else {
-                                                    let msg = resp.get("message").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                                                    let msg = resp.get("message").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| use_context::<I18nContext>().expect("i18n context not found").t("error-generic"));
                                                     app_state.notify(
                                                         crate::state::notification::NotificationType::Error,
-                                                        "Stop Failed",
+                            &use_context::<I18nContext>().expect("i18n context not found").t("workflows-stop-failed"),
                                                         msg.to_string(),
                                                     );
                                                 }
@@ -527,7 +535,7 @@ fn WorkflowCard(
                                             Err(e) => {
                                                 app_state.notify(
                                                     crate::state::notification::NotificationType::Error,
-                                                    "Stop Failed",
+                            &use_context::<I18nContext>().expect("i18n context not found").t("workflows-stop-failed"),
                                                     format!("Failed to cancel instance: {}", e),
                                                 );
                                             }
@@ -535,15 +543,15 @@ fn WorkflowCard(
                                     } else {
                                         app_state.notify(
                                             crate::state::notification::NotificationType::Warning,
-                                            "No Running Instance",
-                                            "This workflow is not currently running",
+                            &use_context::<I18nContext>().expect("i18n context not found").t("workflows-no-running"),
+                                            &use_context::<I18nContext>().expect("i18n context not found").t("workflows-not-running"),
                                         );
                                     }
                                 }
                                 Err(e) => {
                                     app_state.notify(
                                         crate::state::notification::NotificationType::Error,
-                                        "Stop Failed",
+                            &use_context::<I18nContext>().expect("i18n context not found").t("workflows-stop-failed"),
                                         format!("Failed to fetch instances: {}", e),
                                     );
                                 }
@@ -552,28 +560,28 @@ fn WorkflowCard(
                             refresh();
                         });
                     }
-                    title="Stop latest running instance"
+                    title={move || i18n.get().t("workflows-stop-latest")}
                 >
                     {move || if is_stopping.get() { "⏳" } else { "⏹" }}
-                    {move || if is_stopping.get() { "Stopping..." } else { "Stop" }}
+                    {move || if is_stopping.get() { i18n.get().t("workflows-stopping") } else { i18n.get().t("workflows-stop") }}
                 </button>
                 <button
                     class="btn btn-sm btn-secondary"
                     on:click=move |_| {
                         show_schedule_modal.set(true);
                     }
-                    title="Edit schedule"
+                    title={move || i18n.get().t("workflows-schedule")}
                 >
-                    "⏰ Schedule"
+                    {move || format!("⏰ {}", i18n.get().t("workflows-schedule"))}
                 </button>
                 <button
                     class="btn btn-sm btn-secondary"
                     on:click=move |_| {
                         show_config_modal.set(true);
                     }
-                    title="Configure workflow parameters"
+                    title={move || i18n.get().t("workflows-config")}
                 >
-                    "⚙️ Config"
+                    {move || format!("⚙️ {}", i18n.get().t("workflows-config"))}
                 </button>
                 <button
                     class="btn btn-sm btn-danger"
@@ -611,13 +619,13 @@ fn WorkflowCard(
                             is_uninstalling.set(false);
                         });
                     }
-                    title="Uninstall workflow"
+                    title={move || i18n.get().t("workflows-uninstall")}
                 >
                     {move || if is_uninstalling.get() { "⏳" } else { "🗑" }}
-                    {move || if is_uninstalling.get() { "Uninstalling..." } else { "Uninstall" }}
+                    {move || if is_uninstalling.get() { i18n.get().t("workflows-uninstalling") } else { i18n.get().t("workflows-uninstall") }}
                 </button>
                 <a class="btn btn-sm btn-primary" href={format!("/workflows/{}", wf_sig.get().id)}>
-                    "🔍 DAG"
+                    {move || format!("🔍 {}", i18n.get().t("workflows-dag"))}
                 </a>
             </div>
         </div>
@@ -688,6 +696,7 @@ fn ExecuteWorkflowModal(
     on_close: impl Fn() + Clone + Send + Sync + 'static,
     on_executed: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let context_input = RwSignal::new("{}".to_string());
     let is_executing = RwSignal::new(false);
 
@@ -698,14 +707,14 @@ fn ExecuteWorkflowModal(
         }>
             <div class="modal-body">
                 <div class="form-group">
-                    <label>"Trigger Context (JSON)"</label>
+                    <label>{move || i18n.get().t("workflows-trigger-context")}</label>
                     <textarea
                         class="form-control"
                         rows="6"
                         prop:value=context_input
                         on:input=move |e| context_input.set(event_target_value(&e))
                     />
-                    <small class="text-muted">"Enter a JSON object to pass as trigger context"</small>
+                    <small class="text-muted">{move || i18n.get().t("workflows-trigger-hint")}</small>
                 </div>
                 <div class="form-actions">
                     <button
@@ -753,10 +762,10 @@ fn ExecuteWorkflowModal(
                             }
                         }
                     >
-                        {move || if is_executing.get() { "⏳ Executing..." } else { "▶️ Execute" }}
+                        {move || if is_executing.get() { i18n.get().t("workflows-executing") } else { format!("▶️ {}", i18n.get().t("workflows-execute")) }}
                     </button>
                     <button class="btn btn-secondary" on:click=move |_| { on_close(); }>
-                        "Cancel"
+                        {move || i18n.get().t("workflows-cancel")}
                     </button>
                 </div>
             </div>
@@ -774,6 +783,7 @@ fn ScheduleWorkflowModal(
     on_close: impl Fn() + Clone + Send + Sync + 'static,
     on_scheduled: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let schedule_input = RwSignal::new("0 9 * * *".to_string());
     let tz_input = RwSignal::new("UTC".to_string());
     let is_saving = RwSignal::new(false);
@@ -785,24 +795,24 @@ fn ScheduleWorkflowModal(
         }>
             <div class="modal-body">
                 <div class="form-group">
-                    <label>"Cron Expression"</label>
+                    <label>{move || i18n.get().t("workflows-cron-expression")}</label>
                     <input
                         class="form-control"
                         type="text"
                         prop:value=schedule_input
                         on:input=move |e| schedule_input.set(event_target_value(&e))
                     />
-                    <small class="text-muted">"e.g. 0 9 * * * (daily at 9am), 0 */6 * * * (every 6 hours)"</small>
+                    <small class="text-muted">{move || i18n.get().t("workflows-cron-placeholder")}</small>
                 </div>
                 <div class="form-group">
-                    <label>"Timezone"</label>
+                    <label>{move || i18n.get().t("workflows-timezone")}</label>
                     <input
                         class="form-control"
                         type="text"
                         prop:value=tz_input
                         on:input=move |e| tz_input.set(event_target_value(&e))
                     />
-                    <small class="text-muted">"e.g. UTC, Asia/Shanghai, America/New_York"</small>
+                    <small class="text-muted">{move || i18n.get().t("workflows-timezone-placeholder")}</small>
                 </div>
                 <div class="form-actions">
                     <button
@@ -876,10 +886,10 @@ fn ScheduleWorkflowModal(
                             });
                         }
                     >
-                        {move || if is_saving.get() { "⏳ Saving..." } else { "💾 Save Schedule" }}
+                        {move || if is_saving.get() { i18n.get().t("workflows-saving") } else { format!("💾 {}", i18n.get().t("workflows-save-schedule")) }}
                     </button>
                     <button class="btn btn-secondary" on:click=move |_| { on_close(); }>
-                        "Cancel"
+                        {move || i18n.get().t("workflows-cancel")}
                     </button>
                 </div>
             </div>
@@ -896,17 +906,18 @@ fn InstallWorkflowModal(
     on_close: impl Fn() + Clone + Send + Sync + 'static,
     on_installed: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let source_path = RwSignal::new("".to_string());
     let is_installing = RwSignal::new(false);
 
     view! {
-        <Modal title="Install Workflow".to_string() on_close={
+        <Modal title={move || i18n.get().t("workflows-install-title")} on_close={
             let on_close = on_close.clone();
             move || on_close()
         }>
             <div class="modal-body">
                 <div class="form-group">
-                    <label>"Workflow File Path"</label>
+                    <label>{move || i18n.get().t("workflows-file-path")}</label>
                     <input
                         class="form-control"
                         type="text"
@@ -914,7 +925,7 @@ fn InstallWorkflowModal(
                         on:input=move |e| source_path.set(event_target_value(&e))
                         placeholder="/path/to/workflow.yaml"
                     />
-                    <small class="text-muted">"Absolute or relative path to a YAML/JSON workflow file"</small>
+                    <small class="text-muted">{move || i18n.get().t("workflows-file-hint")}</small>
                 </div>
                 <div class="form-actions">
                     <button
@@ -952,10 +963,10 @@ fn InstallWorkflowModal(
                             });
                         }
                     >
-                        {move || if is_installing.get() { "⏳ Installing..." } else { "📥 Install" }}
+                        {move || if is_installing.get() { i18n.get().t("workflows-installing") } else { format!("📥 {}", i18n.get().t("workflows-install")) }}
                     </button>
                     <button class="btn btn-secondary" on:click=move |_| { on_close(); }>
-                        "Cancel"
+                        {move || i18n.get().t("workflows-cancel")}
                     </button>
                 </div>
             </div>
@@ -973,6 +984,7 @@ fn ConfigWorkflowModal(
     on_close: impl Fn() + Clone + Send + Sync + 'static,
     on_configured: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let yaml_content = RwSignal::new("".to_string());
     let is_loading = RwSignal::new(true);
     let is_saving = RwSignal::new(false);
@@ -990,7 +1002,7 @@ fn ConfigWorkflowModal(
                 Err(e) => {
                     app_state.notify(
                         crate::state::notification::NotificationType::Error,
-                        "Load Failed",
+                            &use_context::<I18nContext>().expect("i18n context not found").t("workflows-load-failed"),
                         format!("Failed to load workflow source: {}", e),
                     );
                 }
@@ -1010,7 +1022,7 @@ fn ConfigWorkflowModal(
                 } else {
                     view! {
                         <div class="form-group">
-                            <label>"Workflow Definition (YAML)"</label>
+                            <label>{move || i18n.get().t("workflows-definition-yaml")}</label>
                             <textarea
                                 class="form-control"
                                 rows="16"
@@ -1018,7 +1030,7 @@ fn ConfigWorkflowModal(
                                 on:input=move |e| yaml_content.set(event_target_value(&e))
                                 style="font-family: monospace; font-size: 0.85rem;"
                             />
-                            <small class="text-muted">"Edit the workflow definition directly. Be careful with YAML syntax."</small>
+                            <small class="text-muted">{move || i18n.get().t("workflows-definition-hint")}</small>
                         </div>
                     }.into_any()
                 }}
@@ -1039,7 +1051,7 @@ fn ConfigWorkflowModal(
                                         app_state.notify(
                                             crate::state::notification::NotificationType::Success,
                                             "Workflow Updated",
-                                            "Configuration saved successfully",
+                                            &use_context::<I18nContext>().expect("i18n context not found").t("workflows-saved"),
                                         );
                                         on_configured();
                                     }
@@ -1055,10 +1067,10 @@ fn ConfigWorkflowModal(
                             });
                         }
                     >
-                        {move || if is_saving.get() { "⏳ Saving..." } else { "💾 Save" }}
+                        {move || if is_saving.get() { i18n.get().t("workflows-saving") } else { format!("💾 {}", i18n.get().t("workflows-save")) }}
                     </button>
                     <button class="btn btn-secondary" on:click=move |_| { on_close(); }>
-                        "Cancel"
+                        {move || i18n.get().t("workflows-cancel")}
                     </button>
                 </div>
             </div>
@@ -1075,12 +1087,13 @@ fn CompositionList(
     compositions: Vec<CompositionInfo>,
     refresh: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     if compositions.is_empty() {
         return Either::Left(view! {
             <div class="empty-state">
                 <span class="empty-icon">"🔗"</span>
-                <p>"No skill compositions defined yet"</p>
-                <p class="text-muted">"Create compositions via API or YAML files in data/compositions/"</p>
+                <p>{move || i18n.get().t("workflows-no-compositions")}</p>
+                <p class="text-muted">{move || i18n.get().t("workflows-composition-hint")}</p>
             </div>
         });
     }
@@ -1101,6 +1114,7 @@ fn CompositionCard(
     composition: CompositionInfo,
     refresh: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let refresh = RwSignal::new(refresh);
     let comp_sig = RwSignal::new(composition);
     let is_deleting = RwSignal::new(false);
@@ -1171,10 +1185,10 @@ fn CompositionCard(
                             refresh();
                         });
                     }
-                    title="Execute composition"
+                    title={move || i18n.get().t("workflows-execute-composition")}
                 >
                     {move || if is_executing.get() { "⏳" } else { "▶️" }}
-                    {move || if is_executing.get() { "Running..." } else { "Execute" }}
+                    {move || if is_executing.get() { i18n.get().t("workflows-starting") } else { i18n.get().t("workflows-execute-composition") }}
                 </button>
                 <button
                     class="btn btn-sm btn-danger"
@@ -1212,10 +1226,10 @@ fn CompositionCard(
                             is_deleting.set(false);
                         });
                     }
-                    title="Delete composition"
+                    title={move || i18n.get().t("workflows-composition-delete")}
                 >
                     {move || if is_deleting.get() { "⏳" } else { "🗑" }}
-                    {move || if is_deleting.get() { "Deleting..." } else { "Delete" }}
+                    {move || if is_deleting.get() { i18n.get().t("workflows-composition-deleting") } else { i18n.get().t("workflows-composition-delete") }}
                 </button>
             </div>
         </div>
@@ -1273,21 +1287,24 @@ fn TableSkeleton(rows: usize) -> impl IntoView {
 
 #[component]
 fn InstancesError() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
-        <div class="error-box">"Failed to load recent instances"</div>
+        <div class="error-box">{move || i18n.get().t("workflows-error-recent")}</div>
     }
 }
 
 #[component]
 fn WorkflowsError() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
-        <div class="error-box">"Failed to load workflow definitions"</div>
+        <div class="error-box">{move || i18n.get().t("workflows-error-definitions")}</div>
     }
 }
 
 #[component]
 fn CompositionsError() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
-        <div class="error-box">"Failed to load skill compositions"</div>
+        <div class="error-box">{move || i18n.get().t("workflows-error-compositions")}</div>
     }
 }

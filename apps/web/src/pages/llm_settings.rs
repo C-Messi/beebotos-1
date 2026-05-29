@@ -11,6 +11,7 @@ use leptos_meta::*;
 use crate::api::{LlmGlobalConfig, UpdateLlmConfigRequest};
 use crate::components::InlineLoading;
 use crate::state::use_app_state;
+use crate::i18n::I18nContext;
 
 /// Predefined model options for thinking-capable providers.
 /// `thinking` maps directly to the backend TOML value.
@@ -71,6 +72,7 @@ fn find_variant_label(
 
 #[component]
 pub fn LlmSettingsPage() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let config: RwSignal<Option<LlmGlobalConfig>> = RwSignal::new(None);
     let loading = RwSignal::new(true);
     let saving = RwSignal::new(false);
@@ -228,11 +230,11 @@ pub fn LlmSettingsPage() -> impl IntoView {
     };
 
     view! {
-        <Title text="大模型设置 - BeeBotOS" />
+        <Title text={move || format!("{} - BeeBotOS", i18n.get().t("llm-settings-title"))} />
         <div class="page llm-settings-page">
             <div class="page-header">
-                <h1>"大模型设置"</h1>
-                <p class="page-description">"选择并配置当前使用的大语言模型及其参数"</p>
+                <h1>{move || i18n.get().t("llm-settings-title")}</h1>
+                <p class="page-description">{move || i18n.get().t("llm-settings-subtitle")}</p>
             </div>
 
             {move || if loading.get() {
@@ -243,7 +245,7 @@ pub fn LlmSettingsPage() -> impl IntoView {
                         <div class="error-icon">"⚠️"</div>
                         <p>{err}</p>
                         <button class="btn btn-primary" on:click=move |_| fetch_stored.get_value()()>
-                            "重试"
+                            {move || i18n.get().t("llm-settings-retry")}
                         </button>
                     </div>
                 }.into_any()
@@ -252,9 +254,9 @@ pub fn LlmSettingsPage() -> impl IntoView {
                     <div class="llm-settings-grid">
                         // Provider Selection
                         <section class="card llm-settings-section">
-                            <h2>"模型提供商"</h2>
+                            <h2>{move || i18n.get().t("llm-settings-provider")}</h2>
                             <div class="form-group">
-                                <label>"选择提供商"</label>
+                                <label>{move || i18n.get().t("llm-settings-select-provider")}</label>
                                 <select
                                     prop:value=selected_provider
                                     on:change=move |e| {
@@ -282,13 +284,13 @@ pub fn LlmSettingsPage() -> impl IntoView {
 
                         // Model Selection
                         <section class="card llm-settings-section">
-                            <h2>"模型版本"</h2>
+                            <h2>{move || i18n.get().t("llm-settings-model-version")}</h2>
                             {move || {
                                 let provider = selected_provider.get();
                                 if provider == "kimi" {
                                     view! {
                                         <div class="form-group">
-                                            <label>"选择 Kimi 模型"</label>
+                                            <label>{move || i18n.get().t("llm-settings-select-kimi")}</label>
                                             <select
                                                 prop:value=selected_variant_label
                                                 on:change=move |e| {
@@ -305,14 +307,14 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                                 }).collect::<Vec<_>>()}
                                             </select>
                                             <p class="form-help">
-                                                "选择会同步写入 model、thinking 和 temperature。"
+                                                {move || i18n.get().t("llm-settings-kimi-hint")}
                                             </p>
                                         </div>
                                     }.into_any()
                                 } else if provider == "deepseek" {
                                     view! {
                                         <div class="form-group">
-                                            <label>"选择 DeepSeek 模型"</label>
+                                            <label>{move || i18n.get().t("llm-settings-select-deepseek")}</label>
                                             <select
                                                 prop:value=selected_variant_label
                                                 on:change=move |e| {
@@ -329,25 +331,25 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                                 }).collect::<Vec<_>>()}
                                             </select>
                                             <p class="form-help">
-                                                "DeepSeek 官方当前模型为 deepseek-v4-flash / deepseek-v4-pro，选择会同步写入 thinking 和 reasoning_effort。"
+                                                {move || i18n.get().t("llm-settings-deepseek-hint")}
                                             </p>
                                         </div>
                                     }.into_any()
                                 } else if !provider.is_empty() {
                                     view! {
                                         <div class="form-group">
-                                            <label>"模型名称"</label>
+                                            <label>{move || i18n.get().t("llm-settings-model-name")}</label>
                                             <input
                                                 type="text"
                                                 prop:value=selected_model
                                                 on:input=move |e| {
                                                     selected_model.set(crate::utils::event_target_value(&e));
                                                 }
-                                                placeholder="例如: gpt-4o"
+                                                placeholder={move || i18n.get().t("llm-settings-model-placeholder")}
                                             />
                                         </div>
                                         <div class="form-group">
-                                            <label>"Temperature"</label>
+                                            <label>{move || i18n.get().t("llm-settings-temperature")}</label>
                                             <input
                                                 type="number"
                                                 step="0.1"
@@ -361,13 +363,13 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                                 }
                                             />
                                             <p class="form-help">
-                                                "取值范围 0.0 ~ 2.0，越低越确定，越高越 creative"
+                                                {move || i18n.get().t("llm-settings-temperature-hint")}
                                             </p>
                                         </div>
                                     }.into_any()
                                 } else {
                                     view! {
-                                        <p class="form-help">"请先选择模型提供商"</p>
+                                        <p class="form-help">{move || i18n.get().t("llm-settings-select-provider-first")}</p>
                                     }.into_any()
                                 }
                             }}
@@ -375,26 +377,26 @@ pub fn LlmSettingsPage() -> impl IntoView {
 
                         // Current Parameters Summary
                         <section class="card llm-settings-section">
-                            <h2>"当前参数"</h2>
+                            <h2>{move || i18n.get().t("llm-settings-current-params")}</h2>
                             <div class="info-grid">
                                 <div class="info-row">
-                                    <span>"提供商"</span>
+                                    <span>{move || i18n.get().t("llm-settings-provider-label")}</span>
                                     <span class="info-value">{move || selected_provider.get()}</span>
                                 </div>
                                 <div class="info-row">
-                                    <span>"模型"</span>
+                                    <span>{move || i18n.get().t("llm-settings-model-label")}</span>
                                     <span class="info-value">{move || selected_model.get()}</span>
                                 </div>
                                 <div class="info-row">
-                                    <span>"Temperature"</span>
+                                    <span>{move || i18n.get().t("llm-settings-temperature")}</span>
                                     <span class="info-value">{move || format!("{:.1}", selected_temperature.get())}</span>
                                 </div>
                                 <div class="info-row">
-                                    <span>"Thinking"</span>
+                                    <span>{move || i18n.get().t("llm-settings-thinking-label")}</span>
                                     <span class="info-value">{move || selected_thinking.get()}</span>
                                 </div>
                                 <div class="info-row">
-                                    <span>"Reasoning Effort"</span>
+                                    <span>{move || i18n.get().t("llm-settings-reasoning-label")}</span>
                                     <span class="info-value">{move || selected_reasoning_effort.get()}</span>
                                 </div>
                             </div>
@@ -402,7 +404,7 @@ pub fn LlmSettingsPage() -> impl IntoView {
 
                         // Actions
                         <section class="card llm-settings-section">
-                            <h2>"操作"</h2>
+                            <h2>{move || i18n.get().t("llm-settings-actions")}</h2>
                             {move || message.get().map(|msg| view! {
                                 <div class="save-message success">{msg}</div>
                             })}
@@ -455,7 +457,7 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                     }
                                     disabled=saving
                                 >
-                                    {move || if saving.get() { "保存中..." } else { "保存配置" }}
+                                    {move || if saving.get() { i18n.get().t("llm-settings-saving") } else { i18n.get().t("llm-settings-save-config") }}
                                 </button>
                                 <button
                                     class="btn btn-secondary"
@@ -485,11 +487,11 @@ pub fn LlmSettingsPage() -> impl IntoView {
                                     }
                                     disabled=reloading
                                 >
-                                    {move || if reloading.get() { "重载中..." } else { "重启生效 (Reload)" }}
+                                    {move || if reloading.get() { i18n.get().t("llm-settings-reloading") } else { i18n.get().t("llm-settings-reload-restart") }}
                                 </button>
                             </div>
                             <p class="form-help">
-                                "保存后会自动写入 config/beebotos.toml 并热重载。如需完全生效，请点击"重启生效"。"
+                                {move || format!("{} {}", i18n.get().t("llm-settings-reload-hint"), i18n.get().t("llm-settings-reload-restart"))}
                             </p>
                         </section>
                     </div>

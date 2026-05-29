@@ -6,11 +6,13 @@ use leptos_router::components::A;
 
 use crate::api::{CreateProposalRequest, DaoSummary, ProposalInfo, ProposalStatus};
 use crate::components::Modal;
+use crate::i18n::I18nContext;
 use crate::state::notification::NotificationType;
 use crate::state::use_app_state;
 
 #[component]
 pub fn DaoPage() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let app_state = use_app_state();
     let app_state_clone1 = app_state.clone();
     let app_state_clone2 = app_state.clone();
@@ -61,22 +63,22 @@ pub fn DaoPage() -> impl IntoView {
                 }
                 Err(e) => {
                     create_saving.set(false);
-                    create_error.set(Some(format!("Failed to create proposal: {}", e)));
+                    create_error.set(Some(format!("{}: {}", i18n.get().t("dao-create-failed"), e)));
                 }
             }
         });
     };
 
     view! {
-        <Title text="DAO Governance - BeeBotOS" />
+        <Title text={move || format!("{} - BeeBotOS", i18n.get().t("dao-page-title"))} />
         <div class="page dao-page">
             <div class="page-header">
                 <div>
-                    <h1>"DAO Governance"</h1>
-                    <p class="page-description">"Participate in community-driven decision making"</p>
+                    <h1>{move || i18n.get().t("dao-governance")}</h1>
+                    <p class="page-description">{move || i18n.get().t("dao-subtitle")}</p>
                 </div>
                 <A href="/dao/treasury" attr:class="btn btn-secondary">
-                    "View Treasury →"
+                    {move || i18n.get().t("dao-view-treasury")}
                 </A>
             </div>
 
@@ -91,8 +93,8 @@ pub fn DaoPage() -> impl IntoView {
 
             <section class="proposals-section">
                 <div class="section-header">
-                    <h2>"Governance Proposals"</h2>
-                    <button class="btn btn-primary" on:click=move |_| create_open.set(true)>"+ New Proposal"</button>
+                    <h2>{move || i18n.get().t("dao-proposals-title")}</h2>
+                    <button class="btn btn-primary" on:click=move |_| create_open.set(true)>{move || i18n.get().t("dao-new-proposal")}</button>
                 </div>
 
                 // Create Proposal Modal
@@ -100,43 +102,43 @@ pub fn DaoPage() -> impl IntoView {
                     let on_create = on_create.clone();
                     if create_open.get() {
                     view! {
-                        <Modal title="Create Proposal" on_close=move || create_open.set(false)>
+                        <Modal title={move || i18n.get().t("dao-create-proposal")} on_close=move || create_open.set(false)>
                             <div class="modal-body">
                                 {move || create_error.get().map(|msg| view! {
                                     <div class="alert alert-error">{msg}</div>
                                 })}
                                 <div class="form-group">
-                                    <label>"Title"</label>
+                                    <label>{move || i18n.get().t("dao-proposal-title-label")}</label>
                                     <input
                                         type="text"
                                         prop:value=create_title
                                         on:input=move |e| create_title.set(event_target_value(&e))
-                                        placeholder="Proposal title"
+                                        placeholder={move || i18n.get().t("dao-proposal-title-placeholder")}
                                     />
                                 </div>
                                 <div class="form-group">
-                                    <label>"Description"</label>
+                                    <label>{move || i18n.get().t("dao-proposal-desc-label")}</label>
                                     <textarea
                                         prop:value=create_desc
                                         on:input=move |e| create_desc.set(event_target_value(&e))
-                                        placeholder="Describe your proposal..."
+                                        placeholder={move || i18n.get().t("dao-proposal-desc-placeholder")}
                                     />
                                 </div>
                                 <div class="form-group">
-                                    <label>"Type"</label>
+                                    <label>{move || i18n.get().t("dao-proposal-type")}</label>
                                     <select
                                         prop:value=create_type
                                         on:change=move |e| create_type.set(event_target_value(&e))
                                     >
-                                        <option value="general">"General"</option>
-                                        <option value="funding">"Funding"</option>
-                                        <option value="upgrade">"Upgrade"</option>
-                                        <option value="parameter">"Parameter"</option>
+                                        <option value="general">{move || i18n.get().t("dao-type-general")}</option>
+                                        <option value="funding">{move || i18n.get().t("dao-type-funding")}</option>
+                                        <option value="upgrade">{move || i18n.get().t("dao-type-upgrade")}</option>
+                                        <option value="parameter">{move || i18n.get().t("dao-type-parameter")}</option>
                                     </select>
                                 </div>
                             </div>
                             <div class="modal-footer">
-                                <button class="btn btn-secondary" on:click=move |_| create_open.set(false)>"Cancel"</button>
+                                <button class="btn btn-secondary" on:click=move |_| create_open.set(false)>{move || i18n.get().t("dao-cancel")}</button>
                                 <button
                                     class="btn btn-primary"
                                     on:click={
@@ -145,7 +147,7 @@ pub fn DaoPage() -> impl IntoView {
                                     }
                                     disabled=create_saving
                                 >
-                                    {move || if create_saving.get() { "Creating..." } else { "Create Proposal" }}
+                                    {move || if create_saving.get() { i18n.get().t("dao-creating") } else { i18n.get().t("dao-create-proposal-btn") }}
                                 </button>
                             </div>
                         </Modal>
@@ -167,7 +169,7 @@ pub fn DaoPage() -> impl IntoView {
                             }
                             Err(e) => view! {
                                 <div class="error-message">
-                                    {"Failed to load proposals: "}{e.to_string()}
+                                    {move || format!("{}: {}", i18n.get().t("dao-failed-load-proposals"), e)}
                                 </div>
                             }.into_any(),
                         }
@@ -180,26 +182,29 @@ pub fn DaoPage() -> impl IntoView {
 
 #[component]
 fn DaoSummaryView(summary: DaoSummary) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
+    let token_symbol_vp = summary.token_symbol.clone();
+    let token_symbol_bal = summary.token_symbol.clone();
     view! {
         <section class="dao-summary">
             <div class="stat-card">
                 <div class="stat-value">{summary.member_count}</div>
-                <div class="stat-label">"DAO Members"</div>
+                <div class="stat-label">{move || i18n.get().t("dao-members")}</div>
             </div>
             <div class="stat-card">
                 <div class="stat-value">{summary.active_proposals}</div>
-                <div class="stat-label">"Active Proposals"</div>
+                <div class="stat-label">{move || i18n.get().t("dao-active-proposals")}</div>
             </div>
             <div class="stat-card">
                 <div class="stat-value">{summary.user_voting_power}</div>
                 <div class="stat-label">
-                    {format!("Your Voting Power ({})", summary.token_symbol)}
+                    {move || format!("{} ({})", i18n.get().t("dao-voting-power"), token_symbol_vp)}
                 </div>
             </div>
             <div class="stat-card">
                 <div class="stat-value">{summary.token_balance}</div>
                 <div class="stat-label">
-                    {format!("Your Balance ({})", summary.token_symbol)}
+                    {move || format!("{} ({})", i18n.get().t("dao-balance"), token_symbol_bal)}
                 </div>
             </div>
         </section>
@@ -208,23 +213,24 @@ fn DaoSummaryView(summary: DaoSummary) -> impl IntoView {
 
 #[component]
 fn DaoSummaryPlaceholder() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
         <section class="dao-summary">
             <div class="stat-card skeleton">
                 <div class="stat-value">"-"</div>
-                <div class="stat-label">"DAO Members"</div>
+                <div class="stat-label">{move || i18n.get().t("dao-members")}</div>
             </div>
             <div class="stat-card skeleton">
                 <div class="stat-value">"-"</div>
-                <div class="stat-label">"Active Proposals"</div>
+                <div class="stat-label">{move || i18n.get().t("dao-active-proposals")}</div>
             </div>
             <div class="stat-card skeleton">
                 <div class="stat-value">"-"</div>
-                <div class="stat-label">"Your Voting Power"</div>
+                <div class="stat-label">{move || i18n.get().t("dao-voting-power")}</div>
             </div>
             <div class="stat-card skeleton">
                 <div class="stat-value">"-"</div>
-                <div class="stat-label">"Your Balance"</div>
+                <div class="stat-label">{move || i18n.get().t("dao-balance")}</div>
             </div>
         </section>
     }
@@ -237,6 +243,7 @@ fn DaoSummaryLoading() -> impl IntoView {
 
 #[component]
 fn ProposalsList(proposals: Vec<ProposalInfo>) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let (active, other): (Vec<_>, Vec<_>) = proposals
         .into_iter()
         .partition(|p| matches!(p.status, ProposalStatus::Active));
@@ -246,7 +253,7 @@ fn ProposalsList(proposals: Vec<ProposalInfo>) -> impl IntoView {
             {move || if !active.is_empty() {
                 view! {
                     <div class="proposals-group">
-                        <h3>"Active Proposals"</h3>
+                        <h3>{move || i18n.get().t("dao-active-group")}</h3>
                         <div class="proposals-list">
                             {active.clone().into_iter().map(|p| view! { <ProposalCard proposal=p/> }).collect::<Vec<_>>()}
                         </div>
@@ -259,7 +266,7 @@ fn ProposalsList(proposals: Vec<ProposalInfo>) -> impl IntoView {
             {move || if !other.is_empty() {
                 view! {
                     <div class="proposals-group">
-                        <h3>"Past Proposals"</h3>
+                        <h3>{move || i18n.get().t("dao-past-group")}</h3>
                         <div class="proposals-list">
                             {other.clone().into_iter().map(|p| view! { <ProposalCard proposal=p/> }).collect::<Vec<_>>()}
                         </div>
@@ -274,8 +281,16 @@ fn ProposalsList(proposals: Vec<ProposalInfo>) -> impl IntoView {
 
 #[component]
 fn ProposalCard(#[prop(into)] proposal: ProposalInfo) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let _app_state = use_app_state();
-    let status_class = match proposal.status {
+
+    let title = proposal.title.clone();
+    let status = proposal.status.clone();
+    let proposer = proposal.proposer.clone();
+    let ends_at = proposal.ends_at.clone();
+    let description = proposal.description.clone();
+
+    let status_class = match status {
         ProposalStatus::Active => "status-active",
         ProposalStatus::Passed => "status-passed",
         ProposalStatus::Rejected => "status-rejected",
@@ -299,18 +314,27 @@ fn ProposalCard(#[prop(into)] proposal: ProposalInfo) -> impl IntoView {
         <div class="card proposal-card">
             <div class="proposal-header">
                 <div class="proposal-title">
-                    <h4>{proposal.title.clone()}</h4>
+                    <h4>{title}</h4>
                     <span class=format!("status-badge {}", status_class)>
-                        {format!("{:?}", proposal.status)}
+                        {move || {
+                            let key = match status {
+                                ProposalStatus::Active => "dao-status-active",
+                                ProposalStatus::Passed => "dao-status-passed",
+                                ProposalStatus::Rejected => "dao-status-rejected",
+                                ProposalStatus::Executed => "dao-status-executed",
+                                ProposalStatus::Pending => "dao-status-pending",
+                            };
+                            i18n.get().t(key)
+                        }}
                     </span>
                 </div>
                 <div class="proposal-meta">
-                    <span>"By "{proposal.proposer.clone()}</span>
-                    <span>"Ends: "{proposal.ends_at.clone()}</span>
+                    <span>{move || i18n.get().t("dao-by")}{proposer}</span>
+                    <span>{move || i18n.get().t("dao-ends")}{ends_at}</span>
                 </div>
             </div>
 
-            <p class="proposal-description">{proposal.description.clone()}</p>
+            <p class="proposal-description">{description}</p>
 
             <ProposalVotingSection
                 _proposal_id={proposal_id}
@@ -337,6 +361,7 @@ fn ProposalVotingSection(
     user_voted: RwSignal<Option<bool>>,
     is_voting: RwSignal<bool>,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let _app_state = use_app_state();
     let total_votes = votes_for + votes_against;
     let for_percent = if total_votes > 0 {
@@ -354,8 +379,8 @@ fn ProposalVotingSection(
                 ></div>
             </div>
             <div class="vote-stats">
-                <span>{format!("{} For", votes_for)}</span>
-                <span>{format!("{} Against", votes_against)}</span>
+                <span>{move || format!("{} {}", votes_for, i18n.get().t("dao-vote-for"))}</span>
+                <span>{move || format!("{} {}", votes_against, i18n.get().t("dao-vote-against"))}</span>
             </div>
 
             {move || {
@@ -381,11 +406,11 @@ fn ProposalVotingSection(
                     } else {
                         view! {
                             <div class="voted-badge">
-                                {if voted == Some(true) {
-                                    "✓ You voted For".into_any()
-                                } else {
-                                    "✓ You voted Against".into_any()
-                                }}
+                                {move || if voted == Some(true) {
+                                i18n.get().t("dao-voted-for")
+                            } else {
+                                i18n.get().t("dao-voted-against")
+                            }}
                             </div>
                         }.into_any()
                     }
@@ -404,13 +429,13 @@ fn VoteButton(
     is_voting: RwSignal<bool>,
     user_voted: RwSignal<Option<bool>>,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let app_state = use_app_state();
     let btn_class = if vote_for {
         "btn btn-success"
     } else {
         "btn btn-danger"
     };
-    let label = if vote_for { "Vote For" } else { "Vote Against" };
 
     view! {
         <button
@@ -423,22 +448,23 @@ fn VoteButton(
                     let proposal_id = proposal_id.clone();
                     is_voting.set(true);
                     spawn_local(async move {
+                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
                         let dao_service = app_state.dao_service();
                         match dao_service.vote(&proposal_id, vote_for, 1).await {
                             Ok(_) => {
                                 user_voted.set(Some(vote_for));
                                 app_state.notify(
                                     NotificationType::Success,
-                                    "Vote Submitted",
-                                    "Your vote has been recorded successfully"
+                                    &i18n.t("dao-vote-submitted"),
+                                    &i18n.t("dao-vote-recorded")
                                 );
                                 dao_service.invalidate_proposals_cache();
                             }
                             Err(e) => {
                                 app_state.notify(
                                     NotificationType::Error,
-                                    "Vote Failed",
-                                    format!("Failed to submit vote: {}", e)
+                                    &i18n.t("dao-vote-failed"),
+                                    format!("{}: {}", i18n.t("dao-vote-submit-failed"), e)
                                 );
                             }
                         }
@@ -448,9 +474,11 @@ fn VoteButton(
             }
         >
             {move || if is_voting.get() {
-                if vote_for { "Voting..." } else { "Voting..." }
+                i18n.get().t("dao-voting")
+            } else if vote_for {
+                i18n.get().t("dao-vote-for")
             } else {
-                label
+                i18n.get().t("dao-vote-against")
             }}
         </button>
     }
@@ -474,11 +502,12 @@ fn ProposalsLoading() -> impl IntoView {
 
 #[component]
 fn ProposalsEmpty() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
         <div class="empty-state">
             <div class="empty-icon">"🏛️"</div>
-            <h3>"No proposals yet"</h3>
-            <p>"Be the first to create a governance proposal"</p>
+            <h3>{move || i18n.get().t("dao-no-proposals")}</h3>
+            <p>{move || i18n.get().t("dao-first-proposal")}</p>
         </div>
     }
 }

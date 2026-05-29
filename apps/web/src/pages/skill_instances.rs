@@ -7,11 +7,13 @@ use leptos::view;
 use leptos_meta::*;
 
 use crate::api::{CreateInstanceRequest, InstanceInfo};
+use crate::i18n::I18nContext;
 use crate::state::use_app_state;
 
 #[component]
 pub fn SkillInstancesPage() -> impl IntoView {
     let app_state = use_app_state();
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let show_create_form = RwSignal::new(false);
     let create_skill_id = RwSignal::new(String::new());
     let create_agent_id = RwSignal::new(String::new());
@@ -45,10 +47,11 @@ pub fn SkillInstancesPage() -> impl IntoView {
             let skill_id = create_skill_id.get();
             let agent_id = create_agent_id.get();
             if skill_id.is_empty() || agent_id.is_empty() {
+                let i18n = use_context::<I18nContext>().expect("i18n context not found");
                 app_state.notify(
                     crate::state::notification::NotificationType::Warning,
-                    "Missing Fields",
-                    "Please fill in both Skill ID and Agent ID",
+                    &i18n.t("skill-instances-missing-fields"),
+                    &i18n.t("skill-instances-fill-fields"),
                 );
                 return;
             }
@@ -64,10 +67,11 @@ pub fn SkillInstancesPage() -> impl IntoView {
                 };
                 match service.create_instance(req).await {
                     Ok(instance) => {
+                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
                         app_state.notify(
                             crate::state::notification::NotificationType::Success,
-                            "Instance Created",
-                            format!("Instance {} created successfully", instance.instance_id),
+                            &i18n.t("skill-instances-created"),
+                            format!("{} {}", i18n.t("skill-instances-created"), instance.instance_id),
                         );
                         create_skill_id.set(String::new());
                         create_agent_id.set(String::new());
@@ -75,10 +79,11 @@ pub fn SkillInstancesPage() -> impl IntoView {
                         reload();
                     }
                     Err(e) => {
-                        app_state.notify(
+                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
+                    app_state.notify(
                             crate::state::notification::NotificationType::Error,
-                            "Creation Failed",
-                            format!("Failed to create instance: {}", e),
+                            &i18n.t("skill-instances-creation-failed"),
+                            format!("{}: {}", i18n.t("skill-instances-creation-failed"), e),
                         );
                     }
                 }
@@ -98,18 +103,20 @@ pub fn SkillInstancesPage() -> impl IntoView {
             leptos::task::spawn_local(async move {
                 match service.delete_instance(&instance_id).await {
                     Ok(()) => {
+                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
                         app_state.notify(
                             crate::state::notification::NotificationType::Success,
-                            "Instance Deleted",
-                            format!("Instance {} deleted", instance_id),
+                            &i18n.t("skill-instances-deleted"),
+                            format!("{} {}", i18n.t("skill-instances-table-id"), instance_id),
                         );
                         reload();
                     }
                     Err(e) => {
-                        app_state.notify(
+                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
+                    app_state.notify(
                             crate::state::notification::NotificationType::Error,
-                            "Delete Failed",
-                            format!("Failed to delete instance: {}", e),
+                            &i18n.t("skill-instances-delete-failed"),
+                            format!("{}: {}", i18n.t("skill-instances-delete-failed"), e),
                         );
                     }
                 }
@@ -132,17 +139,19 @@ pub fn SkillInstancesPage() -> impl IntoView {
                         } else {
                             format!("Execution failed: {}", resp.output)
                         };
+                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
                         app_state.notify(
                             crate::state::notification::NotificationType::Success,
-                            "Execution Result",
+                            &i18n.t("skill-instances-execution-result"),
                             msg,
                         );
                     }
                     Err(e) => {
-                        app_state.notify(
+                        let i18n = use_context::<I18nContext>().expect("i18n context not found");
+                    app_state.notify(
                             crate::state::notification::NotificationType::Error,
-                            "Execution Failed",
-                            format!("Failed to execute instance: {}", e),
+                            &i18n.t("skill-instances-execution-failed"),
+                            format!("{}: {}", i18n.t("skill-instances-execution-failed"), e),
                         );
                     }
                 }
@@ -153,39 +162,39 @@ pub fn SkillInstancesPage() -> impl IntoView {
     let execute_instance_cb = StoredValue::new(execute_instance);
 
     view! {
-        <Title text="Skill Instances - BeeBotOS" />
+        <Title text={move || format!("{} - BeeBotOS", i18n.get().t("skill-instances-title"))} />
         <div class="page skill-instances-page">
             <div class="page-header">
                 <div>
-                    <h1>"Skill Instances"</h1>
-                    <p class="page-description">"Manage skill instances bound to your agents"</p>
+                    <h1>{move || i18n.get().t("skill-instances-title")}</h1>
+                    <p class="page-description">{move || i18n.get().t("skill-instances-subtitle")}</p>
                 </div>
                 <button
                     class="btn btn-primary"
                     on:click=move |_| show_create_form.update(|v| *v = !*v)
                 >
-                    {move || if show_create_form.get() { "✕ Cancel" } else { "+ New Instance" }}
+                    {move || if show_create_form.get() { format!("✕ {}", i18n.get().t("skill-instances-cancel")) } else { format!("+ {}", i18n.get().t("skill-instances-new")) }}
                 </button>
             </div>
 
             {move || if show_create_form.get() {
                 view! {
                     <div class="create-form card">
-                        <h3>"Create Instance"</h3>
+                        <h3>{move || i18n.get().t("skill-instances-create")}</h3>
                         <div class="form-group">
-                            <label>"Skill ID"</label>
+                            <label>{move || i18n.get().t("skill-instances-skill-id")}</label>
                             <input
                                 type="text"
-                                placeholder="e.g. echo-skill"
+                                placeholder={move || i18n.get().t("skill-instances-skill-id-placeholder")}
                                 prop:value=create_skill_id
                                 on:input=move |e| create_skill_id.set(event_target_value(&e))
                             />
                         </div>
                         <div class="form-group">
-                            <label>"Agent ID"</label>
+                            <label>{move || i18n.get().t("skill-instances-agent-id")}</label>
                             <input
                                 type="text"
-                                placeholder="e.g. agent-001"
+                                placeholder={move || i18n.get().t("skill-instances-agent-id-placeholder")}
                                 prop:value=create_agent_id
                                 on:input=move |e| create_agent_id.set(event_target_value(&e))
                             />
@@ -195,7 +204,7 @@ pub fn SkillInstancesPage() -> impl IntoView {
                             disabled=move || is_creating.get()
                             on:click=move |_| create_instance_cb.with_value(|f| f())
                         >
-                            {move || if is_creating.get() { "Creating..." } else { "Create Instance" }}
+                            {move || if is_creating.get() { i18n.get().t("skill-instances-creating") } else { i18n.get().t("skill-instances-create") }}
                         </button>
                     </div>
                 }.into_any()
@@ -237,17 +246,18 @@ fn InstancesTable(
     on_execute: impl Fn(String) + Clone + Send + Sync + 'static,
     executing_id: RwSignal<Option<String>>,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
         <div class="instances-table-wrapper">
             <table class="instances-table">
                 <thead>
                     <tr>
-                        <th>"Instance ID"</th>
-                        <th>"Skill"</th>
-                        <th>"Agent"</th>
-                        <th>"Status"</th>
-                        <th>"Usage"</th>
-                        <th>"Actions"</th>
+                        <th>{move || i18n.get().t("skill-instances-table-id")}</th>
+                        <th>{move || i18n.get().t("skill-instances-table-skill")}</th>
+                        <th>{move || i18n.get().t("skill-instances-table-agent")}</th>
+                        <th>{move || i18n.get().t("skill-instances-table-status")}</th>
+                        <th>{move || i18n.get().t("skill-instances-table-usage")}</th>
+                        <th>{move || i18n.get().t("skill-instances-table-actions")}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -282,7 +292,7 @@ fn InstancesTable(
                                             move |_| on_execute(id.clone())
                                         }
                                     >
-                                        {move || if is_exec2() { "Running..." } else { "▶ Run" }}
+                                        {move || if is_exec2() { i18n.get().t("skill-instances-running") } else { format!("▶ {}", i18n.get().t("skill-instances-run")) }}
                                     </button>
                                     <button
                                         class="btn btn-sm btn-danger"
@@ -292,7 +302,7 @@ fn InstancesTable(
                                             move |_| on_delete(id.clone())
                                         }
                                     >
-                                        "Delete"
+                                        {move || i18n.get().t("skill-instances-delete")}
                                     </button>
                                 </td>
                             </tr>
@@ -319,21 +329,23 @@ fn InstancesLoading() -> impl IntoView {
 
 #[component]
 fn InstancesEmpty() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
         <div class="empty-state">
             <div class="empty-icon">"🤖"</div>
-            <h3>"No instances yet"</h3>
-            <p>"Create a new instance to bind a skill to an agent"</p>
+            <h3>{move || i18n.get().t("skill-instances-empty-title")}</h3>
+            <p>{move || i18n.get().t("skill-instances-empty-desc")}</p>
         </div>
     }
 }
 
 #[component]
 fn InstancesError(#[prop(into)] message: String) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
         <div class="error-state">
             <div class="error-icon">"⚠️"</div>
-            <h3>"Failed to load instances"</h3>
+            <h3>{move || i18n.get().t("skill-instances-error-title")}</h3>
             <p>{message}</p>
         </div>
     }

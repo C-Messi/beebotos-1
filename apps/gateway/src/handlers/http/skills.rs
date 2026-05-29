@@ -430,7 +430,7 @@ pub async fn get_skill(
 
 /// Uninstall a skill
 pub async fn uninstall_skill(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     info!("Uninstalling skill: {}", id);
@@ -449,6 +449,12 @@ pub async fn uninstall_skill(
             message: format!("Failed to uninstall skill: {}", e),
             correlation_id: uuid::Uuid::new_v4().to_string(),
         })?;
+
+    // Unregister from SkillRegistry if available
+    if let Some(ref registry) = state.skill_registry {
+        registry.unregister(&id).await;
+        info!("Unregistered skill {} from SkillRegistry", id);
+    }
 
     info!("Successfully uninstalled skill: {}", id);
 
@@ -987,6 +993,35 @@ async fn install_skill_package(
 
     // Remove temporary package.zip after extraction
     let _ = tokio::fs::remove_file(&package_path).await;
+
+    // Handle ZIP with top-level directory: if the extracted content has exactly
+    // one subdirectory and no files at the top level, hoist files up one level.
+    let entries: Vec<_> = std::fs::read_dir(&skill_dir)
+        .map_err(|e| format!("Failed to read skill dir: {}", e))?
+        .filter_map(|e| e.ok())
+        .collect();
+    let only_one_dir = entries.len() == 1 && entries[0].path().is_dir();
+    if only_one_dir {
+        let sub_dir = entries[0].path();
+        let sub_has_md = sub_dir.join("SKILL.md").is_file();
+        let sub_has_yaml = sub_dir.join("skill.yaml").is_file();
+        let sub_has_wasm = sub_dir.join("skill.wasm").is_file();
+        if sub_has_md || (sub_has_yaml && sub_has_wasm) {
+            info!("Hoisting skill files from nested directory: {:?}", sub_dir);
+            // Move all entries from sub_dir up to skill_dir
+            for entry in std::fs::read_dir(&sub_dir)
+                .map_err(|e| format!("Failed to read sub dir: {}", e))?
+                .filter_map(|e| e.ok())
+            {
+                let from = entry.path();
+                let to = skill_dir.join(entry.file_name());
+                std::fs::rename(&from, &to)
+                    .map_err(|e| format!("Failed to hoist {:?} to {:?}: {}", from, to, e))?;
+            }
+            std::fs::remove_dir(&sub_dir)
+                .map_err(|e| format!("Failed to remove empty sub dir: {}", e))?;
+        }
+    }
 
     // Detect skill kind after extraction
     let has_skill_md = skill_dir.join("SKILL.md").exists();

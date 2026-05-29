@@ -6,6 +6,7 @@ use leptos_meta::*;
 
 use crate::api::{Settings as ApiSettings, SettingsService, Theme};
 use crate::state::use_app_state;
+use crate::i18n::I18nContext;
 use crate::utils::{
     event_target_checked, event_target_value, use_theme, FormValidator, StringValidators,
 };
@@ -13,6 +14,7 @@ use crate::utils::{
 #[component]
 pub fn SettingsPage() -> impl IntoView {
     let app_state = use_app_state();
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let theme_manager = use_theme();
     let settings = app_state.settings();
     let saving = RwSignal::new(false);
@@ -156,18 +158,18 @@ pub fn SettingsPage() -> impl IntoView {
     let on_save_stored = StoredValue::new(on_save);
 
     view! {
-        <Title text="Settings - BeeBotOS" />
+        <Title text={move || format!("{} - BeeBotOS", i18n.get().t("settings-page-title"))} />
         <div class="page settings-page">
             <div class="page-header">
-                <h1>"Settings"</h1>
-                <p class="page-description">"Manage your preferences and system configuration"</p>
+                <h1>{move || i18n.get().t("settings-page-title")}</h1>
+                <p class="page-description">{move || i18n.get().t("settings-page-subtitle")}</p>
             </div>
 
             {move || if loading.get() {
                 view! {
                     <div class="loading-state">
                         <div class="spinner"></div>
-                        <p>"Loading settings..."</p>
+                        <p>{move || i18n.get().t("settings-loading")}</p>
                     </div>
                 }.into_any()
             } else {
@@ -179,25 +181,25 @@ pub fn SettingsPage() -> impl IntoView {
 
                         <div class="settings-grid">
                             <section class="card settings-section">
-                                <h2>"Appearance"</h2>
+                                <h2>{move || i18n.get().t("settings-appearance")}</h2>
 
                                 <div class="form-group">
-                                    <label>"Theme"</label>
+                                    <label>{move || i18n.get().t("settings-theme")}</label>
                                     <div class="theme-selector">
                                         <ThemeOption
-                                            label="Dark"
+                                            label={move || i18n.get().t("settings-dark")}
                                             value=Theme::Dark
                                             current=theme
                                             icon="🌙"
                                         />
                                         <ThemeOption
-                                            label="Light"
+                                            label={move || i18n.get().t("settings-light")}
                                             value=Theme::Light
                                             current=theme
                                             icon="☀️"
                                         />
                                         <ThemeOption
-                                            label="System"
+                                            label={move || i18n.get().t("settings-system")}
                                             value=Theme::System
                                             current=theme
                                             icon="💻"
@@ -206,21 +208,21 @@ pub fn SettingsPage() -> impl IntoView {
                                 </div>
 
                                 <div class="form-group">
-                                    <label>"Language"</label>
+                                    <label>{move || i18n.get().t("settings-language")}</label>
                                     <select
                                         prop:value=language
                                         on:change=move |e| language.set(event_target_value(&e))
                                     >
-                                        <option value="en">"English"</option>
-                                        <option value="zh">"中文"</option>
-                                        <option value="ja">"日本語"</option>
-                                        <option value="ko">"한국어"</option>
+                                        <option value="en">{move || i18n.get().t("settings-english")}</option>
+                                        <option value="zh">{move || i18n.get().t("settings-chinese")}</option>
+                                        <option value="ja">{move || i18n.get().t("settings-japanese")}</option>
+                                        <option value="ko">{move || i18n.get().t("settings-korean")}</option>
                                     </select>
                                 </div>
                             </section>
 
                             <section class="card settings-section">
-                                <h2>"Notifications"</h2>
+                                <h2>{move || i18n.get().t("settings-notifications")}</h2>
 
                                 <div class="form-group checkbox-group">
                                     <label class="checkbox-label">
@@ -229,9 +231,9 @@ pub fn SettingsPage() -> impl IntoView {
                                             prop:checked=notifications_enabled
                                             on:change=move |e| notifications_enabled.set(event_target_checked(&e))
                                         />
-                                        <span>"Enable notifications"</span>
+                                        <span>{move || i18n.get().t("settings-enable-notifications")}</span>
                                     </label>
-                                    <p class="form-help">"Receive alerts about agent status and DAO governance"</p>
+                                    <p class="form-help">{move || i18n.get().t("settings-notifications-hint")}</p>
                                 </div>
 
                                 <div class="form-group checkbox-group">
@@ -241,18 +243,18 @@ pub fn SettingsPage() -> impl IntoView {
                                             prop:checked=auto_update
                                             on:change=move |e| auto_update.set(event_target_checked(&e))
                                         />
-                                        <span>"Auto-update"</span>
+                                        <span>{move || i18n.get().t("settings-auto-update")}</span>
                                     </label>
-                                    <p class="form-help">"Automatically update to the latest version"</p>
+                                    <p class="form-help">{move || i18n.get().t("settings-auto-update-hint")}</p>
                                 </div>
                             </section>
 
                             <section class="card settings-section">
-                                <h2>"Network"</h2>
+                                <h2>{move || i18n.get().t("settings-network")}</h2>
 
                                 <div class=move || format!("form-group {}",
                                     if validator.get().has_error("api_endpoint") { "has-error" } else { "" })>
-                                    <label>"API Endpoint"</label>
+                                    <label>{move || i18n.get().t("settings-api-endpoint")}</label>
                                     <input
                                         type="text"
                                         placeholder="https://api.beebotos.dev"
@@ -266,7 +268,7 @@ pub fn SettingsPage() -> impl IntoView {
                                             });
                                         }
                                     />
-                                    <p class="form-help">"Custom API endpoint (leave empty for default)"</p>
+                                    <p class="form-help">{move || i18n.get().t("settings-api-endpoint-hint")}</p>
                                     {move || validator.get().first_error_message("api_endpoint").map(|msg| view! {
                                         <span class="form-error">{msg}</span>
                                     })}
@@ -274,14 +276,14 @@ pub fn SettingsPage() -> impl IntoView {
                             </section>
 
                             <section class="card settings-section">
-                                <h2>"Wallet"</h2>
+                                <h2>{move || i18n.get().t("settings-wallet")}</h2>
 
                                 <div class=move || format!("form-group {}",
                                     if validator.get().has_error("wallet_address") { "has-error" } else { "" })>
-                                    <label>"Wallet Address"</label>
+                                    <label>{move || i18n.get().t("settings-wallet-address")}</label>
                                     <input
                                         type="text"
-                                        placeholder="0x..."
+                                        placeholder={move || i18n.get().t("settings-wallet-placeholder")}
                                         prop:value=wallet_address
                                         on:input=move |e| {
                                             wallet_address.set(event_target_value(&e));
@@ -292,21 +294,21 @@ pub fn SettingsPage() -> impl IntoView {
                                             });
                                         }
                                     />
-                                    <p class="form-help">"Your wallet address for DAO participation"</p>
+                                    <p class="form-help">{move || i18n.get().t("settings-wallet-hint")}</p>
                                     {move || validator.get().first_error_message("wallet_address").map(|msg| view! {
                                         <span class="form-error">{msg}</span>
                                     })}
                                 </div>
 
                                 <div class="wallet-actions">
-                                    <button class="btn btn-secondary">"Connect Wallet"</button>
-                                    <button class="btn btn-secondary">"Disconnect"</button>
+                                    <button class="btn btn-secondary">{move || i18n.get().t("settings-connect-wallet")}</button>
+                                    <button class="btn btn-secondary">{move || i18n.get().t("settings-disconnect")}</button>
                                 </div>
                             </section>
 
                             <section class="card settings-section">
-                                <h2>"AI Configuration"</h2>
-                                <p class="form-help">"View global LLM provider settings and metrics"</p>
+                                <h2>{move || i18n.get().t("settings-ai-config")}</h2>
+                                <p class="form-help">{move || i18n.get().t("settings-ai-config-hint")}</p>
                                 <button
                                     class="btn btn-secondary"
                                     on:click=move |_| {
@@ -314,13 +316,13 @@ pub fn SettingsPage() -> impl IntoView {
                                         navigate("/llm-config", Default::default());
                                     }
                                 >
-                                    "Open LLM Configuration →"
+                                    {move || i18n.get().t("settings-open-llm")}
                                 </button>
                             </section>
 
                             <section class="card settings-section">
-                                <h2>"Gateway Setup"</h2>
-                                <p class="form-help">"Run the configuration wizard to setup or reconfigure Gateway"</p>
+                                <h2>{move || i18n.get().t("settings-gateway")}</h2>
+                                <p class="form-help">{move || i18n.get().t("settings-gateway-hint")}</p>
                                 <button
                                     class="btn btn-secondary"
                                     on:click=move |_| {
@@ -328,30 +330,30 @@ pub fn SettingsPage() -> impl IntoView {
                                         navigate("/settings/wizard", Default::default());
                                     }
                                 >
-                                    "Configuration Wizard →"
+                                    {move || i18n.get().t("settings-open-wizard")}
                                 </button>
                             </section>
 
                             <section class="card settings-section">
-                                <h2>"System"</h2>
+                                <h2>{move || i18n.get().t("settings-system")}</h2>
 
                                 <div class="system-info">
                                     <div class="info-row">
-                                        <span>"Version"</span>
+                                        <span>{move || i18n.get().t("settings-version")}</span>
                                         <span>"v2.0.0"</span>
                                     </div>
                                     <div class="info-row">
-                                        <span>"Build"</span>
+                                        <span>{move || i18n.get().t("settings-build")}</span>
                                         <span>"release-2024.03.22"</span>
                                     </div>
                                     <div class="info-row">
-                                        <span>"Platform"</span>
+                                        <span>{move || i18n.get().t("settings-platform")}</span>
                                         <span>"WebAssembly"</span>
                                     </div>
                                 </div>
 
                                 <div class="system-actions">
-                                    <button class="btn btn-secondary">"Check for Updates"</button>
+                                    <button class="btn btn-secondary">{move || i18n.get().t("settings-check-updates")}</button>
                                     <button
                                         class="btn btn-secondary"
                                         on:click=move |_| {
@@ -359,7 +361,7 @@ pub fn SettingsPage() -> impl IntoView {
                                             spawn_local(async move {
                                                 match client.post::<serde_json::Value, _>("/admin/config/reload", &serde_json::json!({})).await {
                                                     Ok(resp) => {
-                                                        let msg = resp.get("message").and_then(|v| v.as_str()).unwrap_or("Config reloaded");
+                                                        let msg = resp.get("message").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| use_context::<I18nContext>().expect("i18n context not found").t("settings-config-reloaded"));
                                                         save_message.set(Some(msg.to_string()));
                                                     }
                                                     Err(e) => {
@@ -369,9 +371,9 @@ pub fn SettingsPage() -> impl IntoView {
                                             });
                                         }
                                     >
-                                        "Reload Config"
+                                        {move || i18n.get().t("settings-reload-config")}
                                     </button>
-                                    <button class="btn btn-danger">"Reset to Defaults"</button>
+                                    <button class="btn btn-danger">{move || i18n.get().t("settings-reset-defaults")}</button>
                                 </div>
                             </section>
                         </div>
@@ -390,11 +392,7 @@ pub fn SettingsPage() -> impl IntoView {
                                     on:click=move |_| on_save_stored.get_value()()
                                     disabled=saving
                                 >
-                                    {move || if saving.get() {
-                                        "Saving..."
-                                    } else {
-                                        "Save Changes"
-                                    }}
+                                    {move || if saving.get() { i18n.get().t("settings-saving") } else { i18n.get().t("settings-save-changes") }}
                                 </button>
                             </div>
                         </div>
@@ -407,7 +405,7 @@ pub fn SettingsPage() -> impl IntoView {
 
 #[component]
 fn ThemeOption(
-    #[prop(into)] label: String,
+    label: impl IntoView,
     value: Theme,
     current: RwSignal<Theme>,
     #[prop(into)] icon: String,

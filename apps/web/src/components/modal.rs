@@ -5,7 +5,7 @@ use leptos::prelude::*;
 /// A generic modal dialog with overlay, click-outside-to-close, and header
 #[component]
 pub fn Modal(
-    #[prop(into)] title: String,
+    title: impl IntoView,
     #[prop(into)] on_close: Callback<()>,
     children: Children,
 ) -> impl IntoView {

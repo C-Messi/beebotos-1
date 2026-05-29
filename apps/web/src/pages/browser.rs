@@ -9,11 +9,13 @@ use leptos_meta::Title;
 
 use crate::browser::ConnectionStatus;
 use crate::components::Modal;
+use crate::i18n::I18nContext;
 use crate::state::{use_browser_state, use_browser_ui_state};
 
 /// 浏览器自动化页面
 #[component]
 pub fn BrowserPage() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let browser_state = use_browser_state();
     let _ui_state = use_browser_ui_state();
 
@@ -49,7 +51,7 @@ pub fn BrowserPage() -> impl IntoView {
     });
 
     view! {
-        <Title text="Browser Automation - BeeBotOS" />
+        <Title text=move || i18n.get().t("browser-title") />
         <div class="browser-page">
             <BrowserHeader />
             <div class="browser-container">
@@ -63,11 +65,12 @@ pub fn BrowserPage() -> impl IntoView {
 /// 页面头部
 #[component]
 fn BrowserHeader() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
         <header class="browser-header">
-            <h1>"Browser Automation"</h1>
+            <h1>{move || i18n.get().t("browser-automation")}</h1>
             <p class="browser-subtitle">
-                "Chrome DevTools MCP Control - Compatible with OpenClaw V2026.3.13"
+                {move || i18n.get().t("browser-subtitle")}
             </p>
         </header>
     }
@@ -76,29 +79,30 @@ fn BrowserHeader() -> impl IntoView {
 /// 侧边栏
 #[component]
 fn BrowserSidebar() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let ui_state = use_browser_ui_state();
     let ui_state_sv = StoredValue::new(ui_state.clone());
 
     view! {
         <aside class="browser-sidebar">
             <div class="sidebar-section">
-                <h3>"Profiles"</h3>
+                <h3>{move || i18n.get().t("browser-profiles")}</h3>
                 <button
                     class="btn btn-primary btn-sm"
                     on:click=move |_| ui_state_sv.get_value().open_add_profile_modal()
                 >
-                    "+ Add Profile"
+                    {move || i18n.get().t("browser-add-profile")}
                 </button>
                 <ProfileList />
             </div>
 
             <div class="sidebar-section">
-                <h3>"Sandboxes"</h3>
+                <h3>{move || i18n.get().t("browser-sandboxes")}</h3>
                 <button
                     class="btn btn-secondary btn-sm"
                     on:click=move |_| ui_state_sv.get_value().open_create_sandbox_modal()
                 >
-                    "+ Create Sandbox"
+                    {move || i18n.get().t("browser-create-sandbox")}
                 </button>
                 <SandboxList />
             </div>
@@ -109,6 +113,7 @@ fn BrowserSidebar() -> impl IntoView {
 /// 配置列表
 #[component]
 fn ProfileList() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let state = use_browser_state();
 
     view! {
@@ -166,7 +171,7 @@ fn ProfileList() -> impl IntoView {
                             </div>
                             <button
                                 class="btn btn-icon btn-danger btn-xs"
-                                title="Delete profile"
+                                title=move || i18n.get().t("browser-delete-profile")
                                 on:click=move |e| {
                                     e.stop_propagation();
                                     let id = profile_id_del.clone();
@@ -199,6 +204,7 @@ fn ProfileList() -> impl IntoView {
 /// 沙箱列表
 #[component]
 fn SandboxList() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let state = use_browser_state();
 
     view! {
@@ -221,7 +227,7 @@ fn SandboxList() -> impl IntoView {
                             </div>
                             <button
                                 class="btn btn-icon btn-danger btn-xs"
-                                title="Delete sandbox"
+                                title=move || i18n.get().t("browser-delete-sandbox")
                                 on:click=move |e| {
                                     e.stop_propagation();
                                     let id = sandbox_del.clone();
@@ -254,6 +260,7 @@ fn SandboxList() -> impl IntoView {
 /// 主内容区
 #[component]
 fn BrowserMainContent() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let ui_state = use_browser_ui_state();
 
     view! {
@@ -263,7 +270,7 @@ fn BrowserMainContent() -> impl IntoView {
             {move || if ui_state.show_debug_panel.get() {
                 view! { <BrowserDebugPanel /> }.into_any()
             } else {
-                view! { <div class="debug-collapsed">"Debug panel hidden"</div> }.into_any()
+                view! { <div class="debug-collapsed">{move || i18n.get().t("browser-debug-panel-hidden")}</div> }.into_any()
             }}
             <AddProfileModal />
             <CreateSandboxModal />
@@ -274,6 +281,7 @@ fn BrowserMainContent() -> impl IntoView {
 /// 工具栏
 #[component]
 fn BrowserToolbar() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let state = use_browser_state();
     let ui_state = use_browser_ui_state();
     let ui_state_sv = StoredValue::new(ui_state.clone());
@@ -284,14 +292,14 @@ fn BrowserToolbar() -> impl IntoView {
             <div class="toolbar-group">
                 <button
                     class="btn btn-icon"
-                    title="Toggle Profiles"
+                    title=move || i18n.get().t("browser-toggle-profiles")
                     on:click=move |_| ui_state_sv.get_value().toggle_profiles_panel()
                 >
                     "📑"
                 </button>
                 <button
                     class="btn btn-icon"
-                    title="Toggle Sandboxes"
+                    title=move || i18n.get().t("browser-toggle-sandboxes")
                     on:click=move |_| ui_state_sv.get_value().toggle_sandboxes_panel()
                 >
                     "🔲"
@@ -304,7 +312,7 @@ fn BrowserToolbar() -> impl IntoView {
                     class="url-input"
                     prop:value=move || state.current_url.get()
                     on:input=move |e| url_input.set(crate::utils::event_target_value(&e))
-                    placeholder="Enter URL..."
+                    placeholder=move || i18n.get().t("browser-url-placeholder")
                 />
                 <button
                     class="btn btn-primary"
@@ -334,21 +342,21 @@ fn BrowserToolbar() -> impl IntoView {
                         }
                     }
                 >
-                    "Go"
+                    {move || i18n.get().t("browser-go")}
                 </button>
             </div>
 
             <div class="toolbar-group">
                 <button
                     class=move || format!("btn btn-icon {}", if ui_state.show_debug_panel.get() { "active" } else { "" })
-                    title="Toggle Debug Panel"
+                    title=move || i18n.get().t("browser-toggle-debug")
                     on:click=move |_| ui_state_sv.get_value().toggle_debug_panel()
                 >
                     "🐛"
                 </button>
                 <button
                     class="btn btn-icon"
-                    title="Take Screenshot"
+                    title=move || i18n.get().t("browser-screenshot")
                     on:click=move |_| {
                         if let Some(ref instance) = state.current_instance.get() {
                             let instance_id = instance.id.clone();
@@ -379,6 +387,7 @@ fn BrowserToolbar() -> impl IntoView {
 /// 视口区域
 #[component]
 fn BrowserViewport() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
         <div class="browser-viewport">
             {move || {
@@ -393,7 +402,7 @@ fn BrowserViewport() -> impl IntoView {
                                     <iframe
                                         class="browser-iframe"
                                         src=url
-                                        title="Browser Preview"
+                                        title=move || i18n.get().t("browser-preview")
                                     />
                                 </div>
                             </div>
@@ -401,20 +410,20 @@ fn BrowserViewport() -> impl IntoView {
                     }
                     ConnectionStatus::Connecting => view! {
                         <div class="browser-placeholder">
-                            <p>"Connecting..."</p>
+                            <p>{move || i18n.get().t("browser-connecting")}</p>
                             <div class="spinner"></div>
                         </div>
                     }.into_any(),
                     ConnectionStatus::Error(ref msg) => view! {
                         <div class="browser-placeholder">
-                            <p>"Connection failed"</p>
+                            <p>{move || i18n.get().t("browser-connection-failed")}</p>
                             <p class="text-error">{msg.clone()}</p>
                         </div>
                     }.into_any(),
                     ConnectionStatus::Disconnected => view! {
                         <div class="browser-placeholder">
-                            <p>"No browser connected"</p>
-                            <p>"Select a profile to connect"</p>
+                            <p>{move || i18n.get().t("browser-no-browser")}</p>
+                            <p>{move || i18n.get().t("browser-select-profile")}</p>
                         </div>
                     }.into_any(),
                 }
@@ -426,10 +435,11 @@ fn BrowserViewport() -> impl IntoView {
 /// 调试面板
 #[component]
 fn BrowserDebugPanel() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
         <div class="browser-debug-panel">
             <div class="debug-header">
-                <h4>"Debug Console"</h4>
+                <h4>{move || i18n.get().t("browser-debug-console")}</h4>
                 <button
                     class="btn btn-sm"
                     on:click=move |_| {
@@ -437,7 +447,7 @@ fn BrowserDebugPanel() -> impl IntoView {
                         state.logs.set(Vec::new());
                     }
                 >
-                    "Clear"
+                    {move || i18n.get().t("browser-clear")}
                 </button>
             </div>
             <div class="debug-logs">
@@ -445,7 +455,7 @@ fn BrowserDebugPanel() -> impl IntoView {
                     let state = use_browser_state();
                     let logs = state.logs.get();
                     if logs.is_empty() {
-                        view! { <p class="text-muted">"Debug logs will appear here..."</p> }.into_any()
+                        view! { <p class="text-muted">{move || i18n.get().t("browser-debug-logs-hint")}</p> }.into_any()
                     } else {
                         view! {
                             <div class="log-entries">
@@ -464,6 +474,7 @@ fn BrowserDebugPanel() -> impl IntoView {
 /// Add Profile Modal
 #[component]
 fn AddProfileModal() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let ui_state = use_browser_ui_state();
     let ui_state_sv = StoredValue::new(ui_state.clone());
     let state = use_browser_state();
@@ -477,20 +488,20 @@ fn AddProfileModal() -> impl IntoView {
             let state_sv = state_sv.clone();
             view! {
                 <Modal
-                    title="Add Browser Profile"
+                    title=move || i18n.get().t("browser-add-profile-modal")
                     on_close=Callback::from(move || ui_state_sv.get_value().close_add_profile_modal())
                 >
                     <div class="form-group">
-                        <label>"Profile Name"</label>
+                        <label>{move || i18n.get().t("browser-profile-name")}</label>
                         <input
                             type="text"
                             prop:value=name
                             on:input=move |e| name.set(crate::utils::event_target_value(&e))
-                            placeholder="e.g. Work Profile"
+                            placeholder=move || i18n.get().t("browser-profile-placeholder")
                         />
                     </div>
                     <div class="form-group">
-                        <label>"CDP Port"</label>
+                        <label>{move || i18n.get().t("browser-cdp-port")}</label>
                         <input
                             type="number"
                             prop:value=move || port.get().to_string()
@@ -511,28 +522,29 @@ fn AddProfileModal() -> impl IntoView {
                                 let state = state_sv.get_value();
                                 let ui_state = ui_state_sv.get_value();
                                 spawn_local(async move {
+                                    let i18n = use_context::<I18nContext>().expect("i18n context not found");
                                     let client = crate::api::create_client();
                                     let service = crate::api::BrowserApiService::new(client);
                                     match service.create_profile(profile).await {
                                         Ok(created) => {
                                             state.profiles.update(|p| p.push(created));
-                                            state.logs.update(|logs| logs.push("Profile created".to_string()));
+                                            state.logs.update(|logs| logs.push(i18n.t("browser-profile-created")));
                                             ui_state.close_add_profile_modal();
                                         }
                                         Err(e) => {
-                                            state.logs.update(|logs| logs.push(format!("Create failed: {}", e)));
+                                            state.logs.update(|logs| logs.push(format!("{}: {}", i18n.t("browser-create-failed"), e)));
                                         }
                                     }
                                 });
                             }
                         >
-                            "Create"
+                            {move || i18n.get().t("browser-create")}
                         </button>
                         <button
                             class="btn btn-secondary"
                             on:click=move |_| ui_state_sv.get_value().close_add_profile_modal()
                         >
-                            "Cancel"
+                            {move || i18n.get().t("browser-cancel")}
                         </button>
                     </div>
                 </Modal>
@@ -546,6 +558,7 @@ fn AddProfileModal() -> impl IntoView {
 /// Create Sandbox Modal
 #[component]
 fn CreateSandboxModal() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let ui_state = use_browser_ui_state();
     let ui_state_sv = StoredValue::new(ui_state.clone());
     let state = use_browser_state();
@@ -561,20 +574,20 @@ fn CreateSandboxModal() -> impl IntoView {
 
             view! {
                 <Modal
-                    title="Create Sandbox"
+                    title=move || i18n.get().t("browser-create-sandbox-modal")
                     on_close=Callback::from(move || ui_state_sv.get_value().close_create_sandbox_modal())
                 >
                     <div class="form-group">
-                        <label>"Sandbox Name"</label>
+                        <label>{move || i18n.get().t("browser-sandbox-name")}</label>
                         <input
                             type="text"
                             prop:value=name
                             on:input=move |e| name.set(crate::utils::event_target_value(&e))
-                            placeholder="e.g. Test Sandbox"
+                            placeholder=move || i18n.get().t("browser-sandbox-placeholder")
                         />
                     </div>
                     <div class="form-group">
-                        <label>"Base Profile"</label>
+                        <label>{move || i18n.get().t("browser-base-profile")}</label>
                         <select
                             prop:value=move || selected_profile.get()
                             on:change=move |e| selected_profile.set(crate::utils::event_target_value(&e))
@@ -594,28 +607,29 @@ fn CreateSandboxModal() -> impl IntoView {
                                 let state = state_sv.get_value();
                                 let ui_state = ui_state_sv.get_value();
                                 spawn_local(async move {
+                                    let i18n = use_context::<I18nContext>().expect("i18n context not found");
                                     let client = crate::api::create_client();
                                     let service = crate::api::BrowserApiService::new(client);
                                     match service.create_sandbox(&name_val, &profile_id).await {
                                         Ok(sandbox) => {
                                             state.sandboxes.update(|s| s.push(sandbox));
-                                            state.logs.update(|logs| logs.push("Sandbox created".to_string()));
+                                            state.logs.update(|logs| logs.push(i18n.t("browser-sandbox-created")));
                                             ui_state.close_create_sandbox_modal();
                                         }
                                         Err(e) => {
-                                            state.logs.update(|logs| logs.push(format!("Create failed: {}", e)));
+                                            state.logs.update(|logs| logs.push(format!("{}: {}", i18n.t("browser-create-failed"), e)));
                                         }
                                     }
                                 });
                             }
                         >
-                            "Create"
+                            {move || i18n.get().t("browser-create")}
                         </button>
                         <button
                             class="btn btn-secondary"
                             on:click=move |_| ui_state_sv.get_value().close_create_sandbox_modal()
                         >
-                            "Cancel"
+                            {move || i18n.get().t("browser-cancel")}
                         </button>
                     </div>
                 </Modal>

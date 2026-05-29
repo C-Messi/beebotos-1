@@ -10,6 +10,7 @@ use leptos_meta::*;
 use crate::api::cron_jobs::{ContextMode, CronJob, CronJobRequest, ScheduleType};
 use crate::components::Modal;
 use crate::state::use_app_state;
+use crate::i18n::I18nContext;
 
 const POLL_INTERVAL_MS: u32 = 10_000;
 
@@ -20,6 +21,7 @@ const POLL_INTERVAL_MS: u32 = 10_000;
 #[component]
 pub fn CronJobsPage() -> impl IntoView {
     let app_state = use_app_state();
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let refresh_seq = RwSignal::new(0_u64);
     let refreshing = RwSignal::new(false);
     let refresh_error = RwSignal::new(None::<String>);
@@ -80,12 +82,12 @@ pub fn CronJobsPage() -> impl IntoView {
     let show_history = RwSignal::new(None::<String>);
 
     view! {
-        <Title text="Cron Jobs - BeeBotOS" />
+        <Title text={move || format!("{} - BeeBotOS", i18n.get().t("cron-jobs-title"))} />
         <div class="page cron-jobs-page">
             <div class="page-header">
                 <div>
-                    <h1>"定时任务"</h1>
-                    <p class="page-description">"管理定时执行的自动化任务"</p>
+                    <h1>{move || i18n.get().t("cron-jobs-title")}</h1>
+                    <p class="page-description">{move || i18n.get().t("cron-jobs-subtitle")}</p>
                 </div>
                 <div class="page-header-actions">
                     <button
@@ -93,7 +95,7 @@ pub fn CronJobsPage() -> impl IntoView {
                         disabled=move || refreshing.get()
                         on:click=move |_| refresh()
                     >
-                        {move || if refreshing.get() { "刷新中..." } else { "🔄 刷新" }}
+                        {move || if refreshing.get() { i18n.get().t("cron-jobs-refreshing") } else { format!("🔄 {}", i18n.get().t("cron-jobs-refresh")) }}
                     </button>
                     <button
                         class="btn btn-primary"
@@ -102,7 +104,7 @@ pub fn CronJobsPage() -> impl IntoView {
                             show_create.set(true);
                         }
                     >
-                        "➕ 新建任务"
+                        {move || format!("➕ {}", i18n.get().t("cron-jobs-new"))}
                     </button>
                 </div>
             </div>
@@ -139,14 +141,7 @@ pub fn CronJobsPage() -> impl IntoView {
             // Create/Edit Modal
             <Show when=move || show_create.get()>
                 <Modal
-                    title={
-                        if editing_job.get().is_some() {
-                            "编辑定时任务"
-                        } else {
-                            "新建定时任务"
-                        }
-                        .to_string()
-                    }
+                    title={move || if editing_job.get().is_some() { i18n.get().t("cron-jobs-edit") } else { i18n.get().t("cron-jobs-create") }}
                     on_close=move || show_create.set(false)
                 >
                     <JobForm
@@ -170,7 +165,7 @@ pub fn CronJobsPage() -> impl IntoView {
             // History Modal
             <Show when=move || show_history.get().is_some()>
                 <Modal
-                    title="执行历史".to_string()
+                    title={move || use_context::<I18nContext>().expect("i18n context not found").t("cron-jobs-history")}
                     on_close=move || show_history.set(None)
                 >
                     {move || {
@@ -195,12 +190,13 @@ fn JobList(
     on_edit: impl Fn(CronJob) + Clone + Send + Sync + 'static,
     on_history: impl Fn(String) + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     if jobs.is_empty() {
         return Either::Left(view! {
             <div class="empty-state">
                 <span class="empty-icon">"⏰"</span>
                 <p>"暂无定时任务"</p>
-                <p class="empty-hint">"点击右上角「新建任务」创建第一个定时任务"</p>
+                <p class="empty-hint">{move || i18n.get().t("cron-jobs-empty-hint")}</p>
             </div>
         });
     }
@@ -210,13 +206,13 @@ fn JobList(
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>"名称"</th>
-                        <th>"调度方式"</th>
-                        <th>"表达式"</th>
-                        <th>"状态"</th>
-                        <th>"运行次数"</th>
-                        <th>"下次执行"</th>
-                        <th>"操作"</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-name")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-schedule")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-expression")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-status")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-runs")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-next")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-actions")}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -233,13 +229,13 @@ fn JobList(
                         let on_history_cb = on_history.clone();
 
                         let schedule_label = match job.schedule_type {
-                            ScheduleType::At => "定时",
-                            ScheduleType::Every => "间隔",
-                            ScheduleType::Cron => "Cron",
+                            ScheduleType::At => i18n.get().t("cron-jobs-type-timed"),
+                            ScheduleType::Every => i18n.get().t("cron-jobs-type-interval"),
+                            ScheduleType::Cron => i18n.get().t("cron-jobs-type-cron"),
                         };
 
                         let status_class = if job.enabled { "status-badge active" } else { "status-badge disabled" };
-                        let status_text = if job.enabled { "启用" } else { "禁用" };
+                        let status_text = if job.enabled { i18n.get().t("cron-jobs-enable") } else { i18n.get().t("cron-jobs-disable") };
 
                         view! {
                             <tr>
@@ -266,7 +262,7 @@ fn JobList(
                                                 });
                                             }
                                         >
-                                            {if job.enabled { "禁用" } else { "启用" }}
+                                            {if job.enabled { i18n.get().t("cron-jobs-disable") } else { i18n.get().t("cron-jobs-enable") }}
                                         </button>
                                         <button
                                             class="btn btn-sm btn-primary"
@@ -280,7 +276,7 @@ fn JobList(
                                                 });
                                             }
                                         >
-                                            "运行"
+                                            {move || i18n.get().t("cron-jobs-run")}
                                         </button>
                                         <button
                                             class="btn btn-sm btn-secondary"
@@ -288,7 +284,7 @@ fn JobList(
                                                 on_edit_cb(job_clone_edit.clone());
                                             }
                                         >
-                                            "编辑"
+                                            {move || i18n.get().t("cron-jobs-edit-action")}
                                         </button>
                                         <button
                                             class="btn btn-sm btn-secondary"
@@ -296,7 +292,7 @@ fn JobList(
                                                 on_history_cb(job_id_history.clone());
                                             }
                                         >
-                                            "历史"
+                                            {move || i18n.get().t("cron-jobs-history-action")}
                                         </button>
                                         <button
                                             class="btn btn-sm btn-danger"
@@ -310,7 +306,7 @@ fn JobList(
                                                 });
                                             }
                                         >
-                                            "删除"
+                                            {move || i18n.get().t("cron-jobs-delete")}
                                         </button>
                                     </div>
                                 </td>
@@ -333,6 +329,7 @@ fn JobForm(
     on_save: impl Fn() + Clone + Send + Sync + 'static,
     on_cancel: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let is_edit = job.is_some();
 
     let name = RwSignal::new(job.as_ref().map(|j| j.name.clone()).unwrap_or_default());
@@ -444,27 +441,27 @@ fn JobForm(
             </Show>
 
             <div class="form-group">
-                <label>"任务名称"</label>
+                <label>{move || i18n.get().t("cron-jobs-form-name")}</label>
                 <input
                     type="text"
                     prop:value=move || name.get()
                     on:input:target=move |ev| name.set(ev.target().value())
-                    placeholder="如：每日晨报"
+                    placeholder={move || i18n.get().t("cron-jobs-form-name-placeholder")}
                 />
             </div>
 
             <div class="form-group">
-                <label>"描述"</label>
+                <label>{move || i18n.get().t("cron-jobs-form-desc")}</label>
                 <input
                     type="text"
                     prop:value=move || description.get()
                     on:input:target=move |ev| description.set(ev.target().value())
-                    placeholder="简要描述任务用途"
+                    placeholder={move || i18n.get().t("cron-jobs-form-desc-placeholder")}
                 />
             </div>
 
             <div class="form-group">
-                <label>"调度方式"</label>
+                <label>{move || i18n.get().t("cron-jobs-form-schedule-type")}</label>
                 <select
                     prop:value={
                         let st = schedule_type.get();
@@ -496,7 +493,7 @@ fn JobForm(
             </div>
 
             <div class="form-group">
-                <label>"调度表达式"</label>
+                <label>{move || i18n.get().t("cron-jobs-form-expression")}</label>
                 <input
                     type="text"
                     prop:value=move || schedule_expr.get()
@@ -512,8 +509,8 @@ fn JobForm(
                 <span class="form-hint">
                     {move || {
                         match schedule_type.get() {
-                            ScheduleType::Cron => "5 字段 cron：分 时 日 月 星期".to_string(),
-                            ScheduleType::Every => "支持 s/m/h/d，如 30m, 1h, 4h, 1d".to_string(),
+                            ScheduleType::Cron => use_context::<I18nContext>().expect("i18n context not found").t("cron-jobs-form-cron-hint"),
+                            ScheduleType::Every => use_context::<I18nContext>().expect("i18n context not found").t("cron-jobs-form-interval-hint"),
                             ScheduleType::At => "未带时区时按北京时间解析".to_string(),
                         }
                     }}
@@ -521,28 +518,28 @@ fn JobForm(
             </div>
 
             <div class="form-group">
-                <label>"时区"</label>
+                <label>{move || i18n.get().t("cron-jobs-form-timezone")}</label>
                 <input
                     type="text"
                     prop:value=move || timezone.get()
                     on:input:target=move |ev| timezone.set(ev.target().value())
-                    placeholder="Asia/Shanghai"
+                    placeholder={move || i18n.get().t("cron-jobs-form-timezone-placeholder")}
                 />
             </div>
 
             <div class="form-group">
-                <label>"执行提示词 (Prompt)"</label>
+                <label>{move || i18n.get().t("cron-jobs-form-prompt")}</label>
                 <textarea
                     prop:value=move || prompt.get()
                     on:input:target=move |ev| prompt.set(ev.target().value())
                     rows=4
-                    placeholder="任务触发时发送给 Agent 的提示词"
+                    placeholder={move || i18n.get().t("cron-jobs-form-prompt-placeholder")}
                 />
             </div>
 
             <div class="form-row">
                 <div class="form-group">
-                    <label>"上下文模式"</label>
+                    <label>{move || i18n.get().t("cron-jobs-form-context-mode")}</label>
                     <select
                         prop:value={
                             match context_mode.get() {
@@ -558,24 +555,24 @@ fn JobForm(
                             });
                         }
                     >
-                        <option value="isolated">"独立会话"</option>
-                        <option value="main">"主会话共享"</option>
+                        <option value="isolated">{move || i18n.get().t("cron-jobs-form-context-standalone")}</option>
+                        <option value="main">{move || i18n.get().t("cron-jobs-form-context-shared")}</option>
                     </select>
                 </div>
 
                 <div class="form-group">
-                    <label>"最大运行次数"</label>
+                    <label>{move || i18n.get().t("cron-jobs-form-max-runs")}</label>
                     <input
                         type="number"
                         prop:value=move || max_runs.get()
                         on:input:target=move |ev| max_runs.set(ev.target().value())
-                        placeholder="留空表示无限制"
+                        placeholder={move || i18n.get().t("cron-jobs-form-max-runs-placeholder")}
                     />
                 </div>
             </div>
 
             <div class="form-group">
-                <label>"通知投递频道"</label>
+                <label>{move || i18n.get().t("cron-jobs-form-channel")}</label>
                 <select
                     prop:value=move || delivery_channel.get()
                     on:change:target=move |ev| delivery_channel.set(ev.target().value())
@@ -588,7 +585,7 @@ fn JobForm(
 
             <Show when=move || !delivery_channel.get().is_empty()>
                 <div class="form-group">
-                    <label>"投递目标"</label>
+                    <label>{move || i18n.get().t("cron-jobs-form-target")}</label>
                     <input
                         type="text"
                         prop:value=move || delivery_target.get()
@@ -604,8 +601,8 @@ fn JobForm(
                     <span class="form-hint">
                         {move || {
                             match delivery_channel.get().as_str() {
-                                "webchat" => "WebSocket 频道名（默认 webchat）".to_string(),
-                                "webhook" => "接收 POST 请求的 URL".to_string(),
+                                "webchat" => use_context::<I18nContext>().expect("i18n context not found").t("cron-jobs-form-target-webchat-hint"),
+                                "webhook" => use_context::<I18nContext>().expect("i18n context not found").t("cron-jobs-form-target-webhook-hint"),
                                 _ => "".to_string(),
                             }
                         }}
@@ -620,20 +617,20 @@ fn JobForm(
                         prop:checked=move || enabled.get()
                         on:change:target=move |ev| enabled.set(ev.target().checked())
                     />
-                    "启用此任务"
+                    {move || i18n.get().t("cron-jobs-form-enabled")}
                 </label>
             </div>
 
             <div class="form-actions">
                 <button class="btn btn-secondary" on:click=move |_| on_cancel()>
-                    "取消"
+                    {move || i18n.get().t("cron-jobs-form-cancel")}
                 </button>
                 <button
                     class="btn btn-primary"
                     on:click=move |_| save()
                     disabled=move || saving.get() || name.get().trim().is_empty() || prompt.get().trim().is_empty() || schedule_expr.get().trim().is_empty()
                 >
-                    {move || if saving.get() { "保存中..." } else if is_edit { "保存" } else { "创建" }}
+                    {move || if saving.get() { i18n.get().t("cron-jobs-form-saving") } else if is_edit { i18n.get().t("cron-jobs-form-save") } else { i18n.get().t("cron-jobs-form-create") }}
                 </button>
             </div>
         </div>
@@ -656,7 +653,7 @@ fn JobHistory(job_id: String) -> impl IntoView {
     });
 
     view! {
-        <Suspense fallback=|| view! { <div>"加载中..."</div> }>
+        <Suspense fallback=|| view! { <div>{move || use_context::<I18nContext>().expect("i18n context not found").t("cron-jobs-history-loading")}</div> }>
             {move || {
                 runs.get().map(|r| {
                     r.map(|list| {
@@ -702,9 +699,9 @@ fn JobHistory(job_id: String) -> impl IntoView {
                         }
                         .into_any()
                     })
-                    .unwrap_or_else(|| view! { <div class="error-box">"加载失败"</div> }.into_any())
+                    .unwrap_or_else(|| view! { <div class="error-box">{move || use_context::<I18nContext>().expect("i18n context not found").t("cron-jobs-history-error")}</div> }.into_any())
                 })
-                .unwrap_or_else(|| view! { <div>"加载中..."</div> }.into_any())
+                .unwrap_or_else(|| view! { <div>{move || use_context::<I18nContext>().expect("i18n context not found").t("cron-jobs-history-loading")}</div> }.into_any())
             }}
         </Suspense>
     }
@@ -716,18 +713,19 @@ fn JobHistory(job_id: String) -> impl IntoView {
 
 #[component]
 fn TableSkeleton(rows: usize) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
         <div class="card">
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>"名称"</th>
-                        <th>"调度方式"</th>
-                        <th>"表达式"</th>
-                        <th>"状态"</th>
-                        <th>"运行次数"</th>
-                        <th>"下次执行"</th>
-                        <th>"操作"</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-name")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-schedule")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-expression")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-status")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-runs")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-next")}</th>
+                        <th>{move || i18n.get().t("cron-jobs-table-actions")}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -752,7 +750,8 @@ fn TableSkeleton(rows: usize) -> impl IntoView {
 
 #[component]
 fn JobsError() -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     view! {
-        <div class="error-box">"加载定时任务列表失败"</div>
+        <div class="error-box">{move || i18n.get().t("cron-jobs-error-load")}</div>
     }
 }
