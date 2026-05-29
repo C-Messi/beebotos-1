@@ -549,18 +549,6 @@ fn GraphicImageCard(
 
     view! {
         <article class=format!("ai-video-task-card {}", GRAPHIC_PREVIEW_CLASS)>
-            <div>
-                <span>"任务 ID"</span>
-                <strong>{image.id}</strong>
-            </div>
-            <div>
-                <span>"Provider"</span>
-                <strong>{image.provider}</strong>
-            </div>
-            <div>
-                <span>"状态"</span>
-                <strong>{image.status}</strong>
-            </div>
             <p>{image.message}</p>
             {src.map(|src| {
                 let preview_src = src.clone();
