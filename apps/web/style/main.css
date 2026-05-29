@@ -1425,6 +1425,21 @@ body {
     margin: 0;
 }
 
+.ai-graphic-prompt-input {
+    width: 100%;
+    min-height: 132px;
+    margin-top: 6px;
+    padding: 10px;
+    resize: vertical;
+    background: var(--bg-glass);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
 .ai-graphic-image-open {
     grid-column: 1 / -1;
     padding: 0;

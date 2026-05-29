@@ -2,6 +2,10 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::view;
 use leptos_meta::Title;
+use serde::{Deserialize, Serialize};
+
+#[cfg(target_arch = "wasm32")]
+use gloo_storage::{LocalStorage, Storage};
 
 use crate::api::{
     create_ai_store_manager_service, CreateGraphicImageRequest, CreateGraphicPackageRequest,
@@ -17,8 +21,10 @@ pub const GRAPHIC_IMAGE_PANEL_CLASS: &str = "ai-graphic-image-panel";
 pub const GRAPHIC_IMAGE_PANEL_SECTION_CLASS: &str =
     "ai-video-marketing-section ai-graphic-image-panel";
 pub const GRAPHIC_PREVIEW_CLASS: &str = "ai-graphic-preview";
+#[cfg(target_arch = "wasm32")]
+const GRAPHIC_DRAFT_STORAGE_KEY: &str = "beebotos_ai_graphic_marketing_draft";
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GraphicMarketingTask {
     pub product: String,
     pub selling_points: String,
@@ -29,6 +35,15 @@ pub struct GraphicMarketingTask {
     pub style: String,
     pub size: String,
     pub quality: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct GraphicMarketingDraft {
+    task: GraphicMarketingTask,
+    package: GraphicPackageResponse,
+    package_ready: bool,
+    task_status: String,
+    image_result: Option<GraphicImageResponse>,
 }
 
 pub fn default_graphic_marketing_task() -> GraphicMarketingTask {
@@ -42,6 +57,17 @@ pub fn default_graphic_marketing_task() -> GraphicMarketingTask {
         style: "真实测评".to_string(),
         size: "1024x1536".to_string(),
         quality: "medium".to_string(),
+    }
+}
+
+fn default_graphic_marketing_draft() -> GraphicMarketingDraft {
+    let task = default_graphic_marketing_task();
+    GraphicMarketingDraft {
+        package: fallback_graphic_package(&task),
+        task,
+        package_ready: false,
+        task_status: "待生成".to_string(),
+        image_result: None,
     }
 }
 
@@ -84,6 +110,28 @@ pub fn fallback_graphic_package(task: &GraphicMarketingTask) -> GraphicPackageRe
             },
         ],
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_graphic_marketing_draft() -> Option<GraphicMarketingDraft> {
+    LocalStorage::get(GRAPHIC_DRAFT_STORAGE_KEY).ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_graphic_marketing_draft() -> Option<GraphicMarketingDraft> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+fn save_graphic_marketing_draft(draft: &GraphicMarketingDraft) {
+    let _ = LocalStorage::set(GRAPHIC_DRAFT_STORAGE_KEY, draft);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_graphic_marketing_draft(_draft: &GraphicMarketingDraft) {}
+
+fn update_graphic_image_prompt(package: &mut GraphicPackageResponse, prompt: String) {
+    package.image_prompt = prompt;
 }
 
 fn graphic_image_src(image: &GraphicImageResponse) -> Option<String> {
@@ -140,14 +188,15 @@ fn graphic_workspace_child_classes() -> [&'static str; 3] {
 
 #[component]
 pub fn AiGraphicMarketingPage() -> impl IntoView {
-    let (task, set_task) = signal(default_graphic_marketing_task());
-    let initial_package = fallback_graphic_package(&task.get_untracked());
-    let (package, set_package) = signal(initial_package);
-    let (package_ready, set_package_ready) = signal(false);
-    let (task_status, set_task_status) = signal("待生成".to_string());
+    let initial_draft =
+        load_graphic_marketing_draft().unwrap_or_else(default_graphic_marketing_draft);
+    let (task, set_task) = signal(initial_draft.task);
+    let (package, set_package) = signal(initial_draft.package);
+    let (package_ready, set_package_ready) = signal(initial_draft.package_ready);
+    let (task_status, set_task_status) = signal(initial_draft.task_status);
     let (package_error, set_package_error) = signal::<Option<String>>(None);
     let (package_loading, set_package_loading) = signal(false);
-    let (image_result, set_image_result) = signal::<Option<GraphicImageResponse>>(None);
+    let (image_result, set_image_result) = signal(initial_draft.image_result);
     let (image_error, set_image_error) = signal::<Option<String>>(None);
     let (image_loading, set_image_loading) = signal(false);
     let (image_preview_src, set_image_preview_src) = signal::<Option<String>>(None);
@@ -160,6 +209,16 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
             package_loading.get(),
             image_loading.get(),
         )
+    });
+
+    Effect::new(move |_| {
+        save_graphic_marketing_draft(&GraphicMarketingDraft {
+            task: task.get(),
+            package: package.get(),
+            package_ready: package_ready.get(),
+            task_status: task_status.get(),
+            image_result: image_result.get(),
+        });
     });
 
     let generate_package = move || {
@@ -409,7 +468,20 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                     {move || package_error.get().map(|error| view! {
                         <div class="ai-video-task-card error">{error}</div>
                     })}
-                    <GraphicPackageCard package=Signal::derive(move || package.get()) />
+                    <GraphicPackageCard
+                        package=Signal::derive(move || package.get())
+                        on_image_prompt_input=move |value| {
+                            set_package.update(|package| {
+                                update_graphic_image_prompt(package, value);
+                            });
+                            set_image_result.set(None);
+                            set_image_error.set(None);
+                            set_image_preview_src.set(None);
+                            if package_ready.get_untracked() {
+                                set_task_status.set("待生成图片".to_string());
+                            }
+                        }
+                    />
                 </div>
 
                 <section class=GRAPHIC_IMAGE_PANEL_SECTION_CLASS>
@@ -493,7 +565,10 @@ fn SelectField(
 }
 
 #[component]
-fn GraphicPackageCard(package: Signal<GraphicPackageResponse>) -> impl IntoView {
+fn GraphicPackageCard(
+    package: Signal<GraphicPackageResponse>,
+    on_image_prompt_input: impl Fn(String) + Clone + 'static,
+) -> impl IntoView {
     view! {
         <div class="ai-video-result-list">
             <article class="ai-video-result-item">
@@ -518,7 +593,11 @@ fn GraphicPackageCard(package: Signal<GraphicPackageResponse>) -> impl IntoView 
             </article>
             <article class="ai-video-result-item">
                 <span>"图片 Prompt"</span>
-                <p>{move || package.get().image_prompt}</p>
+                <textarea
+                    class="ai-graphic-prompt-input"
+                    prop:value=move || package.get().image_prompt
+                    on:input=move |event| on_image_prompt_input(event_target_value(&event))
+                />
             </article>
         </div>
     }
@@ -659,6 +738,45 @@ mod tests {
         assert!(!can_generate_graphic_image(false, false, false));
         assert!(!can_generate_graphic_image(true, true, false));
         assert!(!can_generate_graphic_image(true, false, true));
+    }
+
+    #[test]
+    fn graphic_draft_keeps_generated_package_and_image() {
+        let task = default_graphic_marketing_task();
+        let package = fallback_graphic_package(&task);
+        let image = GraphicImageResponse {
+            id: "graphic-image-1".to_string(),
+            provider: "relay".to_string(),
+            status: "completed".to_string(),
+            message: "图片已生成。".to_string(),
+            image_url: None,
+            b64_json: Some("abc123".to_string()),
+        };
+        let draft = GraphicMarketingDraft {
+            task: task.clone(),
+            package: package.clone(),
+            package_ready: true,
+            task_status: "图片已生成".to_string(),
+            image_result: Some(image.clone()),
+        };
+
+        assert_eq!(draft.task, task);
+        assert_eq!(draft.package.image_prompt, package.image_prompt);
+        assert!(draft.package_ready);
+        assert_eq!(
+            draft.image_result.as_ref().map(|image| image.b64_json.clone()),
+            Some(image.b64_json)
+        );
+    }
+
+    #[test]
+    fn edited_image_prompt_updates_package_prompt() {
+        let task = default_graphic_marketing_task();
+        let mut package = fallback_graphic_package(&task);
+
+        update_graphic_image_prompt(&mut package, "自定义图片 prompt".to_string());
+
+        assert_eq!(package.image_prompt, "自定义图片 prompt");
     }
 
     #[test]
