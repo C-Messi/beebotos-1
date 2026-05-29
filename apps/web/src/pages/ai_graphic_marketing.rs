@@ -94,6 +94,14 @@ fn graphic_image_src(image: &GraphicImageResponse) -> Option<String> {
         .or_else(|| image.image_url.clone())
 }
 
+fn graphic_image_download_href(image: &GraphicImageResponse) -> Option<String> {
+    graphic_image_src(image)
+}
+
+fn graphic_image_download_filename(image: &GraphicImageResponse) -> String {
+    format!("{}.png", image.id.replace('/', "-"))
+}
+
 fn can_generate_graphic_image(
     package_ready: bool,
     package_loading: bool,
@@ -142,6 +150,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
     let (image_result, set_image_result) = signal::<Option<GraphicImageResponse>>(None);
     let (image_error, set_image_error) = signal::<Option<String>>(None);
     let (image_loading, set_image_loading) = signal(false);
+    let (image_preview_src, set_image_preview_src) = signal::<Option<String>>(None);
     let service = create_ai_store_manager_service(use_app_state().api_client());
     let service = StoredValue::new(service);
     let busy = Signal::derive(move || package_loading.get() || image_loading.get());
@@ -176,6 +185,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
         set_package_ready.set(false);
         set_image_result.set(None);
         set_image_error.set(None);
+        set_image_preview_src.set(None);
         set_task_status.set("图文包生成中".to_string());
 
         spawn_local(async move {
@@ -226,6 +236,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
         set_image_loading.set(true);
         set_image_error.set(None);
         set_image_result.set(None);
+        set_image_preview_src.set(None);
         set_task_status.set("图片生成中".to_string());
 
         spawn_local(async move {
@@ -407,7 +418,12 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                     </div>
                     {move || {
                         if let Some(image) = image_result.get() {
-                            view! { <GraphicImageCard image=image /> }.into_any()
+                            view! {
+                                <GraphicImageCard
+                                    image=image
+                                    on_preview=move |src| set_image_preview_src.set(Some(src))
+                                />
+                            }.into_any()
                         } else if let Some(error) = image_error.get() {
                             view! { <div class="ai-video-task-card error">{error}</div> }.into_any()
                         } else {
@@ -420,6 +436,21 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                     }}
                 </section>
             </section>
+
+            {move || image_preview_src.get().map(|src| view! {
+                <div class="ai-graphic-modal">
+                    <div class="ai-graphic-modal-content">
+                        <button
+                            type="button"
+                            class="btn btn-secondary ai-graphic-modal-close"
+                            on:click=move |_| set_image_preview_src.set(None)
+                        >
+                            "关闭"
+                        </button>
+                        <img src=src alt="AI 图文营销大图预览" />
+                    </div>
+                </div>
+            })}
 
             <section class="ai-video-marketing-section">
                 <div class="section-title compact">
@@ -508,8 +539,13 @@ fn GraphicPackageCard(package: Signal<GraphicPackageResponse>) -> impl IntoView 
 }
 
 #[component]
-fn GraphicImageCard(image: GraphicImageResponse) -> impl IntoView {
+fn GraphicImageCard(
+    image: GraphicImageResponse,
+    on_preview: impl Fn(String) + Clone + 'static,
+) -> impl IntoView {
     let src = graphic_image_src(&image);
+    let download_href = graphic_image_download_href(&image);
+    let download_filename = graphic_image_download_filename(&image);
 
     view! {
         <article class=format!("ai-video-task-card {}", GRAPHIC_PREVIEW_CLASS)>
@@ -526,9 +562,24 @@ fn GraphicImageCard(image: GraphicImageResponse) -> impl IntoView {
                 <strong>{image.status}</strong>
             </div>
             <p>{image.message}</p>
-            {src.map(|src| view! {
-                <img src=src alt="AI 图文营销图片" loading="lazy" />
+            {src.map(|src| {
+                let preview_src = src.clone();
+                let on_preview = on_preview.clone();
+                view! {
+                    <button
+                        type="button"
+                        class="ai-graphic-image-open"
+                        on:click=move |_| on_preview(preview_src.clone())
+                    >
+                        <img src=src alt="AI 图文营销图片" loading="lazy" />
+                    </button>
+                }
             })}
+            <div class="ai-graphic-image-actions">
+                {download_href.map(|href| view! {
+                    <a class="btn btn-secondary" href=href download=download_filename>"下载图片"</a>
+                })}
+            </div>
         </article>
     }
 }
@@ -615,6 +666,27 @@ mod tests {
             Some("https://cdn.example/image.png".to_string())
         );
         assert_eq!(graphic_image_src(&empty), None);
+    }
+
+    #[test]
+    fn image_download_uses_preview_source_and_png_filename() {
+        let image = GraphicImageResponse {
+            id: "graphic-image-小红书-云柑礼盒".to_string(),
+            provider: "relay".to_string(),
+            status: "completed".to_string(),
+            message: "ok".to_string(),
+            image_url: None,
+            b64_json: Some("abc123".to_string()),
+        };
+
+        assert_eq!(
+            graphic_image_download_href(&image),
+            Some("data:image/png;base64,abc123".to_string())
+        );
+        assert_eq!(
+            graphic_image_download_filename(&image),
+            "graphic-image-小红书-云柑礼盒.png"
+        );
     }
 
     #[test]

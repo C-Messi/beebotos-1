@@ -1,10 +1,15 @@
-use axum::extract::Path;
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
 use axum::Json;
+use beebotos_agents::llm::Message as LLMMessage;
 use gateway::middleware::{require_any_role, AuthUser};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::config::BeeBotOSConfig;
 use crate::error::GatewayError;
+use crate::AppState;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CreateVideoTaskRequest {
@@ -135,6 +140,117 @@ pub fn create_graphic_package(req: &CreateGraphicPackageRequest) -> GraphicPacka
     }
 }
 
+fn build_graphic_package_prompt(req: &CreateGraphicPackageRequest) -> String {
+    format!(
+        r#"请为 AI 店长生成一套可直接发布的图文营销包。
+
+任务信息：
+- 商品：{product}
+- 核心卖点：{selling_points}
+- 目标人群：{audience}
+- 价格区间：{price_range}
+- 发布平台：{platform}
+- 营销目标：{goal}
+- 内容风格：{style}
+
+要求：
+1. 文案必须贴合商品、平台、人群和目标，不要使用通用模板话术。
+2. 小红书正文要有真实使用场景、购买理由和评论互动引导。
+3. 朋友圈文案要短，适合私域发布。
+4. 海报文案要适合放在图片上，短句优先。
+5. image_prompt 用于图片模型生成营销图，必须包含商品主体、平台、卖点、风格和画面要求。
+6. 只输出 JSON，不要 Markdown，不要解释。
+
+JSON 结构：
+{{
+  "title_options": ["标题一", "标题二", "标题三"],
+  "body": "小红书正文",
+  "moments_copy": "朋友圈文案",
+  "poster_copy": "海报文案",
+  "comment_guide": "评论引导",
+  "image_prompt": "图片生成提示词",
+  "checks": [
+    {{"label": "商品卖点完整", "status": "已覆盖"}},
+    {{"label": "平台风格匹配", "status": "已覆盖"}},
+    {{"label": "人工审核", "status": "待确认"}}
+  ]
+}}"#,
+        product = req.product,
+        selling_points = req.selling_points,
+        audience = req.audience,
+        price_range = req.price_range,
+        platform = req.platform,
+        goal = req.goal,
+        style = req.style
+    )
+}
+
+fn extract_json_object(raw: &str) -> Result<&str, GatewayError> {
+    let trimmed = raw.trim();
+    let start = trimmed
+        .find('{')
+        .ok_or_else(|| GatewayError::internal("图文营销包响应缺少 JSON"))?;
+    let end = trimmed
+        .rfind('}')
+        .ok_or_else(|| GatewayError::internal("图文营销包响应缺少 JSON"))?;
+
+    if start > end {
+        return Err(GatewayError::internal("图文营销包 JSON 格式错误"));
+    }
+
+    Ok(&trimmed[start..=end])
+}
+
+fn validate_graphic_package(package: &GraphicPackageResponse) -> Result<(), GatewayError> {
+    if package.title_options.len() < 3 {
+        return Err(GatewayError::internal("图文营销标题不足"));
+    }
+    if package.body.trim().is_empty()
+        || package.moments_copy.trim().is_empty()
+        || package.poster_copy.trim().is_empty()
+        || package.comment_guide.trim().is_empty()
+        || package.image_prompt.trim().is_empty()
+    {
+        return Err(GatewayError::internal("图文营销包内容不完整"));
+    }
+    Ok(())
+}
+
+fn graphic_package_from_llm_response(
+    raw: &str,
+    req: &CreateGraphicPackageRequest,
+) -> Result<GraphicPackageResponse, GatewayError> {
+    let json = extract_json_object(raw)?;
+    let mut package: GraphicPackageResponse = serde_json::from_str(json)
+        .map_err(|err| GatewayError::internal(format!("图文营销包 JSON 解析失败: {}", err)))?;
+
+    package.title_options.truncate(3);
+    if package.checks.is_empty() {
+        package.checks = create_graphic_package(req).checks;
+    }
+    validate_graphic_package(&package)?;
+
+    Ok(package)
+}
+
+async fn generate_graphic_package_with_llm(
+    state: &AppState,
+    req: &CreateGraphicPackageRequest,
+) -> Result<GraphicPackageResponse, GatewayError> {
+    let messages = vec![
+        LLMMessage::system(
+            "你是资深电商内容运营，只返回符合用户 JSON schema 的中文图文营销素材。",
+        ),
+        LLMMessage::user(build_graphic_package_prompt(req)),
+    ];
+    let response = state
+        .llm_service
+        .chat(messages, Some(1800), None, Some("none".to_string()), None)
+        .await?;
+
+    graphic_package_from_llm_response(&response, req)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CreateGraphicImageRequest {
     pub product: String,
@@ -256,11 +372,27 @@ pub async fn create_video_task(
 }
 
 pub async fn create_graphic_package_handler(
+    State(state): State<Arc<AppState>>,
     user: AuthUser,
     Json(req): Json<CreateGraphicPackageRequest>,
 ) -> Result<Json<GraphicPackageResponse>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
-    Ok(Json(create_graphic_package(&req)))
+    let package = match generate_graphic_package_with_llm(&state, &req).await {
+        Ok(package) => package,
+        Err(err) => {
+            warn!("AI graphic package fell back to template: {}", err);
+            let mut fallback = create_graphic_package(&req);
+            fallback.checks.insert(
+                0,
+                GraphicMarketingCheck {
+                    label: "文案生成".to_string(),
+                    status: "模板兜底".to_string(),
+                },
+            );
+            fallback
+        }
+    };
+    Ok(Json(package))
 }
 
 pub async fn create_graphic_image(
@@ -402,6 +534,76 @@ mod tests {
 
         assert_ne!(xhs.title_options[0], moments.title_options[0]);
         assert!(moments.image_prompt.contains("朋友圈"));
+    }
+
+    #[test]
+    fn graphic_package_prompt_requires_json_and_task_fields() {
+        let req = CreateGraphicPackageRequest {
+            product: "云柑礼盒".to_string(),
+            selling_points: "当季鲜果、顺丰冷链、送礼体面".to_string(),
+            audience: "25-40 岁办公室人群".to_string(),
+            price_range: "99-199 元".to_string(),
+            platform: "小红书".to_string(),
+            goal: "新品种草".to_string(),
+            style: "真实测评".to_string(),
+        };
+
+        let prompt = build_graphic_package_prompt(&req);
+
+        assert!(prompt.contains("只输出 JSON"));
+        assert!(prompt.contains("云柑礼盒"));
+        assert!(prompt.contains("当季鲜果、顺丰冷链、送礼体面"));
+        assert!(prompt.contains("image_prompt"));
+    }
+
+    #[test]
+    fn graphic_package_from_llm_response_accepts_fenced_json() {
+        let req = CreateGraphicPackageRequest {
+            product: "云柑礼盒".to_string(),
+            selling_points: "当季鲜果、顺丰冷链、送礼体面".to_string(),
+            audience: "25-40 岁办公室人群".to_string(),
+            price_range: "99-199 元".to_string(),
+            platform: "小红书".to_string(),
+            goal: "新品种草".to_string(),
+            style: "真实测评".to_string(),
+        };
+        let raw = r#"```json
+{
+  "title_options": ["标题一", "标题二", "标题三"],
+  "body": "小红书正文包含云柑礼盒",
+  "moments_copy": "朋友圈文案",
+  "poster_copy": "海报文案",
+  "comment_guide": "评论引导",
+  "image_prompt": "图片提示词",
+  "checks": [
+    {"label": "商品卖点完整", "status": "已覆盖"},
+    {"label": "平台风格匹配", "status": "已覆盖"},
+    {"label": "人工审核", "status": "待确认"}
+  ]
+}
+```"#;
+
+        let package = graphic_package_from_llm_response(raw, &req).unwrap();
+
+        assert_eq!(package.title_options.len(), 3);
+        assert_eq!(package.body, "小红书正文包含云柑礼盒");
+        assert_eq!(package.image_prompt, "图片提示词");
+    }
+
+    #[test]
+    fn graphic_package_from_llm_response_rejects_incomplete_json() {
+        let req = CreateGraphicPackageRequest {
+            product: "云柑礼盒".to_string(),
+            selling_points: "当季鲜果、顺丰冷链、送礼体面".to_string(),
+            audience: "25-40 岁办公室人群".to_string(),
+            price_range: "99-199 元".to_string(),
+            platform: "小红书".to_string(),
+            goal: "新品种草".to_string(),
+            style: "真实测评".to_string(),
+        };
+        let raw = r#"{"title_options":["标题一"],"body":"","moments_copy":"","poster_copy":"","comment_guide":"","image_prompt":"","checks":[]}"#;
+
+        assert!(graphic_package_from_llm_response(raw, &req).is_err());
     }
 
     #[test]
