@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::Json;
+use base64::engine::general_purpose;
+use base64::Engine as _;
 use beebotos_agents::llm::Message as LLMMessage;
 use gateway::middleware::{require_any_role, AuthUser};
 use serde::{Deserialize, Serialize};
@@ -238,9 +240,7 @@ async fn generate_graphic_package_with_llm(
     req: &CreateGraphicPackageRequest,
 ) -> Result<GraphicPackageResponse, GatewayError> {
     let messages = vec![
-        LLMMessage::system(
-            "你是资深电商内容运营，只返回符合用户 JSON schema 的中文图文营销素材。",
-        ),
+        LLMMessage::system("你是资深电商内容运营，只返回符合用户 JSON schema 的中文图文营销素材。"),
         LLMMessage::user(build_graphic_package_prompt(req)),
     ];
     let response = state
@@ -258,6 +258,18 @@ pub struct CreateGraphicImageRequest {
     pub prompt: String,
     pub size: String,
     pub quality: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CreateGraphicImageEditRequest {
+    pub product: String,
+    pub platform: String,
+    pub prompt: String,
+    pub size: String,
+    pub quality: String,
+    pub image_b64: String,
+    pub image_mime_type: String,
+    pub image_filename: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -330,6 +342,37 @@ fn validate_graphic_image_request(req: &CreateGraphicImageRequest) -> Result<(),
     Ok(())
 }
 
+fn decode_graphic_image_upload(
+    req: &CreateGraphicImageEditRequest,
+) -> Result<Vec<u8>, GatewayError> {
+    if req.image_b64.trim().is_empty() {
+        return Err(GatewayError::bad_request("请先上传产品图"));
+    }
+    general_purpose::STANDARD
+        .decode(req.image_b64.trim())
+        .map_err(|_| GatewayError::bad_request("产品图数据格式错误"))
+}
+
+fn validate_graphic_image_edit_request(
+    req: &CreateGraphicImageEditRequest,
+) -> Result<(), GatewayError> {
+    validate_graphic_image_request(&CreateGraphicImageRequest {
+        product: req.product.clone(),
+        platform: req.platform.clone(),
+        prompt: req.prompt.clone(),
+        size: req.size.clone(),
+        quality: req.quality.clone(),
+    })?;
+    if !matches!(
+        req.image_mime_type.trim(),
+        "image/png" | "image/jpeg" | "image/webp"
+    ) {
+        return Err(GatewayError::bad_request("仅支持 PNG、JPG、WebP 产品图"));
+    }
+    let _ = decode_graphic_image_upload(req)?;
+    Ok(())
+}
+
 fn image_response_to_graphic_result(
     product: &str,
     platform: &str,
@@ -357,6 +400,10 @@ fn image_response_to_graphic_result(
 
 fn image_generation_url(base_url: &str) -> String {
     format!("{}/images/generations", base_url.trim_end_matches('/'))
+}
+
+fn image_edit_url(base_url: &str) -> String {
+    format!("{}/images/edits", base_url.trim_end_matches('/'))
 }
 
 fn image_model_unavailable_message(status: reqwest::StatusCode) -> String {
@@ -442,6 +489,69 @@ pub async fn create_graphic_image(
         .json::<OpenAIImageResponse>()
         .await
         .map_err(|err| GatewayError::internal(format!("图片生成响应解析失败: {}", err)))?;
+    let result = image_response_to_graphic_result(&req.product, &req.platform, image_response)?;
+
+    Ok(Json(result))
+}
+
+pub async fn create_graphic_image_edit(
+    user: AuthUser,
+    Json(req): Json<CreateGraphicImageEditRequest>,
+) -> Result<Json<GraphicImageResponse>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+
+    validate_graphic_image_edit_request(&req)?;
+    let image_bytes = decode_graphic_image_upload(&req)?;
+
+    let config = BeeBotOSConfig::load()
+        .map_err(|err| GatewayError::internal(format!("加载图片生成配置失败: {}", err)))?;
+    let api_key = config
+        .image_generation
+        .api_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| GatewayError::bad_request("图片生成未配置"))?;
+
+    let image_part = reqwest::multipart::Part::bytes(image_bytes)
+        .file_name(req.image_filename.clone())
+        .mime_str(&req.image_mime_type)
+        .map_err(|err| GatewayError::bad_request(format!("产品图格式错误: {}", err)))?;
+    let form = reqwest::multipart::Form::new()
+        .text("model", config.image_generation.model.clone())
+        .text("prompt", req.prompt.trim().to_string())
+        .text("size", req.size.trim().to_string())
+        .text("quality", req.quality.trim().to_string())
+        .text("n", "1")
+        .part("image", image_part);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            config.image_generation.timeout_seconds,
+        ))
+        .build()
+        .map_err(|err| GatewayError::internal(format!("图片编辑客户端创建失败: {}", err)))?;
+
+    let response = client
+        .post(image_edit_url(&config.image_generation.base_url))
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|err| GatewayError::internal(format!("图片编辑请求失败: {}", err)))?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(GatewayError::bad_request("图片生成鉴权失败"));
+    }
+    if !status.is_success() {
+        return Err(GatewayError::internal(image_model_unavailable_message(
+            status,
+        )));
+    }
+
+    let image_response = response
+        .json::<OpenAIImageResponse>()
+        .await
+        .map_err(|err| GatewayError::internal(format!("图片编辑响应解析失败: {}", err)))?;
     let result = image_response_to_graphic_result(&req.product, &req.platform, image_response)?;
 
     Ok(Json(result))
@@ -623,6 +733,33 @@ mod tests {
         assert_eq!(payload.size, "1024x1536");
         assert_eq!(payload.quality, "medium");
         assert_eq!(payload.n, 1);
+    }
+
+    #[test]
+    fn image_edit_url_uses_edits_endpoint() {
+        assert_eq!(
+            image_edit_url("https://image.example/"),
+            "https://image.example/images/edits"
+        );
+    }
+
+    #[test]
+    fn image_edit_request_validation_requires_product_image() {
+        let mut req = CreateGraphicImageEditRequest {
+            product: "云柑礼盒".to_string(),
+            platform: "小红书".to_string(),
+            prompt: "生成营销图".to_string(),
+            size: "1024x1024".to_string(),
+            quality: "low".to_string(),
+            image_b64: "".to_string(),
+            image_mime_type: "image/png".to_string(),
+            image_filename: "product.png".to_string(),
+        };
+
+        assert!(validate_graphic_image_edit_request(&req).is_err());
+
+        req.image_b64 = "aGVsbG8=".to_string();
+        assert!(validate_graphic_image_edit_request(&req).is_ok());
     }
 
     #[test]

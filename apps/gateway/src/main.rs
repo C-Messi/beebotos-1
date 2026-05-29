@@ -2973,6 +2973,10 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
             "/api/v1/ai-store-manager/graphic-images",
             post(handlers::http::ai_store_manager::create_graphic_image),
         )
+        .route(
+            "/api/v1/ai-store-manager/graphic-image-edits",
+            post(handlers::http::ai_store_manager::create_graphic_image_edit),
+        )
         .layer(from_fn_with_state(gateway_state.clone(), auth_middleware))
         .layer(TimeoutLayer::new(graphic_image_request_timeout));
 
