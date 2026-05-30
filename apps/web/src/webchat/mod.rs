@@ -421,6 +421,18 @@ impl SlashCommandManager {
             handler,
         });
 
+        // /stop - 停止当前任务
+        let handler = CommandHandler::Builtin {
+            action: "stop_session".to_string(),
+        };
+        self.register(SlashCommand {
+            command: "/stop".to_string(),
+            description: "停止当前正在运行的任务".to_string(),
+            args: vec![],
+            handler_type: handler.handler_type(),
+            handler,
+        });
+
         // /new - 新建会话
         let handler = CommandHandler::Builtin {
             action: "new_session".to_string(),

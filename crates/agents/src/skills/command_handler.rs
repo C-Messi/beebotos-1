@@ -157,6 +157,7 @@ impl CommandHandler {
             .await;
 
         self.register(Arc::new(StartCommand)).await;
+        self.register(Arc::new(StopCommand)).await;
         info!("Command handler initialized with built-in commands");
     }
 
@@ -300,7 +301,8 @@ impl Command for HelpCommand {
             // List all commands
             Ok(format!(
                 "📚 可用命令:\n/help - 显示此帮助\n/status - 查看系统状态\n/ping - \
-                 测试连接\n/tasks - 查看任务列表\n\n💡 使用 /help <命令> 查看详细信息"
+                 测试连接\n/tasks - 查看任务列表\n/stop - 停止当前任务\n\n💡 使用 /help <命令> \
+                 查看详细信息"
             ))
         } else {
             // Show specific command help
@@ -310,6 +312,7 @@ impl Command for HelpCommand {
                 "status" => Ok("📌 status\n📝 查看系统运行状态\n💡 用法: /status".to_string()),
                 "ping" => Ok("📌 ping\n📝 测试机器人连接状态\n💡 用法: /ping".to_string()),
                 "tasks" => Ok("📌 tasks\n📝 查看当前运行中的任务\n💡 用法: /tasks".to_string()),
+                "stop" => Ok("📌 stop\n📝 停止当前正在运行的任务\n💡 用法: /stop".to_string()),
                 _ => Ok(format!("❌ 未知命令: {}", cmd_name)),
             }
         }
@@ -492,6 +495,50 @@ impl Command for StartCommand {
     }
 }
 
+/// Stop command - cancel the current session task
+pub struct StopCommand;
+
+#[async_trait]
+impl Command for StopCommand {
+    fn name(&self) -> &str {
+        "stop"
+    }
+
+    fn aliases(&self) -> Vec<&str> {
+        vec!["cancel"]
+    }
+
+    fn description(&self) -> &str {
+        "停止当前正在运行的任务"
+    }
+
+    async fn execute(&self, _args: &[&str], ctx: &CommandContext) -> Result<String> {
+        let mut candidates = Vec::new();
+        for key in ["db_session_id", "session_id", "channel_session_id"] {
+            if let Some(value) = ctx.metadata.get(key) {
+                if !value.trim().is_empty() && !candidates.contains(value) {
+                    candidates.push(value.clone());
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok("⚠️ 无法定位当前会话，未能发送停止请求。".to_string());
+        }
+
+        let mut cancelled = false;
+        for session_id in candidates {
+            cancelled |= crate::session_cancellation::cancel(&session_id).await;
+        }
+
+        if cancelled {
+            Ok("⏹️ 已停止当前任务。".to_string())
+        } else {
+            Ok("ℹ️ 当前没有正在运行的任务。".to_string())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +569,34 @@ mod tests {
             CommandResult::NotFound => {}
             _ => panic!("Expected NotFound"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_stop_command_cancels_session() {
+        let handler = CommandHandler::new();
+        handler.initialize().await;
+
+        let session_id = "test-stop-command-session";
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        let generation = crate::session_cancellation::register(session_id, tx).await;
+
+        let mut metadata = HashMap::new();
+        metadata.insert("session_id".to_string(), session_id.to_string());
+        let ctx = CommandContext {
+            sender_id: "test_user".to_string(),
+            channel: "test".to_string(),
+            metadata,
+        };
+
+        let result = handler.execute("/stop", ctx).await;
+        match result {
+            CommandResult::Success(response) => {
+                assert!(response.contains("已停止"));
+            }
+            _ => panic!("Expected success"),
+        }
+
+        crate::session_cancellation::unregister(session_id, generation).await;
     }
 
     #[test]

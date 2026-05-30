@@ -91,6 +91,91 @@ impl MessageProcessor {
         Arc::clone(&self.session_manager)
     }
 
+    fn is_stop_command(content: &str) -> bool {
+        content
+            .split_whitespace()
+            .next()
+            .map(|cmd| cmd.eq_ignore_ascii_case("/stop"))
+            .unwrap_or(false)
+    }
+
+    async fn handle_stop_command(
+        &self,
+        platform: PlatformType,
+        channel_id: &str,
+        message: &Message,
+        session_id: &str,
+        db_session_id: &str,
+        user_id: &str,
+        content: &str,
+    ) -> Result<(), GatewayError> {
+        let cancelled_db = beebotos_agents::session_cancellation::cancel(db_session_id).await;
+        let cancelled_session = if db_session_id == session_id {
+            false
+        } else {
+            beebotos_agents::session_cancellation::cancel(session_id).await
+        };
+        let cancelled = cancelled_db || cancelled_session;
+        let response = if cancelled {
+            "⏹️ 已停止当前任务。"
+        } else {
+            "ℹ️ 当前没有正在运行的任务。"
+        };
+
+        let _ = self
+            .session_manager
+            .add_message(session_id, "user", content, false, vec![])
+            .await;
+        let _ = self
+            .session_manager
+            .add_message(session_id, "assistant", response, false, vec![])
+            .await;
+
+        let mut saved_message_id: Option<String> = None;
+        if let Some(ref svc) = self.webchat_service {
+            let _ = svc
+                .save_message(
+                    db_session_id,
+                    "user",
+                    content,
+                    Some(serde_json::json!({
+                        "platform": platform.to_string(),
+                        "sender_id": user_id,
+                        "channel_id": channel_id,
+                        "command": "stop",
+                    })),
+                    None,
+                )
+                .await;
+            saved_message_id = svc
+                .save_message(
+                    db_session_id,
+                    "assistant",
+                    response,
+                    Some(serde_json::json!({
+                        "platform": platform.to_string(),
+                        "channel_id": channel_id,
+                        "cancelled": cancelled,
+                    })),
+                    None,
+                )
+                .await
+                .ok();
+        }
+
+        if self
+            .send_reply(platform, channel_id, message, response)
+            .await
+            .is_ok()
+        {
+            if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), saved_message_id) {
+                let _ = svc.mark_ws_delivered(&id).await;
+            }
+        }
+
+        Ok(())
+    }
+
     /// 处理频道事件
     pub async fn process_event(&self, event: ChannelEvent) -> Result<(), GatewayError> {
         match event {
@@ -144,13 +229,6 @@ impl MessageProcessor {
 
         info!("💬 会话 {} - 用户 {} 发送消息", session.id, user_id);
 
-        // 2.1 会话并发保护：同一 session 同时只能处理一条消息
-        let _processing_guard = self.session_manager.try_start_processing(&session.id).await;
-        if _processing_guard.is_none() {
-            info!("⏳ 会话 {} 正在处理中，跳过新消息", session.id);
-            return Ok(());
-        }
-
         // 2.5 统一获取/创建 DB session
         let db_session_id = if let Some(ref svc) = self.webchat_service {
             if platform == PlatformType::WebChat {
@@ -196,6 +274,28 @@ impl MessageProcessor {
 
         // 3. 处理多模态内容（下载图片等）
         let (content, images) = self.process_multimodal(&message).await?;
+
+        if Self::is_stop_command(&content) {
+            return self
+                .handle_stop_command(
+                    platform,
+                    channel_id,
+                    &message,
+                    &session.id,
+                    &db_session_id,
+                    &user_id,
+                    &content,
+                )
+                .await;
+        }
+
+        // 2.1 会话并发保护：同一 session 同时只能处理一条消息。
+        // /stop is handled before this guard so users can interrupt an active task.
+        let _processing_guard = self.session_manager.try_start_processing(&session.id).await;
+        if _processing_guard.is_none() {
+            info!("⏳ 会话 {} 正在处理中，跳过新消息", session.id);
+            return Ok(());
+        }
 
         // 🟢 P1 FIX: Check for /workflow command trigger
         if let Some(workflow_result) = self.try_execute_workflow_command(&content).await {
@@ -441,13 +541,6 @@ impl MessageProcessor {
 
         info!("💬 会话 {} - 用户 {} 发送消息", session.id, user_id);
 
-        // 2.1 会话并发保护：同一 session 同时只能处理一条消息
-        let _processing_guard = self.session_manager.try_start_processing(&session.id).await;
-        if _processing_guard.is_none() {
-            info!("⏳ 会话 {} 正在处理中，跳过新消息", session.id);
-            return Ok(());
-        }
-
         // 2.5 统一获取/创建 DB session
         let db_session_id = if let Some(ref svc) = self.webchat_service {
             if platform == PlatformType::WebChat {
@@ -493,6 +586,28 @@ impl MessageProcessor {
 
         // 3. 处理多模态内容（下载图片等）
         let (content, images) = self.process_multimodal(&message).await?;
+
+        if Self::is_stop_command(&content) {
+            return self
+                .handle_stop_command(
+                    platform,
+                    channel_id,
+                    &message,
+                    &session.id,
+                    &db_session_id,
+                    &user_id,
+                    &content,
+                )
+                .await;
+        }
+
+        // 2.1 会话并发保护：同一 session 同时只能处理一条消息。
+        // /stop is handled before this guard so users can interrupt an active task.
+        let _processing_guard = self.session_manager.try_start_processing(&session.id).await;
+        if _processing_guard.is_none() {
+            info!("⏳ 会话 {} 正在处理中，跳过新消息", session.id);
+            return Ok(());
+        }
 
         // 🟢 P1 FIX: Check for /workflow command trigger (same as handle_message)
         if let Some(workflow_result) = self.try_execute_workflow_command(&content).await {

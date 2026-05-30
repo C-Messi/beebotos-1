@@ -192,7 +192,12 @@ pub fn WebchatPage() -> impl IntoView {
     let chat_state_for_send = chat_state.clone();
     let auth_state_for_send = auth_state.clone();
     let handle_send = move |content: String| {
-        if chat_state_for_send.is_sending.get() {
+        let is_stop_command = content
+            .split_whitespace()
+            .next()
+            .map(|cmd| cmd.eq_ignore_ascii_case("/stop"))
+            .unwrap_or(false);
+        if chat_state_for_send.is_sending.get() && !is_stop_command {
             return;
         }
         let session_id = chat_state_for_send.current_session_id.get();

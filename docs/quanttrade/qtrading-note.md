@@ -1710,5 +1710,29 @@ sanitize_id() 改为保留 -：允许 c == '_' || c == '-'。
 
 另外，工作区里 `docs/quanttrade/qtrading-note.md` 本来有未处理改动和 whitespace 提示，我没有改它。
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+要求在微信等channel和webchat都接受/stop命令，停止或取消ReAct循环或超时500S；
+
+
+已完成 `/stop` 支持。
+
+这次改了四块：
+
+- [command_handler.rs](/root/beebotos/crates/agents/src/skills/command_handler.rs:159)：注册新的 `StopCommand`，支持 `/stop` 和 `/cancel`，会从 `db_session_id` / `session_id` / `channel_session_id` 里定位会话并调用 `session_cancellation::cancel()`。
+- [message_processor.rs](/root/beebotos/apps/gateway/src/services/message_processor.rs:94)：在 gateway 消息处理层统一识别 `/stop`，并且放在 session 并发 guard 之前，所以正在 ReAct/后台任务运行时也能打断。
+- [webchat.rs](/root/beebotos/apps/web/src/pages/webchat.rs:194)：WebChat 输入框在 `is_sending` 时也允许发送 `/stop`，不会被前端挡掉。
+- [webchat/mod.rs](/root/beebotos/apps/web/src/webchat/mod.rs:424)：前端 slash command 列表加入 `/stop`。
+
+行为上：
+- 微信等 channel 进来的 `/stop` 会按当前 channel session/db session 取消。
+- WebChat 输入 `/stop` 会像停止按钮一样触发取消。
+- 取消成功返回 `已停止当前任务`，没有任务时返回 `当前没有正在运行的任务`。
+- 仍保留原来的 500s task timeout：`TaskConfig.timeout_secs = 500` 没动。
+
+验证：
+- `cargo check -p beebotos-agents -p beebotos-gateway -p beebotos-web` 通过，只有既有 warning。
+- `git diff --check` 只报了你当前打开的 [qtrading-note.md](/root/beebotos/docs/quanttrade/qtrading-note.md:1715) 末尾空行，和本次代码改动无关。
+
+
 
 
