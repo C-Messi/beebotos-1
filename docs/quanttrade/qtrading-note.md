@@ -1734,5 +1734,18 @@ sanitize_id() 改为保留 -：允许 c == '_' || c == '-'。
 - `git diff --check` 只报了你当前打开的 [qtrading-note.md](/root/beebotos/docs/quanttrade/qtrading-note.md:1715) 末尾空行，和本次代码改动无关。
 
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+/root/beebotos项目中，ReAct的最大循环次数由50改为100.
 
+已完成。ReAct 最大循环上限从 `50` 改为 `100`，位置在 [react_trace.rs](/root/beebotos/crates/agents/src/react_trace.rs:8)。
+
+同时补了边界断言：`clamp_react_max_tool_rounds(100)` 现在会保留为 `100`，超过 100 的值仍会被 clamp 到上限。
+
+验证已跑：
+
+```bash
+cargo check -p beebotos-agents
+```
+
+结果通过，只有项目里已有的 warning。默认轮数仍是 `40`，这次改的是“最大允许轮数”上限。
 

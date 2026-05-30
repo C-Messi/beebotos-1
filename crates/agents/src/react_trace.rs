@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::AgentError;
 
 pub const DEFAULT_REACT_MAX_TOOL_ROUNDS: u32 = 40;
-pub const MAX_REACT_TOOL_ROUNDS_LIMIT: u32 = 50;
+pub const MAX_REACT_TOOL_ROUNDS_LIMIT: u32 = 100;
 pub const REACT_TRACE_PREVIEW_CHARS: usize = 1000;
 
 pub fn clamp_react_max_tool_rounds(rounds: u32) -> u32 {
@@ -203,6 +203,7 @@ mod tests {
         assert_eq!(DEFAULT_REACT_MAX_TOOL_ROUNDS, 40);
         assert_eq!(clamp_react_max_tool_rounds(0), 1);
         assert_eq!(clamp_react_max_tool_rounds(37), 37);
+        assert_eq!(clamp_react_max_tool_rounds(100), 100);
         assert_eq!(
             clamp_react_max_tool_rounds(999),
             MAX_REACT_TOOL_ROUNDS_LIMIT
