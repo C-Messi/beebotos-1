@@ -1749,3 +1749,25 @@ cargo check -p beebotos-agents
 
 结果通过，只有项目里已有的 warning。默认轮数仍是 `40`，这次改的是“最大允许轮数”上限。
 
+已改好：`DEFAULT_REACT_MAX_TOOL_ROUNDS` 也从 `40` 改为 `100`，位置在 [react_trace.rs](/root/beebotos/crates/agents/src/react_trace.rs:7)。
+
+现在效果是：
+
+- 默认 ReAct 最大轮数：`100`
+- clamp 上限：`100`
+- 显式配置超过 `100` 时仍会被限制到 `100`
+
+验证已跑：
+
+```bash
+cargo check -p beebotos-agents
+```
+
+通过，只有项目里已有 warning。
+
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+原来的工作流目录/root/beebotos/data/workflows ，现在新增 /root/beebotos/workflows 工作流目录；在系统管理上和 beebotos-web模块的工作流 页面上的内容，检查分析一下如何兼容和功能完整性；
+
+
