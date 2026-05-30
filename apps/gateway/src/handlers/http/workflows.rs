@@ -995,7 +995,8 @@ pub async fn execute_workflow_internal(
         .description("Temporary agent for workflow execution")
         .build()
         .with_skill_registry(skill_registry)
-        .with_llm_interface(llm_interface);
+        .with_llm_interface(llm_interface)
+        .with_mcp(state.mcp_manager.clone());
 
     // Setup cancellation signal with a pre-generated instance ID so that
     // the cancel endpoint can find the signal using the same instance ID.

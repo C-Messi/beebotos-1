@@ -1437,6 +1437,7 @@ async fn main() -> anyhow::Result<()> {
             app_state.memory_system.clone(),
             app_state.webchat_service.clone(),
             app_state.skill_registry.clone(),
+            Some(app_state.mcp_manager.clone()),
             app_state.workflow_registry.clone(),
             clawhub_client,
             app_state.tool_call_trace_store.clone(),

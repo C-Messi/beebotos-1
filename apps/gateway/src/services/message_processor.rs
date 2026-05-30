@@ -44,6 +44,8 @@ pub struct MessageProcessor {
     webchat_service: Option<Arc<WebchatService>>,
     /// Skill 注册表
     skill_registry: Option<Arc<beebotos_agents::skills::SkillRegistry>>,
+    /// MCP manager for workflow step agents that need external tools
+    mcp_manager: Option<Arc<beebotos_agents::mcp::MCPManager>>,
     /// Workflow 注册表
     workflow_registry:
         Option<Arc<tokio::sync::RwLock<beebotos_agents::workflow::WorkflowRegistry>>>,
@@ -60,6 +62,7 @@ impl MessageProcessor {
         memory_system: Option<Arc<beebotos_agents::memory::UnifiedMemorySystem>>,
         webchat_service: Option<Arc<WebchatService>>,
         skill_registry: Option<Arc<beebotos_agents::skills::SkillRegistry>>,
+        mcp_manager: Option<Arc<beebotos_agents::mcp::MCPManager>>,
         workflow_registry: Option<
             Arc<tokio::sync::RwLock<beebotos_agents::workflow::WorkflowRegistry>>,
         >,
@@ -75,6 +78,7 @@ impl MessageProcessor {
             memory_system,
             webchat_service,
             skill_registry,
+            mcp_manager,
             workflow_registry,
             clawhub_client,
             tool_call_trace_store,
@@ -745,6 +749,7 @@ impl MessageProcessor {
             memory_system: self.memory_system.as_ref().map(Arc::clone),
             webchat_service: self.webchat_service.as_ref().map(Arc::clone),
             skill_registry: self.skill_registry.as_ref().map(Arc::clone),
+            mcp_manager: self.mcp_manager.as_ref().map(Arc::clone),
             workflow_registry: self.workflow_registry.as_ref().map(Arc::clone),
             clawhub_client: self.clawhub_client.clone(),
             tool_call_trace_store: self.tool_call_trace_store.as_ref().map(Arc::clone),
@@ -2053,11 +2058,14 @@ Rules:
             ),
         );
 
-        let agent = beebotos_agents::AgentBuilder::new("workflow-runner")
+        let mut agent = beebotos_agents::AgentBuilder::new("workflow-runner")
             .description("Temporary agent for workflow execution")
             .build()
             .with_skill_registry(skill_registry)
             .with_llm_interface(llm_interface);
+        if let Some(ref mcp_manager) = self.mcp_manager {
+            agent = agent.with_mcp(mcp_manager.clone());
+        }
 
         let engine = beebotos_agents::workflow::WorkflowEngine::new();
         let trigger_context = serde_json::json!({
@@ -2229,11 +2237,14 @@ Rules:
             ),
         );
 
-        let agent = beebotos_agents::AgentBuilder::new("workflow-runner")
+        let mut agent = beebotos_agents::AgentBuilder::new("workflow-runner")
             .description("Temporary agent for workflow execution")
             .build()
             .with_skill_registry(skill_registry)
             .with_llm_interface(llm_interface);
+        if let Some(ref mcp_manager) = self.mcp_manager {
+            agent = agent.with_mcp(mcp_manager.clone());
+        }
 
         let engine = beebotos_agents::workflow::WorkflowEngine::new();
         let trigger_context = serde_json::json!({

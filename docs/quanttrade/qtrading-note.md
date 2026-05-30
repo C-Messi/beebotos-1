@@ -1629,5 +1629,26 @@ for round in 1..=self.config.max_rounds {
 注意一个和 workflow 相关的坑：HTTP workflow 和聊天触发 workflow 里构造的临时 `workflow-runner` 目前只 `.with_skill_registry(...)` 和 `.with_llm_interface(...)`，没有 `.with_mcp(...)`：[workflows.rs](/root/beebotos/apps/gateway/src/handlers/http/workflows.rs:994)、[message_processor.rs](/root/beebotos/apps/gateway/src/services/message_processor.rs:2056)。这意味着 workflow 里的临时 Agent 可能看不到 `mcp_tool_search`。普通 AgentRuntime 路径是有 `.with_mcp(mcp_manager.clone())` 的。
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+已修复：让 workflow 临时创建的 `workflow-runner` 也拿到同一个 `MCPManager`。
+
+改动点：
+
+- HTTP workflow 执行路径补了 `.with_mcp(state.mcp_manager.clone())`：  
+  [workflows.rs](/root/beebotos/apps/gateway/src/handlers/http/workflows.rs:994)
+
+- `MessageProcessor` 增加 `mcp_manager` 字段和构造参数，并在 main 初始化时传入：  
+  [message_processor.rs](/root/beebotos/apps/gateway/src/services/message_processor.rs:47)  
+  [main.rs](/root/beebotos/apps/gateway/src/main.rs:1434)
+
+- 聊天命令触发 workflow、自然语言匹配 workflow 这两个临时 runner 也补了 `.with_mcp(...)`：  
+  [message_processor.rs](/root/beebotos/apps/gateway/src/services/message_processor.rs:2061)  
+  [message_processor.rs](/root/beebotos/apps/gateway/src/services/message_processor.rs:2240)
+
+验证：
+
+- 已运行 `rustfmt`
+- 已运行 `cargo check -p beebotos-gateway`，通过。只有仓库已有 warnings，没有新增编译错误。
+
+注意：这个修复让 workflow step 内部的 Agent 能看到 `mcp_tool_search` 并动态调用 MCP tools；但 workflow YAML 的 `skill:` 字段本身仍然应该写 SkillRegistry 里的 skill id，不能直接写 `mcp:server/tool` 当 workflow step skill。MCP 仍然是通过 Agent 工具调用流程进入的。
 
 
