@@ -77,7 +77,7 @@ async fn test_skill_discovery_finds_directory_skills() {
     let metas = discovery.scan().await;
 
     // Should find the hello-world directory skill
-    let hello = metas.iter().find(|m| m.id == "hello_world");
+    let hello = metas.iter().find(|m| m.id == "hello-world");
     assert!(
         hello.is_some(),
         "Expected to find hello-world skill. Found: {:?}",

@@ -90,6 +90,32 @@ async fn test_skill_registry_registration() {
 }
 
 #[tokio::test]
+async fn test_skill_registry_dash_underscore_compatibility() {
+    let hyphen_dir = create_temp_skill_dir("test-hyphen-skill", &echo_wasm_skill());
+    let underscore_dir = create_temp_skill_dir("test_hyphen_skill", &echo_wasm_skill());
+    let mut loader = beebotos_agents::skills::SkillLoader::new();
+    loader.add_path(hyphen_dir.parent().unwrap());
+    loader.add_path(underscore_dir.parent().unwrap());
+
+    let hyphen_skill = loader.load_skill("test-hyphen-skill").await.unwrap();
+    let underscore_skill = loader.load_skill("test_hyphen_skill").await.unwrap();
+
+    let registry = beebotos_agents::skills::SkillRegistry::new();
+    registry.register(hyphen_skill, "test", vec![]).await;
+    registry.register(underscore_skill, "test", vec![]).await;
+
+    let exact_hyphen = registry.get("test-hyphen-skill").await.unwrap();
+    assert_eq!(exact_hyphen.skill.id, "test-hyphen-skill");
+
+    let exact_underscore = registry.get("test_hyphen_skill").await.unwrap();
+    assert_eq!(exact_underscore.skill.id, "test_hyphen_skill");
+
+    registry.unregister("test_hyphen_skill").await.unwrap();
+    let legacy_underscore_query = registry.get("test_hyphen_skill").await.unwrap();
+    assert_eq!(legacy_underscore_query.skill.id, "test-hyphen-skill");
+}
+
+#[tokio::test]
 async fn test_skill_registry_enable_disable() {
     let dir = create_temp_skill_dir("test_lifecycle_skill", &echo_wasm_skill());
     let base_dir = dir.parent().unwrap().to_path_buf();

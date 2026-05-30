@@ -143,6 +143,39 @@ impl SkillRegistry {
         }
     }
 
+    fn alternate_skill_ids(skill_id: &str) -> Vec<String> {
+        let mut alternates = Vec::new();
+
+        if skill_id.contains('-') {
+            let alternate = skill_id.replace('-', "_");
+            if alternate != skill_id {
+                alternates.push(alternate);
+            }
+        }
+
+        if skill_id.contains('_') {
+            let alternate = skill_id.replace('_', "-");
+            if alternate != skill_id && !alternates.contains(&alternate) {
+                alternates.push(alternate);
+            }
+        }
+
+        alternates
+    }
+
+    fn resolve_skill_key(
+        skills: &HashMap<String, RegisteredSkill>,
+        skill_id: &str,
+    ) -> Option<String> {
+        if skills.contains_key(skill_id) {
+            return Some(skill_id.to_string());
+        }
+
+        Self::alternate_skill_ids(skill_id)
+            .into_iter()
+            .find(|alternate| skills.contains_key(alternate))
+    }
+
     /// Register a skill
     pub async fn register(
         &self,
@@ -187,7 +220,8 @@ impl SkillRegistry {
     /// Get skill by ID
     pub async fn get(&self, skill_id: &str) -> Option<RegisteredSkill> {
         let skills = self.skills.read().await;
-        skills.get(skill_id).cloned()
+        let key = Self::resolve_skill_key(&skills, skill_id)?;
+        skills.get(&key).cloned()
     }
 
     /// Find skills by category
@@ -225,7 +259,8 @@ impl SkillRegistry {
         level: SkillDisclosureLevel,
     ) -> Option<String> {
         let skills = self.skills.read().await;
-        let skill = skills.get(skill_id)?;
+        let key = Self::resolve_skill_key(&skills, skill_id)?;
+        let skill = skills.get(&key)?;
 
         match level {
             SkillDisclosureLevel::L0 => Some(skill.skill.name.clone()),
@@ -367,7 +402,8 @@ impl SkillRegistry {
     /// Increment usage count
     pub async fn record_usage(&self, skill_id: &str) {
         let mut skills = self.skills.write().await;
-        if let Some(skill) = skills.get_mut(skill_id) {
+        if let Some(key) = Self::resolve_skill_key(&skills, skill_id) {
+            let skill = skills.get_mut(&key).expect("resolved skill key must exist");
             skill.usage_count += 1;
         }
     }
@@ -375,7 +411,8 @@ impl SkillRegistry {
     /// Enable a skill
     pub async fn enable(&self, skill_id: &str) -> bool {
         let mut skills = self.skills.write().await;
-        if let Some(skill) = skills.get_mut(skill_id) {
+        if let Some(key) = Self::resolve_skill_key(&skills, skill_id) {
+            let skill = skills.get_mut(&key).expect("resolved skill key must exist");
             skill.enabled = true;
             true
         } else {
@@ -386,7 +423,8 @@ impl SkillRegistry {
     /// Disable a skill
     pub async fn disable(&self, skill_id: &str) -> bool {
         let mut skills = self.skills.write().await;
-        if let Some(skill) = skills.get_mut(skill_id) {
+        if let Some(key) = Self::resolve_skill_key(&skills, skill_id) {
+            let skill = skills.get_mut(&key).expect("resolved skill key must exist");
             skill.enabled = false;
             true
         } else {
@@ -398,19 +436,21 @@ impl SkillRegistry {
     pub async fn unregister(&self, skill_id: &str) -> Option<RegisteredSkill> {
         // Lock order: skills first, then categories
         let mut skills = self.skills.write().await;
-        let removed = skills.remove(skill_id);
+        let key = Self::resolve_skill_key(&skills, skill_id);
+        let removed = key.as_ref().and_then(|key| skills.remove(key));
         drop(skills);
 
-        if removed.is_some() {
+        if let (Some(removed), Some(key)) = (removed, key) {
             let mut categories = self.categories.write().await;
             for ids in categories.values_mut() {
-                ids.retain(|id| id != skill_id);
+                ids.retain(|id| id != &key);
             }
             // Clean up empty categories
             categories.retain(|_, ids| !ids.is_empty());
+            return Some(removed);
         }
 
-        removed
+        None
     }
 
     /// Get categories
@@ -422,7 +462,8 @@ impl SkillRegistry {
     /// 🆕 PHASE 5: Get skill lineage
     pub async fn get_lineage(&self, skill_id: &str) -> Option<SkillLineage> {
         let skills = self.skills.read().await;
-        skills.get(skill_id).and_then(|s| s.lineage.clone())
+        let key = Self::resolve_skill_key(&skills, skill_id)?;
+        skills.get(&key).and_then(|s| s.lineage.clone())
     }
 
     /// 🆕 PHASE 5: Rollback skill to a specific version
@@ -435,7 +476,8 @@ impl SkillRegistry {
         use crate::evolution::skill_lineage::{LineageNode, LineageSource};
 
         let mut skills = self.skills.write().await;
-        let skill = skills.get_mut(skill_id).ok_or("Skill not found")?;
+        let key = Self::resolve_skill_key(&skills, skill_id).ok_or("Skill not found")?;
+        let skill = skills.get_mut(&key).ok_or("Skill not found")?;
         let lineage = skill.lineage.as_mut().ok_or("No lineage for skill")?;
 
         if !lineage.has_version(target_version) {
@@ -470,7 +512,8 @@ impl SkillRegistry {
         lineage: SkillLineage,
     ) -> Result<(), String> {
         let mut skills = self.skills.write().await;
-        let skill = skills.get_mut(skill_id).ok_or("Skill not found")?;
+        let key = Self::resolve_skill_key(&skills, skill_id).ok_or("Skill not found")?;
+        let skill = skills.get_mut(&key).ok_or("Skill not found")?;
         skill.lineage = Some(lineage);
         Ok(())
     }

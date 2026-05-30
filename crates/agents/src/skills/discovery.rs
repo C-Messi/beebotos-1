@@ -413,8 +413,7 @@ fn parse_tags(v: Option<&String>) -> Vec<String> {
 fn sanitize_id(name: &str) -> String {
     name.to_lowercase()
         .replace(' ', "_")
-        .replace('-', "_")
-        .replace(|c: char| !c.is_alphanumeric() && c != '_', "")
+        .replace(|c: char| !c.is_alphanumeric() && c != '_' && c != '-', "")
 }
 
 fn build_tags_from_content(content: &str) -> Vec<String> {

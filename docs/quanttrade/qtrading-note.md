@@ -1652,3 +1652,63 @@ for round in 1..=self.config.max_rounds {
 注意：这个修复让 workflow step 内部的 Agent 能看到 `mcp_tool_search` 并动态调用 MCP tools；但 workflow YAML 的 `skill:` 字段本身仍然应该写 SkillRegistry 里的 skill id，不能直接写 `mcp:server/tool` 当 workflow step skill。MCP 仍然是通过 Agent 工具调用流程进入的。
 
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+/root/beebotos中，skill注册时，把skill 名称中"-"转换成"_“， 评估分析一下，是否可以取消这个转换？
+
+
+我找到了核心转换点：SkillDiscovery::sanitize_id() 会把空格和 - 都转成 _，注册表本身只是按 LoadedSkill.id 原样入 HashMap。接下来我看执行路径，确认 LLM 工具名、查找和已注册 ID 是否依赖这个下划线形态。
+
+结论：**可以取消，但不建议直接一刀切改掉 `.replace('-', "_")`。** 更稳的方式是“新注册保留 `-`，查询/执行兼容旧的 `_` ID”。
+
+我看到转换点在 [discovery.rs](/root/beebotos/crates/agents/src/skills/discovery.rs:413)：`sanitize_id()` 目前把空格转 `_`，也把 `-` 转 `_`。注册表本身不要求下划线，`SkillRegistry::register()` 只是把 `skill.id` 原样作为 `HashMap` key 存进去，见 [registry.rs](/root/beebotos/crates/agents/src/skills/registry.rs:153)。执行路径里 native tool 名只额外把 `:` 和 `/` 转成 `-`，没有把 `-` 禁掉，见 [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:6984)。所以从技术约束看，**保留 skill 名称里的连字符是可行的**。
+
+而且从规范和当前 skill 文件看，取消转换更合理：本地规范示例就是 `name: my-skill`，见 [skill-format-v1.md](/root/beebotos/docs/specs/skill-format-v1.md:30)；OpenClaw 文档也明确要求小写字母 + 连字符，见 [skill-format-oclaw-v1.md](/root/beebotos/docs/openclaw/skill-format-oclaw-v1.md:7)。当前仓库里也有很多 `okx-cex-market`、`crypto-trading-bot`、`hello-world` 这种名字。现在转换后会变成 `okx_cex_market`、`crypto_trading_bot`、`hello_world`，和文档/UI/用户认知不一致，还会造成 `foo-bar` 与 `foo_bar` 注册成同一个 ID 的碰撞风险。
+
+主要风险有三个：
+
+1. **现有测试和历史引用会断**
+   测试里已经期待 `hello-world` 被发现为 `hello_world`，见 [skill_react_integration.rs](/root/beebotos/crates/agents/tests/skill_react_integration.rs:79)。如果直接取消转换，这个断言要改。
+
+2. **会影响已保存的 active_skill、workflow、文档或用户配置**
+   例如历史里可能存了 `okx_cex_market` 或 `hello_world`。取消后注册表里只有 `okx-cex-market` / `hello-world`，`registry.get()` 是精确匹配，旧 ID 会查不到，见 [registry.rs](/root/beebotos/crates/agents/src/skills/registry.rs:188)。
+
+3. **部分启发式规则偏向下划线**
+   例如交易加权和风控里有 `place_` + `_order` 判断，见 [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:6890) 和 [approval.rs](/root/beebotos/crates/agents/src/security/approval.rs:116)。MCP 当前多是下划线，不一定马上炸，但如果以后本地 skill 用 `place-crypto-order`，这些规则可能漏判。
+
+我的建议：
+
+- **可以取消 `- -> _`，但要加兼容解析层。**
+- `sanitize_id()` 改为保留 `-`：允许 `c == '_' || c == '-'`。
+- `SkillRegistry::get()` 或上层 resolver 增加 fallback：先精确查，再尝试 `-`/`_` 互换查。
+- 注册时检测 `foo-bar` 和 `foo_bar` 这种规范化冲突，打 warning 或拒绝注册。
+- 更新测试：`hello-world` 应该成为 canonical ID，同时保留 `hello_world` 查询兼容测试。
+- 把 `place_..._order` 这类规则扩展为同时识别 `place-...-order`。
+
+所以一句话：**取消是方向正确的，尤其为了对齐 skill 规范和 marketplace 命名；但要作为兼容性改造做，不要只删那一行。**
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+可以取消 - -> _，但要加兼容解析层。
+sanitize_id() 改为保留 -：允许 c == '_' || c == '-'。 
+注意，原来skill进入注册中心时，有把"-"变换成"_",但是在查询或调用skill时，又把注册中心的skill名称中“_"变换回"-"，因此取消这个转换时，记得把注册中心名称中"_”不要再转换为"-"。   
+执行这个取消转换任务。
+
+已完成这个取消转换任务。
+
+改动要点：
+- [discovery.rs](/root/beebotos/crates/agents/src/skills/discovery.rs:413)：`sanitize_id()` 不再把 `-` 转成 `_`，现在保留 `-` 和 `_`。
+- [registry.rs](/root/beebotos/crates/agents/src/skills/registry.rs:146)：新增兼容解析层，查找时先精确匹配注册中心真实 ID，精确失败后才尝试 `-`/`_` 互换。
+- [registry.rs](/root/beebotos/crates/agents/src/skills/registry.rs:220)：`get()`、`get_skill_description()`、`record_usage()`、`enable()`、`disable()`、`unregister()`、lineage 相关方法都走兼容解析。
+- 关键点按你的要求处理了：如果注册中心里真实存在 `xxx_yyy`，查询 `xxx_yyy` 会优先命中它，不会把注册中心名称强行转成 `xxx-yyy`。
+- [skill_react_integration.rs](/root/beebotos/crates/agents/tests/skill_react_integration.rs:79)：`hello-world` 的 discovery 测试已改成新 canonical ID。
+- [skills_integration.rs](/root/beebotos/crates/agents/tests/skills_integration.rs:92)：新增测试覆盖 `-`/`_` 兼容与“精确匹配优先”。
+
+验证：
+- `cargo check -p beebotos-agents` 通过，只有既有 warning。
+- 针对性 `cargo test` 两次都在编译阶段被系统 `SIGKILL`，没有 Rust 编译错误输出，像是测试链接资源不足。
+- `rg` 确认 agents 相关源码/测试里不再有 `replace('-', '_')` 这类旧转换命中。
+
+另外，工作区里 `docs/quanttrade/qtrading-note.md` 本来有未处理改动和 whitespace 提示，我没有改它。
+
+
+

@@ -7401,7 +7401,7 @@ impl Agent {
             }
         }
 
-        // 🆕 FIX: If the LLM response is a skill trigger (e.g. "SKILL:hello_world"),
+        // 🆕 FIX: If the LLM response is a skill trigger (e.g. "SKILL:hello-world"),
         // look up the skill in the registry and execute it instead of returning raw
         // text.
         let trimmed = response.trim();
