@@ -1,0 +1,48 @@
+id: sales-data-monitor
+name: "Sales Data Monitor"
+description: "销售数据异常检测（定时拉取→阈值校验→邮件告警）"
+version: "1.1.0"
+author: "BeeBotOS"
+tags: ["sales", "monitoring", "alert"]
+triggers:
+  - type: cron
+    schedule: "0 */6 * * *"
+    timezone: "Asia/Shanghai"
+  - type: manual
+config:
+  timeout_sec: 300
+  continue_on_failure: false
+  notify_on_complete: true
+steps:
+  - id: fetch_sales
+    name: "Fetch Sales Data"
+    skill: data_analyst
+    params:
+      source: "production_db"
+      query: "SELECT date, region, amount FROM sales WHERE date = CURRENT_DATE - INTERVAL 1 DAY"
+      task: "fetch_data"
+    timeout_sec: 60
+    retries: 2
+
+  - id: check_threshold
+    name: "Check Threshold"
+    skill: data_analyst
+    depends_on:
+      - fetch_sales
+    params:
+      task: "anomaly_detection"
+      data: "{{steps.fetch_sales.output}}"
+      threshold: 0.5
+      metric: "amount"
+    timeout_sec: 120
+
+  - id: send_alert
+    name: "Send Alert"
+    skill: email_writer
+    depends_on:
+      - check_threshold
+    params:
+      to: ["ops@yourcompany.com"]
+      subject: "【销售数据异常】检测到异常区域"
+      content: "{{steps.check_threshold.output}}"
+    timeout_sec: 60

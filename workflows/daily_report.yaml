@@ -1,0 +1,48 @@
+id: daily-industry-report
+name: "Daily Industry Report"
+description: "每日行业动态报告生成（自动抓取新闻→摘要→邮件发送）"
+version: "1.0.0"
+author: "BeeBotOS"
+tags: ["daily", "report", "automation"]
+triggers:
+  - type: cron
+    schedule: "0 9 * * *"
+    timezone: "Asia/Shanghai"
+  - type: manual
+config:
+  timeout_sec: 600
+  continue_on_failure: false
+  notify_on_complete: true
+steps:
+  - id: fetch_news
+    name: "Fetch News"
+    skill: data_analyst
+    params:
+      query: "AI industry trends 2024"
+      max_results: 10
+      sources: ["techcrunch.com", "theverge.com"]
+    timeout_sec: 120
+    retries: 2
+
+  - id: generate_summary
+    name: "Generate Summary"
+    skill: python_developer
+    depends_on:
+      - fetch_news
+    params:
+      task: "generate_report"
+      template: "daily_report"
+      input: "{{steps.fetch_news.output}}"
+      date: "today"
+    timeout_sec: 300
+
+  - id: send_email
+    name: "Send Email"
+    skill: email_writer
+    depends_on:
+      - generate_summary
+    params:
+      to: ["team@yourcompany.com"]
+      subject: "【自动报告】AI行业动态摘要"
+      content: "{{steps.generate_summary.output}}"
+    timeout_sec: 60

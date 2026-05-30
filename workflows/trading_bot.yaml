@@ -1,0 +1,74 @@
+id: trading_bot
+name: "Automated Trading Bot"
+description: "Automated trading with risk management and compliance checks"
+version: "1.0.0"
+author: "BeeBotOS"
+tags: ["trading", "finance", "automation"]
+triggers:
+  - type: cron
+    schedule: "*/5 * * * *"
+    timezone: "UTC"
+  - type: event
+    source: "price_feed"
+    filter: "btc_usd_change > 0.02"
+config:
+  timeout_sec: 300
+  continue_on_failure: false
+  notify_on_complete: true
+steps:
+  - id: fetch_market_data
+    name: "Fetch Market Data"
+    skill: market_data_fetcher
+    params:
+      exchange: "binance"
+      symbols:
+        - "BTC/USDT"
+        - "ETH/USDT"
+      timeframe: "5m"
+    timeout_sec: 30
+    retries: 2
+
+  - id: analyze_signals
+    name: "Analyze Signals"
+    skill: strategy_analyzer
+    depends_on:
+      - fetch_market_data
+    params:
+      input: "{{steps.fetch_market_data.output}}"
+      strategies:
+        - trend_following
+        - mean_reversion
+    timeout_sec: 60
+
+  - id: assess_risk
+    name: "Assess Risk"
+    skill: risk_manager
+    depends_on:
+      - analyze_signals
+    params:
+      input: "{{steps.analyze_signals.output}}"
+      max_position_size: 0.1
+      max_drawdown: 0.05
+    timeout_sec: 30
+    condition: "{{steps.analyze_signals.output.has_signal}} == true"
+
+  - id: execute_trade
+    name: "Execute Trade"
+    skill: trade_executor
+    depends_on:
+      - assess_risk
+    params:
+      input: "{{steps.assess_risk.output}}"
+      exchange: "binance"
+      order_type: "limit"
+    timeout_sec: 60
+    condition: "{{steps.assess_risk.output.approved}} == true"
+
+  - id: log_trade
+    name: "Log Trade"
+    skill: trade_logger
+    depends_on:
+      - execute_trade
+    params:
+      input: "{{steps.execute_trade.output}}"
+    timeout_sec: 10

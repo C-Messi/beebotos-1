@@ -1,0 +1,68 @@
+id: data_processing_pipeline
+name: "Data Processing Pipeline"
+description: "Process and analyze data using specialized skills"
+version: "1.0.0"
+author: "BeeBotOS"
+tags: ["data", "pipeline", "analytics"]
+triggers:
+  - type: cron
+    schedule: "0 */6 * * *"
+    timezone: "UTC"
+  - type: webhook
+    path: "/ingest/data"
+    method: "POST"
+config:
+  timeout_sec: 1800
+  continue_on_failure: false
+steps:
+  - id: fetch_data
+    name: "Fetch Data"
+    skill: http_request
+    params:
+      url: "https://api.datasource.com/v1/data"
+      method: "GET"
+    timeout_sec: 300
+    retries: 3
+
+  - id: validate
+    name: "Validate Schema"
+    skill: data_validator
+    depends_on:
+      - fetch_data
+    params:
+      input: "{{steps.fetch_data.output}}"
+      schema: "schemas/data_v1.json"
+    timeout_sec: 120
+
+  - id: transform
+    name: "Transform Data"
+    skill: data_transformer
+    depends_on:
+      - validate
+    params:
+      input: "{{steps.validate.output}}"
+      operations:
+        - normalize
+        - aggregate
+    timeout_sec: 600
+
+  - id: analyze
+    name: "Analyze Trends"
+    skill: ml_analyzer
+    depends_on:
+      - transform
+    params:
+      input: "{{steps.transform.output}}"
+      model: "trend_predictor"
+    timeout_sec: 1800
+
+  - id: notify
+    name: "Send Notification"
+    skill: webhook_sender
+    depends_on:
+      - analyze
+    params:
+      url: "{{input.webhook_url}}"
+      payload:
+        summary: "{{steps.analyze.output}}"
+    timeout_sec: 60

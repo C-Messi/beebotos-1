@@ -1,0 +1,40 @@
+id: daily_news
+name: "Daily News Briefing"
+description: "Fetch top tech news and generate a summary briefing"
+version: "1.0.0"
+author: "BeeBotOS"
+tags: ["daily", "news", "automation"]
+triggers:
+  - type: manual
+config:
+  timeout_sec: 120
+  continue_on_failure: false
+steps:
+  - id: fetch_news
+    name: "Fetch News"
+    skill: rss_reader
+    params:
+      url: "https://news.ycombinator.com/rss"
+      limit: 10
+    timeout_sec: 30
+    retries: 2
+
+  - id: summarize
+    name: "Summarize"
+    skill: llm_summarizer
+    depends_on:
+      - fetch_news
+    params:
+      input: "{{steps.fetch_news.output}}"
+      style: "bullet_points"
+    timeout_sec: 60
+
+  - id: format_output
+    name: "Format Output"
+    skill: text_formatter
+    depends_on:
+      - summarize
+    params:
+      input: "{{steps.summarize.output}}"
+      format: "markdown"
+    timeout_sec: 10
