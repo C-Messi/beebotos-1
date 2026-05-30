@@ -13,8 +13,8 @@ use crate::api::{
     WorkflowInstanceSummary,
 };
 use crate::components::Modal;
-use crate::state::use_app_state;
 use crate::i18n::I18nContext;
+use crate::state::use_app_state;
 
 const POLL_INTERVAL_MS: u32 = 10_000;
 
@@ -482,6 +482,12 @@ fn WorkflowCard(
             <div class="workflow-meta">
                 <span class="workflow-steps">{format!("{} steps", wf_sig.get().steps_count)}</span>
                 <span class="workflow-triggers">{if trigger_types.is_empty() { i18n.get().t("workflows-no-triggers") } else { trigger_types }}</span>
+                <span
+                    class="workflow-source"
+                    title={move || wf_sig.get().source_path.unwrap_or_default()}
+                >
+                    {move || wf_sig.get().source_origin.unwrap_or_else(|| "memory".to_string())}
+                </span>
             </div>
             <div class="workflow-tags">
                 {wf_sig.get().tags.into_iter().map(|tag| {
@@ -1002,7 +1008,9 @@ fn ConfigWorkflowModal(
                 Err(e) => {
                     app_state.notify(
                         crate::state::notification::NotificationType::Error,
-                            &use_context::<I18nContext>().expect("i18n context not found").t("workflows-load-failed"),
+                        &use_context::<I18nContext>()
+                            .expect("i18n context not found")
+                            .t("workflows-load-failed"),
                         format!("Failed to load workflow source: {}", e),
                     );
                 }

@@ -3,6 +3,7 @@
 //! REST API for declarative workflow management.
 //! Provides CRUD for WorkflowDefinition and manual execution triggers.
 
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -18,6 +19,207 @@ use crate::AppState;
 // ---------------------------------------------------------------------------
 // Security helpers
 // ---------------------------------------------------------------------------
+
+const WORKFLOW_PROJECT_DIR: &str = "workflows";
+const WORKFLOW_LEGACY_DIR: &str = "data/workflows";
+const WORKFLOW_LOCAL_DIR: &str = "data/workflows/local";
+
+#[derive(Debug, Clone)]
+struct WorkflowSourceLocation {
+    path: PathBuf,
+    origin: &'static str,
+}
+
+/// Workflow directories in load order. Later directories override earlier
+/// definitions with the same workflow ID.
+pub fn workflow_load_dirs() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from(WORKFLOW_PROJECT_DIR),
+        PathBuf::from(WORKFLOW_LEGACY_DIR),
+        PathBuf::from(WORKFLOW_LOCAL_DIR),
+    ]
+}
+
+/// Workflow directories in active-source order. This mirrors the load order's
+/// override semantics: local wins over legacy, legacy wins over project.
+fn workflow_source_dirs() -> Vec<(&'static str, PathBuf)> {
+    vec![
+        ("local", PathBuf::from(WORKFLOW_LOCAL_DIR)),
+        ("legacy", PathBuf::from(WORKFLOW_LEGACY_DIR)),
+        ("project", PathBuf::from(WORKFLOW_PROJECT_DIR)),
+    ]
+}
+
+fn default_workflow_write_dir() -> PathBuf {
+    PathBuf::from(WORKFLOW_PROJECT_DIR)
+}
+
+fn workflow_file_candidates(dir: &FsPath, id: &str) -> Vec<PathBuf> {
+    ["yaml", "yml", "json"]
+        .into_iter()
+        .map(|ext| dir.join(format!("{}.{}", id, ext)))
+        .collect()
+}
+
+fn is_workflow_file(path: &FsPath) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("yaml") | Some("yml") | Some("json")
+    )
+}
+
+fn parse_workflow_id_from_content(
+    content: &str,
+    ext: Option<&str>,
+    path: &FsPath,
+) -> Option<String> {
+    let parsed: Option<beebotos_agents::workflow::WorkflowDefinition> = if ext == Some("json") {
+        serde_json::from_str(content).ok()
+    } else {
+        serde_yaml::from_str(content).ok()
+    };
+
+    parsed.map(|def| {
+        if def.id.is_empty() {
+            path.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        } else {
+            def.id
+        }
+    })
+}
+
+async fn find_workflow_source(id: &str) -> Option<WorkflowSourceLocation> {
+    for (origin, dir) in workflow_source_dirs() {
+        for path in workflow_file_candidates(&dir, id) {
+            if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                return Some(WorkflowSourceLocation { path, origin });
+            }
+        }
+
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if !is_workflow_file(&path) {
+                continue;
+            }
+            let Ok(content) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            let parsed_id = parse_workflow_id_from_content(
+                &content,
+                path.extension().and_then(|e| e.to_str()),
+                &path,
+            );
+            if parsed_id.as_deref() == Some(id) {
+                return Some(WorkflowSourceLocation { path, origin });
+            }
+        }
+    }
+
+    None
+}
+
+fn find_workflow_source_sync(id: &str) -> Option<WorkflowSourceLocation> {
+    for (origin, dir) in workflow_source_dirs() {
+        for path in workflow_file_candidates(&dir, id) {
+            if path.exists() {
+                return Some(WorkflowSourceLocation { path, origin });
+            }
+        }
+
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !is_workflow_file(&path) {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let parsed_id = parse_workflow_id_from_content(
+                &content,
+                path.extension().and_then(|e| e.to_str()),
+                &path,
+            );
+            if parsed_id.as_deref() == Some(id) {
+                return Some(WorkflowSourceLocation { path, origin });
+            }
+        }
+    }
+
+    None
+}
+
+fn workflow_write_path(id: &str, source: Option<&WorkflowSourceLocation>) -> PathBuf {
+    if let Some(source) = source {
+        if matches!(
+            source.path.extension().and_then(|e| e.to_str()),
+            Some("yaml") | Some("yml")
+        ) {
+            return source.path.clone();
+        }
+
+        if let Some(parent) = source.path.parent() {
+            return parent.join(format!("{}.yaml", id));
+        }
+    }
+
+    default_workflow_write_dir().join(format!("{}.yaml", id))
+}
+
+async fn remove_workflow_source_files(id: &str) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+
+    for (_, dir) in workflow_source_dirs() {
+        for path in workflow_file_candidates(&dir, id) {
+            if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                match tokio::fs::remove_file(&path).await {
+                    Ok(_) => removed.push(path),
+                    Err(e) => warn!("Failed to remove workflow file {:?}: {}", path, e),
+                }
+            }
+        }
+
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if !is_workflow_file(&path) {
+                continue;
+            }
+            let Ok(content) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            let parsed_id = parse_workflow_id_from_content(
+                &content,
+                path.extension().and_then(|e| e.to_str()),
+                &path,
+            );
+            if parsed_id.as_deref() == Some(id) {
+                match tokio::fs::remove_file(&path).await {
+                    Ok(_) => removed.push(path),
+                    Err(e) => warn!("Failed to remove workflow file {:?}: {}", path, e),
+                }
+            }
+        }
+    }
+
+    removed
+}
 
 /// Validate that a workflow ID is safe to use as a filesystem name.
 /// Rejects empty IDs, path traversal sequences, and path separators.
@@ -89,6 +291,10 @@ pub struct InstallWorkflowResponse {
 #[derive(Debug, Serialize)]
 pub struct WorkflowSourceResponse {
     pub yaml: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_origin: Option<String>,
 }
 
 /// Workflow response
@@ -103,6 +309,12 @@ pub struct WorkflowResponse {
     pub steps_count: usize,
     pub triggers: Vec<WorkflowTriggerResponse>,
     pub steps: Vec<WorkflowStepResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_origin: Option<String>,
+    #[serde(default)]
+    pub editable: bool,
 }
 
 /// Workflow trigger summary for API response
@@ -471,11 +683,13 @@ pub async fn create_workflow(
     }
 
     // Persist to disk BEFORE updating in-memory state
-    let workflow_dir = std::path::PathBuf::from("data/workflows");
-    if let Err(e) = tokio::fs::create_dir_all(&workflow_dir).await {
-        warn!("Failed to create workflow directory: {}", e);
+    let source = find_workflow_source(&def.id).await;
+    let path = workflow_write_path(&def.id, source.as_ref());
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            warn!("Failed to create workflow directory: {}", e);
+        }
     }
-    let path = workflow_dir.join(format!("{}.yaml", def.id));
     if let Err(e) = tokio::fs::write(&path, &yaml_content).await {
         return Err(GatewayError::Internal {
             message: format!("Failed to persist workflow {}: {}", def.id, e),
@@ -553,49 +767,19 @@ pub async fn get_workflow_source(
 ) -> Result<Json<WorkflowSourceResponse>, GatewayError> {
     validate_workflow_id(&id)?;
 
-    // Try root data/workflows/ first
-    let root_yaml = std::path::PathBuf::from("data/workflows").join(format!("{}.yaml", &id));
-    let root_yml = std::path::PathBuf::from("data/workflows").join(format!("{}.yml", &id));
-    let root_json = std::path::PathBuf::from("data/workflows").join(format!("{}.json", &id));
-
-    let paths = vec![root_yaml, root_yml, root_json];
-    for path in &paths {
-        if let Ok(true) = tokio::fs::try_exists(path).await {
-            let content =
-                tokio::fs::read_to_string(path)
-                    .await
-                    .map_err(|e| GatewayError::Internal {
-                        message: format!("Failed to read workflow source: {}", e),
-                        correlation_id: uuid::Uuid::new_v4().to_string(),
-                    })?;
-            return Ok(Json(WorkflowSourceResponse { yaml: content }));
-        }
-    }
-
-    // Try data/workflows/local/
-    let local_dir = std::path::PathBuf::from("data/workflows/local");
-    if let Ok(true) = tokio::fs::try_exists(&local_dir).await {
-        if let Ok(mut entries) = tokio::fs::read_dir(&local_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                // Only consider yaml/yml/json files
-                let ext = path.extension().and_then(|e| e.to_str());
-                if !matches!(ext, Some("yaml") | Some("yml") | Some("json")) {
-                    continue;
-                }
-                if let Some(stem) = path.file_stem() {
-                    if stem.to_string_lossy() == id {
-                        let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
-                            GatewayError::Internal {
-                                message: format!("Failed to read workflow source: {}", e),
-                                correlation_id: uuid::Uuid::new_v4().to_string(),
-                            }
-                        })?;
-                        return Ok(Json(WorkflowSourceResponse { yaml: content }));
-                    }
-                }
-            }
-        }
+    if let Some(source) = find_workflow_source(&id).await {
+        let content =
+            tokio::fs::read_to_string(&source.path)
+                .await
+                .map_err(|e| GatewayError::Internal {
+                    message: format!("Failed to read workflow source: {}", e),
+                    correlation_id: uuid::Uuid::new_v4().to_string(),
+                })?;
+        return Ok(Json(WorkflowSourceResponse {
+            yaml: content,
+            source_path: Some(source.path.to_string_lossy().to_string()),
+            source_origin: Some(source.origin.to_string()),
+        }));
     }
 
     Err(GatewayError::not_found("Workflow source", &id))
@@ -650,12 +834,13 @@ pub async fn update_workflow(
         );
     }
 
-    // Persist to disk (overwrite)
-    let workflow_dir = std::path::PathBuf::from("data/workflows");
-    if let Err(e) = tokio::fs::create_dir_all(&workflow_dir).await {
-        warn!("Failed to create workflow directory: {}", e);
+    let source = find_workflow_source(&id).await;
+    let path = workflow_write_path(&id, source.as_ref());
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            warn!("Failed to create workflow directory: {}", e);
+        }
     }
-    let path = workflow_dir.join(format!("{}.yaml", id));
     if let Err(e) = tokio::fs::write(&path, &req.yaml).await {
         warn!("Failed to persist updated workflow {}: {}", id, e);
     }
@@ -700,36 +885,12 @@ pub async fn delete_workflow(
         reg.remove(&id);
     }
 
-    // Remove from disk (root dir)
-    let root_yaml = std::path::PathBuf::from("data/workflows").join(format!("{}.yaml", &id));
-    if let Ok(true) = tokio::fs::try_exists(&root_yaml).await {
-        if let Err(e) = tokio::fs::remove_file(&root_yaml).await {
-            warn!("Failed to remove workflow file {:?}: {}", root_yaml, e);
-        }
-    }
-    let root_json = std::path::PathBuf::from("data/workflows").join(format!("{}.json", &id));
-    if let Ok(true) = tokio::fs::try_exists(&root_json).await {
-        if let Err(e) = tokio::fs::remove_file(&root_json).await {
-            warn!("Failed to remove workflow file {:?}: {}", root_json, e);
-        }
-    }
-
-    // Remove from local dir
-    let local_dir = std::path::PathBuf::from("data/workflows/local");
-    if let Ok(true) = tokio::fs::try_exists(&local_dir).await {
-        if let Ok(mut entries) = tokio::fs::read_dir(&local_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if let Some(stem) = path.file_stem() {
-                    if stem.to_string_lossy() == id {
-                        if let Err(e) = tokio::fs::remove_file(&path).await {
-                            warn!("Failed to remove local workflow file {:?}: {}", path, e);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
+    let removed = remove_workflow_source_files(&id).await;
+    if removed.is_empty() {
+        warn!(
+            "Workflow {} removed from registry but no source files were found",
+            id
+        );
     }
 
     info!("Workflow deleted: {}", id);
@@ -808,12 +969,12 @@ pub async fn install_workflow(
     }
 
     // Ensure local directory exists
-    let local_dir = std::path::PathBuf::from("data/workflows/local");
+    let local_dir = PathBuf::from(WORKFLOW_LOCAL_DIR);
     if let Err(e) = tokio::fs::create_dir_all(&local_dir).await {
         warn!("Failed to create local workflow directory: {}", e);
     }
 
-    // Copy file to data/workflows/local/
+    // Copy file to the local workflow directory
     let filename = format!("{}.{}", def.id, ext);
     let installed_path = local_dir.join(&filename);
     if let Err(e) = tokio::fs::write(&installed_path, &content).await {
@@ -902,36 +1063,12 @@ pub async fn uninstall_workflow(
         reg.remove(&id);
     }
 
-    // Delete from root data/workflows/
-    let root_yaml = std::path::PathBuf::from("data/workflows").join(format!("{}.yaml", &id));
-    if let Ok(true) = tokio::fs::try_exists(&root_yaml).await {
-        if let Err(e) = tokio::fs::remove_file(&root_yaml).await {
-            warn!("Failed to remove workflow file {:?}: {}", root_yaml, e);
-        }
-    }
-    let root_json = std::path::PathBuf::from("data/workflows").join(format!("{}.json", &id));
-    if let Ok(true) = tokio::fs::try_exists(&root_json).await {
-        if let Err(e) = tokio::fs::remove_file(&root_json).await {
-            warn!("Failed to remove workflow file {:?}: {}", root_json, e);
-        }
-    }
-
-    // Delete from data/workflows/local/
-    let local_dir = std::path::PathBuf::from("data/workflows/local");
-    if let Ok(true) = tokio::fs::try_exists(&local_dir).await {
-        if let Ok(mut entries) = tokio::fs::read_dir(&local_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if let Some(stem) = path.file_stem() {
-                    if stem.to_string_lossy() == id {
-                        if let Err(e) = tokio::fs::remove_file(&path).await {
-                            warn!("Failed to remove local workflow file {:?}: {}", path, e);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
+    let removed = remove_workflow_source_files(&id).await;
+    if removed.is_empty() {
+        warn!(
+            "Workflow {} uninstalled from registry but no source files were found",
+            id
+        );
     }
 
     info!("Workflow uninstalled: {}", id);
@@ -1561,6 +1698,12 @@ pub async fn recent_instances(
 // ---------------------------------------------------------------------------
 
 fn to_workflow_response(def: &beebotos_agents::workflow::WorkflowDefinition) -> WorkflowResponse {
+    let source = find_workflow_source_sync(&def.id);
+    let source_path = source
+        .as_ref()
+        .map(|s| s.path.to_string_lossy().to_string());
+    let source_origin = source.as_ref().map(|s| s.origin.to_string());
+
     let triggers: Vec<WorkflowTriggerResponse> = def
         .triggers
         .iter()
@@ -1629,5 +1772,8 @@ fn to_workflow_response(def: &beebotos_agents::workflow::WorkflowDefinition) -> 
         steps_count: def.steps.len(),
         triggers,
         steps,
+        source_path,
+        source_origin,
+        editable: true,
     }
 }

@@ -3084,10 +3084,18 @@ body {
 
 .workflow-meta {
     display: flex;
+    flex-wrap: wrap;
     gap: 1rem;
     font-size: 0.75rem;
     color: var(--text-muted);
     margin-bottom: 0.5rem;
+}
+
+.workflow-source {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 0.05rem 0.35rem;
+    text-transform: capitalize;
 }
 
 /* Modal form styles */

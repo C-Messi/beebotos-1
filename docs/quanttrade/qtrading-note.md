@@ -1771,3 +1771,55 @@ cargo check -p beebotos-agents
 原来的工作流目录/root/beebotos/data/workflows ，现在新增 /root/beebotos/workflows 工作流目录；在系统管理上和 beebotos-web模块的工作流 页面上的内容，检查分析一下如何兼容和功能完整性；
 
 
+检查下来：当前兼容还不完整。新增 `/root/beebotos/workflows` 目录里的 workflow **不会被系统自动加载到注册中心**，因此 web 工作流页面、执行、cron/webhook 触发都看不到这些新目录文件。
+
+**当前问题**
+- 启动加载只读 `data/workflows` 和 `data/workflows/local`：见 [main.rs](/root/beebotos/apps/gateway/src/main.rs:808)。
+- `get_source` 只查 `data/workflows` / `data/workflows/local`，所以即使未来加载了 `/workflows`，web 页面“配置/调度”也可能读不到源码：见 [workflows.rs](/root/beebotos/apps/gateway/src/handlers/http/workflows.rs:557)。
+- `create/update/delete/uninstall` 都硬编码写删 `data/workflows`，不会处理 `/workflows`：见 [workflows.rs](/root/beebotos/apps/gateway/src/handlers/http/workflows.rs:474)、[workflows.rs](/root/beebotos/apps/gateway/src/handlers/http/workflows.rs:654)、[workflows.rs](/root/beebotos/apps/gateway/src/handlers/http/workflows.rs:704)。
+- 注册中心本身可以多次 `load_from_dir`，所以技术上支持多目录，但没有记录 workflow 来源路径；重复 ID 时后加载覆盖前加载：见 [mod.rs](/root/beebotos/crates/agents/src/workflow/mod.rs:64)。
+- web 端 `WorkflowInfo` / `WorkflowSourceResponse` 没有 `source_path/source_origin`，页面无法展示来源目录，也无法知道编辑/删除应该操作哪个文件：见 [services.rs](/root/beebotos/apps/web/src/api/services.rs:364)。
+
+**建议兼容策略**
+- 把 `/root/beebotos/workflows` 作为新的项目级目录加入加载。
+- 保留旧目录 `/root/beebotos/data/workflows`，保证老数据不丢。
+- 保留 `/root/beebotos/data/workflows/local`，继续作为 web 安装/本地覆盖目录。
+- 加载优先级建议：`workflows` -> `data/workflows` -> `data/workflows/local`。这样旧目录和本地安装可以覆盖新目录同 ID 定义，兼容性最好。
+- 源码读取优先级要反过来：`data/workflows/local` -> `data/workflows` -> `workflows`，确保读到的是实际生效版本。
+- 新增统一 helper，例如 `workflow_dirs()`、`find_workflow_source(id)`、`workflow_write_dir()`，不要继续散落硬编码路径。
+- web API 增加可选字段 `source_path` / `source_origin` / `editable`，工作流页面显示来源标签，编辑/删除时走真实来源文件。
+- `update` 应写回当前生效来源文件；如果没有来源，则写入默认写目录。
+- `delete/uninstall` 不建议盲删所有目录同 ID 文件，应按当前生效来源删除，或明确提供“删除所有副本”的管理操作。
+
+**现有目录状态**
+我扫到当前磁盘上 `/root/beebotos/workflows` 有 8 个 yaml，例如 `content_factory.yaml`、`manga_pipeline.yaml`、`xauusd_hourly.yaml`；`/root/beebotos/data/workflows` 里目前扫到 `daily_json_report.json`。按当前代码，前者不会进入工作流页面，后者会。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+实现 新增 /root/beebotos/workflows 工作流目录的完整功能
+
+已实现 `/root/beebotos/workflows` 作为完整工作流目录，并保持旧目录兼容。
+
+主要改动：
+
+- Gateway 启动加载工作流目录改为三层：
+  `workflows` -> `data/workflows` -> `data/workflows/local`
+  后加载覆盖前加载，所以本地安装/旧目录仍可覆盖项目目录。见 [main.rs](/root/beebotos/apps/gateway/src/main.rs:805)。
+- 后端新增统一的 workflow 源文件查找/写回/删除逻辑，支持 `.yaml/.yml/.json`，也支持“文件名和 workflow id 不一致”的旧 JSON 文件。见 [workflows.rs](/root/beebotos/apps/gateway/src/handlers/http/workflows.rs:20)。
+- `get_source`、`create`、`update`、`delete`、`uninstall` 都已兼容新目录：
+  - 新建默认写入 `workflows`
+  - 更新写回当前生效来源
+  - 安装仍写入 `data/workflows/local`
+  - 删除/卸载会清理三个目录中同 ID 的定义，避免重启后又被加载回来
+- Web API 增加 `source_path/source_origin/editable` 字段，来源信息可向前兼容。见 [services.rs](/root/beebotos/apps/web/src/api/services.rs:364)。
+- Web 工作流卡片现在显示来源标签，比如 `project` / `legacy` / `local`。见 [workflows.rs](/root/beebotos/apps/web/src/pages/workflows.rs:482) 和 [main.css](/root/beebotos/apps/web/style/main.css:3084)。
+
+验证已通过：
+
+```bash
+cargo check -p beebotos-gateway -p beebotos-web -p beebotos-agents
+git diff --check
+```
+
+只有项目里已有 warning。另：`docs/quanttrade/qtrading-note.md` 仍是工作区已有改动，我没有改它。
+
+

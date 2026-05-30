@@ -371,6 +371,12 @@ pub struct WorkflowInfo {
     pub steps_count: usize,
     pub triggers: Vec<WorkflowTriggerInfo>,
     pub steps: Vec<WorkflowStepInfo>,
+    #[serde(default)]
+    pub source_path: Option<String>,
+    #[serde(default)]
+    pub source_origin: Option<String>,
+    #[serde(default)]
+    pub editable: bool,
 }
 
 /// Workflow instance summary
@@ -434,6 +440,10 @@ pub struct InstallWorkflowResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowSourceResponse {
     pub yaml: String,
+    #[serde(default)]
+    pub source_path: Option<String>,
+    #[serde(default)]
+    pub source_origin: Option<String>,
 }
 
 /// Workflow API Service
