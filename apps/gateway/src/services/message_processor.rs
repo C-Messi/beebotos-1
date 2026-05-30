@@ -2204,6 +2204,21 @@ Rules:
                         step_state.status,
                         step_state.duration_secs()
                     ));
+                    if let Some(ref output) = step_state.output {
+                        let output_str = match output {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Null => String::new(),
+                            _ => serde_json::to_string_pretty(output).unwrap_or_default(),
+                        };
+                        if !output_str.is_empty() && output_str.len() < 5000 {
+                            result.push_str(&format!("  - Output: {}\n", output_str));
+                        } else if output_str.len() >= 5000 {
+                            result.push_str(&format!(
+                                "  - Output: {}... (truncated)\n",
+                                &output_str[..500]
+                            ));
+                        }
+                    }
                     if let Some(ref err) = step_state.error {
                         result.push_str(&format!("  - Error: {}\n", err));
                     }
@@ -2383,6 +2398,21 @@ Rules:
                         step_state.status,
                         step_state.duration_secs()
                     ));
+                    if let Some(ref output) = step_state.output {
+                        let output_str = match output {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Null => String::new(),
+                            _ => serde_json::to_string_pretty(output).unwrap_or_default(),
+                        };
+                        if !output_str.is_empty() && output_str.len() < 5000 {
+                            result.push_str(&format!("  - Output: {}\n", output_str));
+                        } else if output_str.len() >= 5000 {
+                            result.push_str(&format!(
+                                "  - Output: {}... (truncated)\n",
+                                &output_str[..500]
+                            ));
+                        }
+                    }
                     if let Some(ref err) = step_state.error {
                         result.push_str(&format!("  - Error: {}\n", err));
                     }

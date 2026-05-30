@@ -1823,3 +1823,53 @@ git diff --check
 只有项目里已有 warning。另：`docs/quanttrade/qtrading-note.md` 仍是工作区已有改动，我没有改它。
 
 
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+编译成功 ✅，没有引入任何新错误或警告。
+现在让我验证修复前后的对比，确保改对了：
+￼
+✅ Bug 修复完成
+🔍 Bug 根因
+try_execute_workflow_command 和 try_match_workflow_by_content 两个函数在构建工作流执行结果报告时，只输出了步骤状态、耗时和错误信息，但完全没有包含步骤的输出（step_state.output）。
+StepState 结构体中有 output: Option<serde_json::Value> 字段，里面保存了每个步骤执行后生成的实际结果（例如早报的文本内容），但代码从未读取和展示它。
+🛠️ 修复内容
+在循环遍历 instance.step_states 时，为 completed 的步骤增加了输出展示：
+RUST
+📋 复制
+if let Some(ref output) = step_state.output {
+    let output_str = match output {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        _ => serde_json::to_string_pretty(output).unwrap_or_default(),
+    };
+    if !output_str.is_empty() && output_str.len() < 5000 {
+        result.push_str(&format!("  - Output: {}\n", output_str));
+    } else if output_str.len() >= 5000 {
+        result.push_str(&format!(
+            "  - Output: {}... (truncated)\n",
+            &output_str[..500]
+        ));
+    }
+}
+📋 修复后的效果
+以前工作流跑完只显示：
+TEXT
+📋 复制
+✅ Workflow 'daily_news' completed with status: completed
+
+- generate_news: completed (12s)
+现在会显示：
+TEXT
+📋 复制
+✅ Workflow 'daily_news' completed with status: completed
+
+- generate_news: completed (12s)
+  - Output: 📰 **今日要闻** | 2026-05-31
+    1. 美联储维持利率不变...
+    2. 比特币突破新高...
+    ...
+修复了两个函数（try_execute_workflow_command 和 try_match_workflow_by_content），涉及的两处代码均已更新并编译通过
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
