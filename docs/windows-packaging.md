@@ -64,7 +64,7 @@ BEEBOTOS_PACKAGE_TARGET=x86_64-pc-windows-gnu pwsh ./beebotos-dev.ps1 pack all
 - `web-server.exe`
 - `beehub.exe`
 - Web 前端静态文件
-- 配置、数据库迁移、内置 skills 和运行脚本
+- 配置、数据库迁移、内置 skills、内置 workflows 和运行脚本
 
 ## 发布目录必须包含的内容
 
@@ -87,6 +87,10 @@ beebotos/
 │   ├── coding/
 │   ├── productivity/
 │   └── ...
+├── workflows/
+│   ├── content_factory.yaml
+│   ├── xauusd_hourly.yaml
+│   └── ...
 ├── index.html
 ├── beebotos-web-*.js
 ├── beebotos-web-*_bg.wasm
@@ -105,6 +109,7 @@ beebotos/
 | `config/` | Gateway 和 Web Server 配置 |
 | `migrations_sqlite/` | SQLite 数据库迁移，缺失会导致数据库初始化失败 |
 | `skills/` | 内置默认 Markdown skills，启动时会加载到 SkillRegistry |
+| `workflows/` | 内置项目级工作流定义，启动时会加载到 WorkflowRegistry，并显示在 Web 工作流页面 |
 | `index.html`、`*.js`、`*.wasm`、`style/`、`public/` | Web 前端静态资源 |
 
 `config/web-server.toml` 在打包时会被改成：
@@ -144,6 +149,31 @@ $env:BEEBOTOS_SKILLS_DIR = "D:\BeeBotOSData\skills"
 
 - 市场 skill 使用唯一 ID。
 - 后续如需支持用户安装 skill 覆盖内置 skill，应保证启动顺序为先加载内置 `skills/`，再加载 `data/skills/`。
+
+## 内置 workflows 和用户安装 workflows
+
+内置项目级 workflows 位于发布目录：
+
+```text
+{app}/workflows
+```
+
+Gateway 启动时会通过 `WorkflowRegistry` 加载这些内置 workflows，并在 Web 工作流页面展示。
+
+兼容旧版本的工作流目录仍然保留：
+
+```text
+{app}/data/workflows
+{app}/data/workflows/local
+```
+
+推荐加载优先级为：
+
+```text
+workflows -> data/workflows -> data/workflows/local
+```
+
+也就是说，如果多个目录中存在相同 workflow ID，后加载目录会覆盖前加载目录。Web 页面安装的 workflow 默认进入 `data/workflows/local`，可以覆盖内置 workflow。
 
 ## Inno Setup 使用方式
 
@@ -194,7 +224,7 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 
 ```bash
 find dist/beebotos -maxdepth 2 -type f | sort | head -80
-unzip -l dist/beebotos-*.zip 'beebotos/*.exe' 'beebotos/skills/*' | head -80
+unzip -l dist/beebotos-*.zip 'beebotos/*.exe' 'beebotos/skills/*' 'beebotos/workflows/*' | head -100
 ```
 
 在 Windows PowerShell 中可用：
@@ -203,12 +233,14 @@ unzip -l dist/beebotos-*.zip 'beebotos/*.exe' 'beebotos/skills/*' | head -80
 Get-ChildItem -Recurse dist\beebotos | Select-Object FullName
 Expand-Archive dist\beebotos-*.zip -DestinationPath dist\check -Force
 Get-ChildItem -Recurse dist\check\beebotos\skills | Select-Object FullName
+Get-ChildItem -Recurse dist\check\beebotos\workflows | Select-Object FullName
 ```
 
 必须确认：
 
 - `dist/beebotos` 下有三个 `.exe`。
 - `dist/beebotos/skills` 存在并包含默认 skill 文件。
+- `dist/beebotos/workflows` 存在并包含默认 workflow 文件。
 - `dist/beebotos/migrations_sqlite` 存在。
 - `dist/beebotos/config/web-server.toml` 中 `path = "."`。
 - zip 解压后顶层目录是 `beebotos/`，且内容与 `dist/beebotos` 一致。
@@ -251,6 +283,21 @@ unzip -l dist/beebotos-*.zip 'beebotos/skills/*' | head
 ```
 
 如果没有 `skills/`，说明打包脚本或手工复制流程不完整。应重新运行：
+
+```powershell
+.\beebotos-dev.ps1 pack all
+```
+
+### 缺少内置 workflows
+
+检查发布目录和 zip：
+
+```bash
+find dist/beebotos/workflows -type f | wc -l
+unzip -l dist/beebotos-*.zip 'beebotos/workflows/*' | head
+```
+
+如果没有 `workflows/`，说明打包脚本或手工复制流程不完整。应重新运行：
 
 ```powershell
 .\beebotos-dev.ps1 pack all

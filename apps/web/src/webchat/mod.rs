@@ -66,15 +66,25 @@ impl ToolCallEvent {
             .and_then(|v| v.as_str())
             .unwrap_or("started")
             .to_string();
+        let id = value
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("tool-{}-{}-{}", round, tool_name, uuid::Uuid::new_v4()));
+        let timestamp = value
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
         Self {
-            id: format!("tool-{}-{}-{}", round, tool_name, uuid::Uuid::new_v4()),
+            id,
             round,
             tool_name,
             reasoning,
             arguments,
             status,
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp,
         }
     }
 

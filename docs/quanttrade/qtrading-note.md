@@ -1873,3 +1873,36 @@ TEXT
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+在beebotos项目中，在webchat聊天问答中，正常问答OK，但是执行工作流的问答，显示有2个问题：
+1、输入工作流命令：/workflow xauusd_hourly ，按发送命令后，这个命令提示词显示一会，thinking。。。后就消失了，如/root/beebotos/docs/quanttrade/workdlow-error1.PNG 截图所示；工作流的工作报告回复出来了，工作流操作指令也没有显示出来，如截图：/root/beebotos/docs/quanttrade/workflow-nodisplay1.PNG；
+2、发出工作流指令后，工作流在后台工作，但是没有过程命令显示出来，参考如截图：/root/beebotos/docs/quanttrade/process1.PNG，没有类似这个过程显示；  
+执行工作流的操作指令后，出现上面2个问题，分析原因修复。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+后端的关键差异已经出来了：普通问答会持久化用户消息，/workflow 分支只把用户命令写进内存 session，没有保存到 chat_messages，所以前端短轮询/重连刷新后会把本地临时用户消息覆盖掉。过程显示也没有 reporter 接到 WebChat 的 chat_tool_call 事件，我会加一个轻量的 WebChat workflow progress reporter，并让最终 assistant 消息带上同一组步骤元数据。
+
+我准备改后端为主：补保存 workflow 触发的 user 消息；同时加一个 WebChat 专用 progress reporter，把每个 workflow step 完成事件发成现有前端能展示的 chat_tool_call。最终工作流回复也会把这些步骤写进 metadata，这样刷新页面后过程卡片也不会丢。
+
+还有一个小坑：最终 WebSocket 回复目前用的是临时 UUID，不是数据库里保存的 assistant 消息 ID；这不是这次消失的主因，但会让前端再轮询时发生一次替换。我会顺手把 workflow 分支的发送改成带数据库消息 ID 和 metadata 的专用发送，减少闪动和重复判断。
+
+
+我已经加了 reporter 结构，下一步会把 workflow 执行函数的返回值从纯文本扩展为“文本 + 步骤事件”，并在两个入口（普通 handle 和 AgentRuntime handle）都保存 user 命令。这样不会只修一条路径，避免以后从另一个运行通道进来又复现。
+
+我还会做一个前端小修：以前 ToolCallEvent::from_ws_event 每次都会重新生成随机 id，所以同一个 workflow 步骤从 WebSocket 和刷新 metadata 进来会变成不同 key。后端现在会给 workflow 步骤稳定 id，前端也会优先使用它，这样过程卡片不会闪成重复项。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+已定位并修复两个问题。
+
+原因是 `/workflow xauusd_hourly` 走了特殊 workflow 分支：它只把用户命令写进内存 session，没有持久化到 `chat_messages`。前端发送后会先本地显示用户命令，但后续 WebSocket/短轮询刷新用后端消息覆盖列表，于是命令就“thinking 后消失”了。
+
+我改了：
+
+- [message_processor.rs](/root/beebotos/apps/gateway/src/services/message_processor.rs:252)：workflow 命令现在会持久化 user 消息，所以 `/workflow xauusd_hourly` 会稳定显示在聊天记录里。
+- [message_processor.rs](/root/beebotos/apps/gateway/src/services/message_processor.rs:29)：新增 WebChat workflow progress reporter，把 workflow step 完成事件发成现有前端可显示的 `chat_tool_call` 过程卡片。
+- [message_processor.rs](/root/beebotos/apps/gateway/src/services/message_processor.rs:279)：最终 workflow 回复会带上同一组 step/tool metadata，刷新页面后过程记录也不会丢。
+- [mod.rs](/root/beebotos/apps/web/src/webchat/mod.rs:69)：前端优先使用后端传来的稳定 tool-call id/timestamp，避免过程卡片刷新后重复或闪动。
+
+验证：`cargo check -p beebotos-gateway -p beebotos-web` 通过。只有项目里已有的 warning。  
+注意：工作区里原本还有你改过的 `docs/quanttrade/qtrading-note.md`、`docs/windows-packaging.md` 和三张截图，我没有动它们。
+
+

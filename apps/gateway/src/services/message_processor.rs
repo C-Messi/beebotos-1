@@ -2,8 +2,8 @@
 //!
 //! 集成消息去重、会话管理、多模态处理、Memory 协同和持久化
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use beebotos_agents::communication::channel::session_manager::{SessionManager, SessionMessage};
 use beebotos_agents::communication::channel::ChannelEvent;
@@ -25,6 +25,156 @@ use crate::services::agent_resolver::AgentResolver;
 use crate::services::llm_service::LlmService;
 use crate::services::react_trace_ws::ToolCallTraceStore;
 use crate::services::webchat_service::WebchatService;
+
+struct WebChatWorkflowProgressReporter {
+    channel_registry: Arc<ChannelRegistry>,
+    channel_id: String,
+    workflow_id: String,
+    emitted_steps: Mutex<HashSet<String>>,
+}
+
+impl WebChatWorkflowProgressReporter {
+    fn new(
+        channel_registry: Arc<ChannelRegistry>,
+        channel_id: impl Into<String>,
+        workflow_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            channel_registry,
+            channel_id: channel_id.into(),
+            workflow_id: workflow_id.into(),
+            emitted_steps: Mutex::new(HashSet::new()),
+        }
+    }
+
+    async fn send_event(&self, event: serde_json::Value) {
+        let Some(channel) = self
+            .channel_registry
+            .get_channel_by_platform(PlatformType::WebChat)
+            .await
+        else {
+            warn!("WebChat workflow progress skipped: channel unavailable");
+            return;
+        };
+
+        let guard = channel.read().await;
+        let Some(webchat) = guard
+            .as_any()
+            .downcast_ref::<beebotos_agents::communication::channel::WebChatChannel>()
+        else {
+            warn!("WebChat workflow progress skipped: channel type mismatch");
+            return;
+        };
+
+        if let Err(e) = webchat.send_tool_call(&self.channel_id, event).await {
+            warn!("Failed to send WebChat workflow progress: {}", e);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl beebotos_agents::workflow::StepProgressReporter for WebChatWorkflowProgressReporter {
+    async fn on_step_complete(&self, instance: &beebotos_agents::workflow::WorkflowInstance) {
+        let mut pending_events = Vec::new();
+
+        {
+            let Ok(mut emitted) = self.emitted_steps.lock() else {
+                warn!("WebChat workflow progress skipped: emitted-step lock poisoned");
+                return;
+            };
+            for (step_id, step_state) in &instance.step_states {
+                if !step_state.status.is_terminal() || emitted.contains(step_id) {
+                    continue;
+                }
+                emitted.insert(step_id.clone());
+                pending_events.push(workflow_step_tool_call_event(
+                    &self.workflow_id,
+                    &instance.id,
+                    emitted.len(),
+                    step_id,
+                    step_state,
+                ));
+            }
+        }
+
+        for event in pending_events {
+            self.send_event(event).await;
+        }
+    }
+}
+
+fn workflow_output_preview(output: &Option<serde_json::Value>, max_chars: usize) -> String {
+    let Some(output) = output else {
+        return String::new();
+    };
+    let text = match output {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        _ => serde_json::to_string(output).unwrap_or_default(),
+    };
+    text.chars().take(max_chars).collect()
+}
+
+fn workflow_step_tool_call_event(
+    workflow_id: &str,
+    instance_id: &str,
+    round: usize,
+    step_id: &str,
+    step_state: &beebotos_agents::workflow::StepState,
+) -> serde_json::Value {
+    let output_preview = workflow_output_preview(&step_state.output, 280);
+    let mut reasoning = format!(
+        "Workflow '{}' step '{}' {} in {}s",
+        workflow_id,
+        step_id,
+        step_state.status,
+        step_state.duration_secs()
+    );
+    if let Some(error) = &step_state.error {
+        reasoning.push_str(&format!("; error: {}", error));
+    } else if !output_preview.is_empty() {
+        reasoning.push_str(&format!("; output: {}", output_preview));
+    }
+
+    serde_json::json!({
+        "id": format!("workflow-{}-{}", instance_id, step_id),
+        "round": round,
+        "tool_name": step_id,
+        "reasoning": reasoning,
+        "arguments": {
+            "workflow_id": workflow_id,
+            "instance_id": instance_id,
+            "step_id": step_id,
+            "status": step_state.status.to_string(),
+            "duration_secs": step_state.duration_secs(),
+            "execution_time_ms": step_state.execution_time_ms,
+            "retry_count": step_state.retry_count,
+            "output_preview": output_preview,
+            "error": step_state.error,
+        },
+        "status": step_state.status.to_string(),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+fn workflow_step_tool_call_events(
+    workflow_id: &str,
+    instance: &beebotos_agents::workflow::WorkflowInstance,
+) -> Vec<serde_json::Value> {
+    instance
+        .step_states
+        .iter()
+        .enumerate()
+        .map(|(idx, (step_id, step_state))| {
+            workflow_step_tool_call_event(workflow_id, &instance.id, idx + 1, step_id, step_state)
+        })
+        .collect()
+}
+
+struct WorkflowChatResult {
+    text: String,
+    tool_calls: Vec<serde_json::Value>,
+}
 
 /// 消息处理器
 pub struct MessageProcessor {
@@ -97,6 +247,108 @@ impl MessageProcessor {
             .next()
             .map(|cmd| cmd.eq_ignore_ascii_case("/stop"))
             .unwrap_or(false)
+    }
+
+    async fn persist_webchat_user_message(
+        &self,
+        db_session_id: &str,
+        platform: PlatformType,
+        channel_id: &str,
+        user_id: &str,
+        content: &str,
+        command: Option<&str>,
+    ) {
+        if let Some(ref svc) = self.webchat_service {
+            let _ = svc
+                .save_message(
+                    db_session_id,
+                    "user",
+                    content,
+                    Some(serde_json::json!({
+                        "platform": platform.to_string(),
+                        "sender_id": user_id,
+                        "channel_id": channel_id,
+                        "command": command,
+                    })),
+                    None,
+                )
+                .await;
+        }
+    }
+
+    async fn send_workflow_result(
+        &self,
+        platform: PlatformType,
+        channel_id: &str,
+        original: &Message,
+        db_session_id: &str,
+        result: &WorkflowChatResult,
+    ) -> Result<(), GatewayError> {
+        let mut saved_message_id: Option<String> = None;
+        if let Some(ref svc) = self.webchat_service {
+            if let Ok(id) = svc
+                .save_message(
+                    db_session_id,
+                    "assistant",
+                    &result.text,
+                    Some(serde_json::json!({
+                        "platform": platform.to_string(),
+                        "channel_id": channel_id,
+                        "workflow": true,
+                        "tool_calls": result.tool_calls,
+                    })),
+                    None,
+                )
+                .await
+            {
+                saved_message_id = Some(id);
+            }
+        }
+
+        if platform == PlatformType::WebChat {
+            let mut metadata = HashMap::new();
+            if !result.tool_calls.is_empty() {
+                if let Ok(tool_calls_json) = serde_json::to_string(&result.tool_calls) {
+                    metadata.insert("tool_calls".to_string(), tool_calls_json);
+                }
+            }
+
+            let reply = Message {
+                id: saved_message_id
+                    .as_deref()
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                    .unwrap_or_else(Uuid::new_v4),
+                thread_id: original.thread_id,
+                platform,
+                message_type: MessageType::Text,
+                content: result.text.clone(),
+                metadata,
+                timestamp: chrono::Utc::now(),
+            };
+
+            if let Some(channel) = self.channel_registry.get_channel_by_platform(platform).await {
+                channel
+                    .read()
+                    .await
+                    .send(channel_id, &reply)
+                    .await
+                    .map_err(|e| GatewayError::Internal {
+                        message: format!("Failed to send workflow reply: {}", e),
+                        correlation_id: Uuid::new_v4().to_string(),
+                    })?;
+            }
+        } else {
+            self.send_reply(platform, channel_id, original, &result.text)
+                .await?;
+        }
+
+        if let (Some(ref svc), Some(ref msg_id)) =
+            (self.webchat_service.as_ref(), saved_message_id.as_ref())
+        {
+            let _ = svc.mark_ws_delivered(msg_id).await;
+        }
+
+        Ok(())
     }
 
     async fn handle_stop_command(
@@ -298,9 +550,12 @@ impl MessageProcessor {
         }
 
         // 🟢 P1 FIX: Check for /workflow command trigger
-        if let Some(workflow_result) = self.try_execute_workflow_command(&content).await {
+        if let Some(workflow_result) = self
+            .try_execute_workflow_command(&content, platform, channel_id)
+            .await
+        {
             match workflow_result {
-                Ok(result_text) => {
+                Ok(result) => {
                     // Add workflow command to history
                     self.session_manager
                         .add_message(&session.id, "user", &content, false, vec![])
@@ -308,24 +563,26 @@ impl MessageProcessor {
                         .ok();
                     // Add workflow result as assistant response
                     self.session_manager
-                        .add_message(&session.id, "assistant", &result_text, false, vec![])
+                        .add_message(&session.id, "assistant", &result.text, false, vec![])
                         .await
                         .ok();
-                    // Persist and send reply
-                    let msg_id = if let Some(ref svc) = self.webchat_service {
-                        svc.save_message(&db_session_id, "assistant", &result_text, Some(serde_json::json!({"platform": platform.to_string(), "channel_id": channel_id})), None).await.ok()
-                    } else {
-                        None
-                    };
-                    if self
-                        .send_reply(platform, channel_id, &message, &result_text)
-                        .await
-                        .is_ok()
-                    {
-                        if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
-                            let _ = svc.mark_ws_delivered(&id).await;
-                        }
-                    }
+                    self.persist_webchat_user_message(
+                        &db_session_id,
+                        platform,
+                        channel_id,
+                        &user_id,
+                        &content,
+                        Some("workflow"),
+                    )
+                    .await;
+                    self.send_workflow_result(
+                        platform,
+                        channel_id,
+                        &message,
+                        &db_session_id,
+                        &result,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -610,31 +867,37 @@ impl MessageProcessor {
         }
 
         // 🟢 P1 FIX: Check for /workflow command trigger (same as handle_message)
-        if let Some(workflow_result) = self.try_execute_workflow_command(&content).await {
+        if let Some(workflow_result) = self
+            .try_execute_workflow_command(&content, platform, channel_id)
+            .await
+        {
             match workflow_result {
-                Ok(result_text) => {
+                Ok(result) => {
                     self.session_manager
                         .add_message(&session.id, "user", &content, false, vec![])
                         .await
                         .ok();
                     self.session_manager
-                        .add_message(&session.id, "assistant", &result_text, false, vec![])
+                        .add_message(&session.id, "assistant", &result.text, false, vec![])
                         .await
                         .ok();
-                    let msg_id = if let Some(ref svc) = self.webchat_service {
-                        svc.save_message(&db_session_id, "assistant", &result_text, Some(serde_json::json!({"platform": platform.to_string(), "channel_id": channel_id})), None).await.ok()
-                    } else {
-                        None
-                    };
-                    if self
-                        .send_reply(platform, channel_id, &message, &result_text)
-                        .await
-                        .is_ok()
-                    {
-                        if let (Some(ref svc), Some(id)) = (self.webchat_service.as_ref(), msg_id) {
-                            let _ = svc.mark_ws_delivered(&id).await;
-                        }
-                    }
+                    self.persist_webchat_user_message(
+                        &db_session_id,
+                        platform,
+                        channel_id,
+                        &user_id,
+                        &content,
+                        Some("workflow"),
+                    )
+                    .await;
+                    self.send_workflow_result(
+                        platform,
+                        channel_id,
+                        &message,
+                        &db_session_id,
+                        &result,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -2131,7 +2394,9 @@ Rules:
     async fn try_execute_workflow_command(
         &self,
         content: &str,
-    ) -> Option<Result<String, GatewayError>> {
+        platform: PlatformType,
+        channel_id: &str,
+    ) -> Option<Result<WorkflowChatResult, GatewayError>> {
         let trimmed = content.trim();
         if !trimmed.starts_with("/workflow") {
             return None;
@@ -2189,7 +2454,27 @@ Rules:
             "platform": "chat"
         });
 
-        match engine.execute(&def, &agent, trigger_context, None).await {
+        let progress_reporter = if platform == PlatformType::WebChat {
+            Some(WebChatWorkflowProgressReporter::new(
+                self.channel_registry.clone(),
+                channel_id.to_string(),
+                workflow_id.to_string(),
+            ))
+        } else {
+            None
+        };
+
+        match engine
+            .execute(
+                &def,
+                &agent,
+                trigger_context,
+                progress_reporter
+                    .as_ref()
+                    .map(|reporter| reporter as &dyn beebotos_agents::workflow::StepProgressReporter),
+            )
+            .await
+        {
             Ok(instance) => {
                 let status = instance.status.to_string();
                 let mut result = format!(
@@ -2235,7 +2520,10 @@ Rules:
                     }
                 }
 
-                Some(Ok(result))
+                Some(Ok(WorkflowChatResult {
+                    text: result,
+                    tool_calls: workflow_step_tool_call_events(workflow_id, &instance),
+                }))
             }
             Err(e) => Some(Err(GatewayError::Internal {
                 message: format!("Workflow execution failed: {}", e),
