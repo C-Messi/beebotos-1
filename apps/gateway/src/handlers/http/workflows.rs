@@ -1267,6 +1267,25 @@ impl beebotos_agents::workflow::StepProgressReporter for DbProgressReporter {
             );
         }
     }
+
+    async fn on_step_change(
+        &self,
+        instance: &beebotos_agents::workflow::WorkflowInstance,
+        step_id: &str,
+        status: &str,
+    ) {
+        info!(
+            "Workflow {} step {} changed to {}",
+            instance.id, step_id, status
+        );
+        // Persist immediately so polling clients see real-time state changes
+        if let Err(e) = save_workflow_instance(&self.db, instance).await {
+            warn!(
+                "Failed to persist workflow instance progress {}: {}",
+                instance.id, e
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1998,3 +1998,144 @@ xauusd_hourly.yaml 已切成三步了。现在我会调整后端 /workflow 汇�
 - 已运行 `cargo check -p beebotos-gateway -p beebotos-web`
 - 编译通过，仅有项目原有 warning。
 
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+1、问题1：第一张截图，在工作流执行中，没有sikll/tool过程显示；第二张图，是工作流结果回来了，有Tool calls · 4 steps显示，点击展开就是第三张图；
+2、问题2：报告结果不对，分析原因；
+
+根据对工作流定义 (`xauusd_hourly.yaml`) 和工作流引擎代码 (`beebotos_agents`) 的分析，两个问题的根因如下：
+
+---
+
+## 问题1：工作流执行中没有 skill/tool 过程显示
+
+**根因：工作流引擎只有"层级粒度"的进度报告，没有步骤级实时流式输出机制。**
+
+具体细节：
+
+1. **进度报告是按拓扑层批量触发的**  
+   `WorkflowEngine` 按 DAG 拓扑分层执行（`fetch_macro` → `generate_report` → `quant_run` → `final_report`）。`StepProgressReporter::on_step_complete()` 只在**一整层所有并行步骤完成后**调用一次，而不是每执行一个 skill 就推送一次。
+
+2. **`DbProgressReporter` 仅做数据库持久化**  
+   Gateway 中的 `DbProgressReporter` 只是把 `WorkflowInstance` 完整状态写入 SQLite，没有 SSE/WebSocket 向客户端推送步骤级别的实时事件。
+
+3. **Skill 内部调用细节不暴露**  
+   步骤内部的 MCP 工具调用、LLM 调用等过程发生在 Agent 执行层面，不会被记录到 `WorkflowInstance.step_states` 中。前端只能看到完成后汇总的结果（"Tool calls · 4 steps"）。
+
+---
+
+## 问题2：报告结果不对（工作流失败）
+
+这是**级联故障（cascading failure）**，根因链如下：
+
+### 1. `fetch_macro` 超时失败（最底层错误）
+```
+fetch_macro: failed (60s) — Error: Timeout after 60s
+```
+`macro-data-aggregator` skill 的脚本 `fetch_all_macro.py` 需要并行拉取多个数据源（Yahoo Finance、FRED API、WGC、Google News RSS），网络延迟或某个数据源响应慢时很容易超过 60 秒超时限制。
+
+### 2. `generate_report` 被 Skipped
+`generate_report` 的依赖配置：
+```yaml
+depends_on:
+  - fetch_macro
+```
+
+引擎在执行前检查依赖是否满足：
+```rust
+deps.iter().all(|dep_id| {
+    instance.step_states.get(dep_id)
+        .map(|s| s.status.is_completed())  // 仅 Completed 或 Skipped 算满足
+        .unwrap_or(false)
+})
+```
+
+`fetch_macro` 的状态是 `Failed`，**不是** `Completed`，所以依赖不满足，`generate_report` 被标记为 `Skipped`，**没有任何输出**。
+
+### 3. `quant_run` 模板解析失败
+`quant_run` 的参数中引用了：
+```yaml
+report_seed: "{{steps.generate_report.output}}"
+```
+
+工作流引擎的模板解析器 (`template.rs`) 在解析 `{{steps.generate_report.output}}` 时，会去 `TemplateContext.step_outputs` 中查找 `generate_report` 的输出。但该步骤被 `Skipped`，没有输出，于是抛出：
+
+```
+Template resolution: Unknown template variable: steps.generate_report.output
+```
+
+### 4. `final_report` 被 Skipped
+`final_report` 依赖 `quant_run`，而 `quant_run` 已经 `Failed`，所以依赖检查不通过，`final_report` 被 `Skipped`。
+
+---
+
+## 总结
+
+| 步骤 | 状态 | 根因 |
+|------|------|------|
+| `fetch_macro` | **failed** | 脚本执行超时（60s），宏观数据聚合涉及多源网络请求 |
+| `generate_report` | **skipped** | 依赖 `fetch_macro` 失败，不满足执行条件 |
+| `quant_run` | **failed** | 模板变量 `{{steps.generate_report.output}}` 引用了一个被 skipped 步骤的输出 |
+| `final_report` | **skipped** | 依赖 `quant_run` 失败 |
+
+---
+
+## 建议修复方向
+
+1. **解决超时**：给 `fetch_macro` 增加超时时间（如 120s），或优化 `fetch_all_macro.py` 增加各数据源独立超时和降级逻辑。
+2. **修复模板变量引用**：在 `quant_run` 中不要直接依赖 `generate_report` 的输出作为模板变量。如果 `generate_report` 只是写文件，可以直接在 `quant_run` 中读取文件路径 `/root/beebotos/data/reports/xauusd/latest_report.md`，而不是通过 `steps.generate_report.output` 传递。
+3. **增强容错**：当 `generate_report` 可能被 skipped 时，`quant_run` 应能独立运行（直接从磁盘读取宏观 JSON 和报告文件）。
+4. **实时进度（问题1）**：如需执行过程实时显示，需要在工作流引擎中增加步骤级事件推送机制（如 SSE 或 WebSocket），将每个 `StepResult` 实时广播到前端。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+已修复完成，编译验证通过。以下是修改内容和效果说明：
+
+---
+
+## 修复内容
+
+### 1. 工作流定义 (`workflows/xauusd_hourly.yaml`)
+
+- **`fetch_macro` 超时从 60s 改为 120s**  
+  宏观数据聚合脚本涉及 Yahoo Finance、FRED API、WGC、Google News RSS 多源请求，60s 在网络波动时容易超时。
+
+- **删除 `quant_run` 中无效的 `report_seed` 模板变量**  
+  `report_seed: "{{steps.generate_report.output}}"` 不被 `xauusd-mt5-trader` skill 使用，且当 `generate_report` 被 skipped 时会触发模板解析错误。
+
+### 2. 工作流引擎 (`crates/agents/src/workflow/engine.rs`)
+
+**修复 skipped 步骤导致下游模板解析失败**
+- 当步骤被标记为 `Skipped` 时，引擎现在会向 `TemplateContext` 注入一个**空字符串输出**。
+- 下游步骤引用 `{{steps.generate_report.output}}` 时，会得到空字符串而不是报错终止。
+
+**增强实时进度上报（问题1）**
+- 扩展 `StepProgressReporter` trait，新增 `on_step_change` 回调。
+- **步骤启动前**：立即将步骤状态设为 `running` 并上报。
+- **步骤完成后**（success/failed/skipped）：立即单独上报该步骤状态，而不是等到整层所有步骤都结束才批量上报一次。
+
+### 3. Gateway 持久层 (`apps/gateway/src/handlers/http/workflows.rs`)
+
+- `DbProgressReporter` 实现 `on_step_change`，每次步骤状态变化**立即写入 SQLite**。
+- 前端通过轮询 `/api/v1/workflows/instances/{id}` 时，现在能看到步骤的 `running` 实时状态，而不是只能看到最终结果。
+
+---
+
+## 修复后的工作流行为
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| `fetch_macro` 执行期间 | 前端看不到状态 | 前端轮询可见 `fetch_macro: running` |
+| `fetch_macro` 超时 | `generate_report` → skipped → `quant_run` 模板报错失败 | `quant_run` 继续执行，引用空字符串不报错 |
+| `generate_report` 被 skipped | 下游模板解析 `Unknown template variable` 失败 | 下游得到空值，工作流继续 |
+| 整体执行进度 | 每层结束才保存一次 | **每步状态变化都保存**，轮询更实时 |
+
+---
+
+## 剩余建议
+
+如果仍想完全避免 `fetch_macro` 超时导致后续报告生成缺失，可以考虑：
+1. 给 `fetch_all_macro.py` 增加各数据源的独立超时和降级（degraded）返回。
+2. 或把 `continue_on_failure` 改为 `false`，让失败时立即停止并明确报错，而不是继续执行半残流程。
+
+

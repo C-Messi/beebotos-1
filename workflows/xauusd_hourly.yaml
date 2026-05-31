@@ -38,7 +38,7 @@ steps:
 
         只需要返回命令输出摘要和保存路径；完整 JSON 必须保存在：
         /root/beebotos/data/reports/xauusd/latest_macro.json
-    timeout_sec: 60
+    timeout_sec: 120
     retries: 2
 
   - id: generate_report
@@ -84,7 +84,6 @@ steps:
            - stdout 返回完整 Markdown 报告正文和报告文件路径，不要只返回短摘要。
       macro_json_path: "/root/beebotos/data/reports/xauusd/latest_macro.json"
       report_file: "/root/beebotos/data/reports/xauusd/latest_report.md"
-      report_seed: "{{steps.generate_report.output}}"
     timeout_sec: 180
     retries: 1
 

@@ -46,6 +46,14 @@ pub trait StepExecutor: Send + Sync {
 #[async_trait::async_trait]
 pub trait StepProgressReporter: Send + Sync {
     async fn on_step_complete(&self, instance: &WorkflowInstance);
+
+    /// Called whenever an individual step changes state (e.g. running,
+    /// completed, failed, skipped). Allows fine-grained real-time progress
+    /// observation without waiting for an entire layer to finish.
+    async fn on_step_change(&self, instance: &WorkflowInstance, _step_id: &str, _status: &str) {
+        // Default: delegate to on_step_complete for backward compatibility
+        self.on_step_complete(instance).await;
+    }
 }
 
 #[async_trait::async_trait]
@@ -326,6 +334,20 @@ impl WorkflowEngine {
                     }
                 }
 
+                // Mark step as running and report progress before launching the
+                // future so observers see real-time state changes.
+                let mut running_state = StepState::new(&step.id);
+                running_state.mark_ready();
+                running_state.mark_running();
+                instance
+                    .step_states
+                    .insert(step.id.clone(), running_state);
+                if let Some(reporter) = progress_reporter {
+                    reporter
+                        .on_step_change(&instance, &step.id, "running")
+                        .await;
+                }
+
                 // Clone context for this step's execution (independent steps don't share
                 // mutable state)
                 let step_ctx = template_ctx.clone();
@@ -355,7 +377,12 @@ impl WorkflowEngine {
                     } => {
                         template_ctx.add_step_output(&step_id, output);
                         template_ctx.add_step_status(&step_id, "completed");
-                        instance.step_states.insert(step_id, state);
+                        instance.step_states.insert(step_id.clone(), state);
+                        if let Some(reporter) = progress_reporter {
+                            reporter
+                                .on_step_change(&instance, &step_id, "completed")
+                                .await;
+                        }
                     }
                     StepResult::Failed {
                         step_id,
@@ -365,6 +392,11 @@ impl WorkflowEngine {
                         template_ctx.add_step_status(&step_id, "failed");
                         instance.add_error(Some(step_id.clone()), error.clone());
                         instance.step_states.insert(step_id.clone(), state);
+                        if let Some(reporter) = progress_reporter {
+                            reporter
+                                .on_step_change(&instance, &step_id, "failed")
+                                .await;
+                        }
                         if !definition.config.continue_on_failure {
                             instance.mark_failed();
                             // Report progress before early exit
@@ -376,7 +408,19 @@ impl WorkflowEngine {
                     }
                     StepResult::Skipped { step_id, state } => {
                         template_ctx.add_step_status(&step_id, "skipped");
-                        instance.step_states.insert(step_id, state);
+                        // Inject empty output so downstream steps that reference
+                        // {{steps.<id>.output}} get an empty string instead of a
+                        // template resolution error.
+                        template_ctx.add_step_output(
+                            &step_id,
+                            serde_json::Value::String("".to_string()),
+                        );
+                        instance.step_states.insert(step_id.clone(), state);
+                        if let Some(reporter) = progress_reporter {
+                            reporter
+                                .on_step_change(&instance, &step_id, "skipped")
+                                .await;
+                        }
                     }
                 }
             }
