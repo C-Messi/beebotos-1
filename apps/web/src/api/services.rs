@@ -446,6 +446,24 @@ pub struct WorkflowSourceResponse {
     pub source_origin: Option<String>,
 }
 
+/// Workflow Markdown report summary
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowReportSummary {
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub modified_at: String,
+    pub is_latest: bool,
+}
+
+/// Workflow Markdown report content
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkflowReportResponse {
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub modified_at: String,
+    pub content: String,
+}
+
 /// Workflow API Service
 #[derive(Clone)]
 pub struct WorkflowService {
@@ -512,6 +530,27 @@ impl WorkflowService {
     pub async fn get_source(&self, id: &str) -> Result<WorkflowSourceResponse, ApiError> {
         self.client
             .get(&ApiEndpoints::WORKFLOW_SOURCE.replace("{id}", id))
+            .await
+    }
+
+    pub async fn list_reports(&self, id: &str) -> Result<Vec<WorkflowReportSummary>, ApiError> {
+        self.client
+            .get(&ApiEndpoints::WORKFLOW_REPORTS.replace("{id}", id))
+            .await
+    }
+
+    pub async fn get_report(
+        &self,
+        id: &str,
+        file_name: &str,
+    ) -> Result<WorkflowReportResponse, ApiError> {
+        let encoded_file = js_sys::encode_uri_component(file_name);
+        self.client
+            .get(&format!(
+                "{}/{}",
+                ApiEndpoints::WORKFLOW_REPORTS.replace("{id}", id),
+                encoded_file
+            ))
             .await
     }
 

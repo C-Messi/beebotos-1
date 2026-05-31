@@ -10,8 +10,9 @@ use leptos_meta::*;
 
 use crate::api::{
     CompositionInfo, DashboardStats, ExecuteWorkflowRequest, InstallWorkflowRequest, WorkflowInfo,
-    WorkflowInstanceSummary,
+    WorkflowInstanceSummary, WorkflowReportResponse, WorkflowReportSummary,
 };
+use crate::components::webchat::MarkdownView;
 use crate::components::Modal;
 use crate::i18n::I18nContext;
 use crate::state::use_app_state;
@@ -460,6 +461,7 @@ fn WorkflowCard(
     let show_execute_modal = RwSignal::new(false);
     let show_schedule_modal = RwSignal::new(false);
     let show_config_modal = RwSignal::new(false);
+    let show_reports_modal = RwSignal::new(false);
     let is_uninstalling = RwSignal::new(false);
     let is_executing = RwSignal::new(false);
     let is_stopping = RwSignal::new(false);
@@ -590,6 +592,15 @@ fn WorkflowCard(
                     {move || format!("⚙️ {}", i18n.get().t("workflows-config"))}
                 </button>
                 <button
+                    class="btn btn-sm btn-secondary"
+                    on:click=move |_| {
+                        show_reports_modal.set(true);
+                    }
+                    title={move || i18n.get().t("workflows-reports")}
+                >
+                    {move || format!("📄 {}", i18n.get().t("workflows-reports"))}
+                </button>
+                <button
                     class="btn btn-sm btn-danger"
                     disabled=move || is_uninstalling.get()
                     on:click=move |_| {
@@ -689,6 +700,19 @@ fn WorkflowCard(
         } else {
             view! { <></> }.into_any()
         }}
+
+        // Reports Modal
+        {move || if show_reports_modal.get() {
+            let wf_id = wf_sig.get().id.clone();
+            view! {
+                <WorkflowReportsModal
+                    workflow_id=wf_id
+                    on_close=move || show_reports_modal.set(false)
+                />
+            }.into_any()
+        } else {
+            view! { <></> }.into_any()
+        }}
     }
 }
 
@@ -704,6 +728,7 @@ fn ExecuteWorkflowModal(
 ) -> impl IntoView {
     let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
     let context_input = RwSignal::new("{}".to_string());
+    let show_context = RwSignal::new(false);
     let is_executing = RwSignal::new(false);
 
     view! {
@@ -712,16 +737,34 @@ fn ExecuteWorkflowModal(
             move || on_close()
         }>
             <div class="modal-body">
-                <div class="form-group">
-                    <label>{move || i18n.get().t("workflows-trigger-context")}</label>
-                    <textarea
-                        class="form-control"
-                        rows="6"
-                        prop:value=context_input
-                        on:input=move |e| context_input.set(event_target_value(&e))
-                    />
-                    <small class="text-muted">{move || i18n.get().t("workflows-trigger-hint")}</small>
-                </div>
+                <p class="text-muted">{move || i18n.get().t("workflows-start-hint")}</p>
+                <button
+                    class="btn btn-sm btn-secondary"
+                    type="button"
+                    on:click=move |_| show_context.update(|visible| *visible = !*visible)
+                >
+                    {move || if show_context.get() {
+                        i18n.get().t("workflows-hide-context")
+                    } else {
+                        i18n.get().t("workflows-show-context")
+                    }}
+                </button>
+                {move || if show_context.get() {
+                    view! {
+                        <div class="form-group" style="margin-top: 1rem;">
+                            <label>{move || i18n.get().t("workflows-trigger-context")}</label>
+                            <textarea
+                                class="form-control"
+                                rows="6"
+                                prop:value=context_input
+                                on:input=move |e| context_input.set(event_target_value(&e))
+                            />
+                            <small class="text-muted">{move || i18n.get().t("workflows-trigger-hint")}</small>
+                        </div>
+                    }.into_any()
+                } else {
+                    view! { <></> }.into_any()
+                }}
                 <div class="form-actions">
                     <button
                         class="btn btn-success"
@@ -772,6 +815,146 @@ fn ExecuteWorkflowModal(
                     </button>
                     <button class="btn btn-secondary" on:click=move |_| { on_close(); }>
                         {move || i18n.get().t("workflows-cancel")}
+                    </button>
+                </div>
+            </div>
+        </Modal>
+    }
+}
+
+// ============================================================================
+// Workflow Reports Modal
+// ============================================================================
+
+#[component]
+fn WorkflowReportsModal(
+    workflow_id: String,
+    on_close: impl Fn() + Clone + Send + Sync + 'static,
+) -> impl IntoView {
+    let i18n = RwSignal::new(use_context::<I18nContext>().expect("i18n context not found"));
+    let workflow_id_store = StoredValue::new(workflow_id.clone());
+    let reports = RwSignal::new(Vec::<WorkflowReportSummary>::new());
+    let selected_report = RwSignal::new(None::<WorkflowReportResponse>);
+    let is_loading = RwSignal::new(true);
+    let is_loading_report = RwSignal::new(false);
+
+    {
+        let workflow_id = workflow_id.clone();
+        leptos::task::spawn_local(async move {
+            let app_state = use_app_state();
+            let service = app_state.workflow_service();
+            match service.list_reports(&workflow_id).await {
+                Ok(list) => {
+                    let first = list.first().map(|r| r.file_name.clone());
+                    reports.set(list);
+                    is_loading.set(false);
+                    if let Some(file_name) = first {
+                        is_loading_report.set(true);
+                        match service.get_report(&workflow_id, &file_name).await {
+                            Ok(report) => selected_report.set(Some(report)),
+                            Err(e) => app_state.notify(
+                                crate::state::notification::NotificationType::Error,
+                                "Report Load Failed",
+                                format!("{}", e),
+                            ),
+                        }
+                        is_loading_report.set(false);
+                    }
+                }
+                Err(e) => {
+                    app_state.notify(
+                        crate::state::notification::NotificationType::Error,
+                        "Reports Load Failed",
+                        format!("{}", e),
+                    );
+                    is_loading.set(false);
+                }
+            }
+        });
+    }
+
+    view! {
+        <Modal title=format!("{}: {}", i18n.get().t("workflows-reports"), workflow_id.clone()) on_close={
+            let on_close = on_close.clone();
+            move || on_close()
+        }>
+            <div class="modal-body workflow-report-modal">
+                {move || if is_loading.get() {
+                    view! { <div class="skeleton" style="height: 220px;"/> }.into_any()
+                } else if reports.get().is_empty() {
+                    view! {
+                        <div class="empty-state">
+                            <span class="empty-icon">"📄"</span>
+                            <p>{move || i18n.get().t("workflows-no-reports")}</p>
+                        </div>
+                    }.into_any()
+                } else {
+                    view! {
+                        <div class="workflow-report-layout">
+                            <div class="workflow-report-list">
+                                {move || reports.get().into_iter().map(|report| {
+                                    let workflow_id = workflow_id_store.get_value();
+                                    let file_name = report.file_name.clone();
+                                    let active = selected_report
+                                        .get()
+                                        .map(|selected| selected.file_name == file_name)
+                                        .unwrap_or(false);
+                                    view! {
+                                        <button
+                                            class=move || if active { "report-list-item active" } else { "report-list-item" }
+                                            type="button"
+                                            on:click=move |_| {
+                                                let workflow_id = workflow_id.clone();
+                                                let file_name = file_name.clone();
+                                                is_loading_report.set(true);
+                                                leptos::task::spawn_local(async move {
+                                                    let app_state = use_app_state();
+                                                    let service = app_state.workflow_service();
+                                                    match service.get_report(&workflow_id, &file_name).await {
+                                                        Ok(report) => selected_report.set(Some(report)),
+                                                        Err(e) => app_state.notify(
+                                                            crate::state::notification::NotificationType::Error,
+                                                            "Report Load Failed",
+                                                            format!("{}", e),
+                                                        ),
+                                                    }
+                                                    is_loading_report.set(false);
+                                                });
+                                            }
+                                        >
+                                            <span class="report-file-name">
+                                                {if report.is_latest { format!("{} · latest", report.file_name) } else { report.file_name.clone() }}
+                                            </span>
+                                            <span class="report-file-meta">
+                                                {format!("{} KB · {}", (report.size_bytes + 1023) / 1024, report.modified_at)}
+                                            </span>
+                                        </button>
+                                    }
+                                }).collect_view()}
+                            </div>
+                            <div class="workflow-report-content">
+                                {move || if is_loading_report.get() {
+                                    view! { <div class="skeleton" style="height: 360px;"/> }.into_any()
+                                } else if let Some(report) = selected_report.get() {
+                                    view! {
+                                        <div>
+                                            <div class="workflow-report-toolbar">
+                                                <strong>{report.file_name.clone()}</strong>
+                                                <span>{format!("{} KB", (report.size_bytes + 1023) / 1024)}</span>
+                                            </div>
+                                            <MarkdownView raw=report.content.clone() />
+                                        </div>
+                                    }.into_any()
+                                } else {
+                                    view! { <p class="text-muted">{move || i18n.get().t("workflows-select-report")}</p> }.into_any()
+                                }}
+                            </div>
+                        </div>
+                    }.into_any()
+                }}
+                <div class="form-actions">
+                    <button class="btn btn-secondary" on:click=move |_| { on_close(); }>
+                        {move || i18n.get().t("workflows-close")}
                     </button>
                 </div>
             </div>

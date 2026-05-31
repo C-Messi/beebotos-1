@@ -5,6 +5,7 @@
 
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -23,6 +24,7 @@ use crate::AppState;
 const WORKFLOW_PROJECT_DIR: &str = "workflows";
 const WORKFLOW_LEGACY_DIR: &str = "data/workflows";
 const WORKFLOW_LOCAL_DIR: &str = "data/workflows/local";
+const REPORTS_ROOT_DIR: &str = "data/reports";
 
 #[derive(Debug, Clone)]
 struct WorkflowSourceLocation {
@@ -176,6 +178,28 @@ fn workflow_write_path(id: &str, source: Option<&WorkflowSourceLocation>) -> Pat
     }
 
     default_workflow_write_dir().join(format!("{}.yaml", id))
+}
+
+fn workflow_report_dir(id: &str) -> PathBuf {
+    // The XAUUSD skill writes to data/reports/xauusd so keep that stable path
+    // while allowing future workflows to use data/reports/<workflow_id>.
+    if id == "xauusd_hourly" {
+        PathBuf::from(REPORTS_ROOT_DIR).join("xauusd")
+    } else {
+        PathBuf::from(REPORTS_ROOT_DIR).join(id)
+    }
+}
+
+fn validate_report_file_name(file_name: &str) -> Result<(), GatewayError> {
+    if file_name.is_empty()
+        || file_name.contains("..")
+        || file_name.contains('/')
+        || file_name.contains('\\')
+        || !file_name.ends_with(".md")
+    {
+        return Err(GatewayError::bad_request("Invalid report file name"));
+    }
+    Ok(())
 }
 
 async fn remove_workflow_source_files(id: &str) -> Vec<PathBuf> {
@@ -351,6 +375,24 @@ pub struct WorkflowExecutionResponse {
     pub workflow_id: String,
     pub status: String,
     pub message: String,
+}
+
+/// Workflow report summary for Markdown reports written by workflow steps.
+#[derive(Debug, Serialize)]
+pub struct WorkflowReportSummary {
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub modified_at: String,
+    pub is_latest: bool,
+}
+
+/// Workflow report content response.
+#[derive(Debug, Serialize)]
+pub struct WorkflowReportResponse {
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub modified_at: String,
+    pub content: String,
 }
 
 /// Workflow instance status response
@@ -783,6 +825,129 @@ pub async fn get_workflow_source(
     }
 
     Err(GatewayError::not_found("Workflow source", &id))
+}
+
+/// List Markdown reports produced by a workflow.
+pub async fn list_workflow_reports(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<WorkflowReportSummary>>, GatewayError> {
+    validate_workflow_id(&id)?;
+
+    {
+        let registry = state.workflow_registry()?;
+        let reg = registry.read().await;
+        if reg.get(&id).is_none() {
+            return Err(GatewayError::not_found("Workflow", &id));
+        }
+    }
+
+    let report_dir = workflow_report_dir(&id);
+    if !tokio::fs::try_exists(&report_dir).await.unwrap_or(false) {
+        return Ok(Json(Vec::new()));
+    }
+
+    let mut entries = tokio::fs::read_dir(&report_dir)
+        .await
+        .map_err(|e| GatewayError::internal(format!("Failed to read report directory: {}", e)))?;
+    let mut reports = Vec::new();
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !matches!(path.extension().and_then(|e| e.to_str()), Some("md")) {
+            continue;
+        }
+
+        let Some(file_name) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_string())
+        else {
+            continue;
+        };
+        if validate_report_file_name(&file_name).is_err() {
+            continue;
+        }
+
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+
+        let modified_at = metadata
+            .modified()
+            .ok()
+            .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+            .and_then(|duration| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(duration.as_secs() as i64, 0)
+            })
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+
+        reports.push(WorkflowReportSummary {
+            is_latest: file_name == "latest_report.md",
+            file_name,
+            size_bytes: metadata.len(),
+            modified_at,
+        });
+    }
+
+    reports.sort_by(|a, b| {
+        b.is_latest
+            .cmp(&a.is_latest)
+            .then_with(|| b.modified_at.cmp(&a.modified_at))
+            .then_with(|| b.file_name.cmp(&a.file_name))
+    });
+
+    Ok(Json(reports))
+}
+
+/// Read a single Markdown report produced by a workflow.
+pub async fn get_workflow_report(
+    State(state): State<Arc<AppState>>,
+    Path((id, file_name)): Path<(String, String)>,
+) -> Result<Json<WorkflowReportResponse>, GatewayError> {
+    validate_workflow_id(&id)?;
+    validate_report_file_name(&file_name)?;
+
+    {
+        let registry = state.workflow_registry()?;
+        let reg = registry.read().await;
+        if reg.get(&id).is_none() {
+            return Err(GatewayError::not_found("Workflow", &id));
+        }
+    }
+
+    let report_path = workflow_report_dir(&id).join(&file_name);
+    let metadata = tokio::fs::metadata(&report_path)
+        .await
+        .map_err(|_| GatewayError::not_found("Workflow report", &file_name))?;
+    if !metadata.is_file() {
+        return Err(GatewayError::not_found("Workflow report", &file_name));
+    }
+
+    let content = tokio::fs::read_to_string(&report_path)
+        .await
+        .map_err(|e| GatewayError::internal(format!("Failed to read workflow report: {}", e)))?;
+
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| {
+            chrono::DateTime::<chrono::Utc>::from_timestamp(duration.as_secs() as i64, 0)
+        })
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+
+    Ok(Json(WorkflowReportResponse {
+        file_name,
+        size_bytes: metadata.len(),
+        modified_at,
+        content,
+    }))
 }
 
 /// Update an existing workflow (replace YAML definition)

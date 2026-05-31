@@ -1955,3 +1955,46 @@ xauusd_hourly.yaml 已切成三步了。现在我会调整后端 /workflow 汇�
 上面的截图是在beebotos WEB页面的左边的"工作流"子项目的页面内容，XAUUSD Hourly Quant Trader工作流作为例子，问题2个：
 1、点击“开始"，需要输入JSON内容，为什么？ 还有停止，调度，配置，DAG等按钮，检查是否可以正常使用？
 2、当点击开始后，量化交易的报告，怎么可以查看？也可以查看历史记录的报告；
+
+
+已处理完这次 Web 工作流页面的问题。
+
+主要修复：
+
+1. “开始”为什么要输入 JSON  
+   原因是旧 UI 把 `trigger context` 直接暴露成必填感很强的 JSON 输入框。实际后端支持默认 `{}`，对 `xauusd_hourly` 这种手动运行场景不需要用户填写。  
+   现在已改成：点击“开始”后默认直接可执行；JSON 被收进“高级参数 JSON”，只有需要覆盖触发上下文时才展开填写。
+
+2. 按钮可用性检查结果  
+   “开始”：调用 `/workflows/:id/execute`，可用。  
+   “停止”：查找该 workflow 最近 running 实例，再调用 `/workflow-instances/:id/cancel`，逻辑可用。  
+   “调度”：读取 YAML 后更新 cron trigger，再保存 workflow，逻辑可用。  
+   “配置”：读取并保存 workflow YAML，逻辑可用。  
+   “DAG”：跳转 `/workflows/:id` 工作流详情页，已有 DAG 页面。  
+   “报告”：这次新增，支持查看最新报告和历史报告。
+
+3. 量化交易报告查看  
+   新增后端报告接口：
+   - `GET /api/v1/workflows/:id/reports`
+   - `GET /api/v1/workflows/:id/reports/:file_name`
+
+   对 `xauusd_hourly` 映射到：
+   - `/root/beebotos/data/reports/xauusd/latest_report.md`
+   - 同目录下历史 `.md` 报告
+
+   前端工作流卡片新增“报告”按钮，打开后左侧是报告列表，右侧渲染 Markdown 内容；`latest_report.md` 会排在最前面。
+
+修改文件包括：
+- `apps/gateway/src/handlers/http/workflows.rs`
+- `apps/gateway/src/main.rs`
+- `apps/web/src/pages/workflows.rs`
+- `apps/web/src/api/services.rs`
+- `apps/web/src/api/gateway.rs`
+- `apps/web/src/api/mod.rs`
+- `apps/web/src/i18n.rs`
+- `apps/web/style/main.css`
+
+验证：
+- 已运行 `cargo check -p beebotos-gateway -p beebotos-web`
+- 编译通过，仅有项目原有 warning。
+

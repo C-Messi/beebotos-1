@@ -2653,6 +2653,14 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
             get(handlers::http::workflows::get_workflow_source),
         )
         .route(
+            "/api/v1/workflows/:id/reports",
+            get(handlers::http::workflows::list_workflow_reports),
+        )
+        .route(
+            "/api/v1/workflows/:id/reports/:file_name",
+            get(handlers::http::workflows::get_workflow_report),
+        )
+        .route(
             "/api/v1/workflows/:id",
             put(handlers::http::workflows::update_workflow),
         )

@@ -3140,6 +3140,96 @@ body {
     gap: 0.75rem;
 }
 
+.workflow-report-modal {
+    min-width: min(88vw, 1120px);
+}
+
+.workflow-report-layout {
+    display: grid;
+    grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+    gap: 1rem;
+    min-height: 460px;
+}
+
+.workflow-report-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    max-height: 62vh;
+    overflow: auto;
+    padding-right: 0.25rem;
+}
+
+.report-list-item {
+    width: 100%;
+    text-align: left;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: var(--bg-glass);
+    color: var(--text-primary);
+    padding: 0.55rem 0.65rem;
+    cursor: pointer;
+}
+
+.report-list-item:hover,
+.report-list-item.active {
+    border-color: var(--primary-color);
+    background: rgba(59, 130, 246, 0.12);
+}
+
+.report-file-name,
+.report-file-meta {
+    display: block;
+    overflow-wrap: anywhere;
+}
+
+.report-file-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.report-file-meta {
+    margin-top: 0.2rem;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+}
+
+.workflow-report-content {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 1rem;
+    max-height: 62vh;
+    overflow: auto;
+    background: rgba(15, 23, 42, 0.22);
+}
+
+.workflow-report-toolbar {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: center;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+@media (max-width: 800px) {
+    .workflow-report-modal {
+        min-width: 0;
+    }
+
+    .workflow-report-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .workflow-report-list,
+    .workflow-report-content {
+        max-height: none;
+    }
+}
+
 /* =========================================================
    WebChat Content Renderer Styles
    Markdown / JSON Tree / Code Blocks / Attachments

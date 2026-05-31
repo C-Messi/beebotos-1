@@ -53,7 +53,8 @@ pub use services::{
     TransactionStatus, TransactionType, TreasuryInfo, TreasuryService, UpdateAgentRequest,
     UpdateLlmConfigRequest, UpdateWorkflowRequest, UserInfo, WeChatQrResponse,
     WorkflowExecutionResponse, WorkflowInfo, WorkflowInstanceSummary, WorkflowService,
-    WorkflowSourceResponse, WorkflowStepInfo, WorkflowTriggerInfo,
+    WorkflowReportResponse, WorkflowReportSummary, WorkflowSourceResponse, WorkflowStepInfo,
+    WorkflowTriggerInfo,
 };
 // Re-export WebChat API
 pub use webchat::{
