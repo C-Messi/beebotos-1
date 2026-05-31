@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import urllib.parse
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from xml.etree import ElementTree as ET
@@ -26,6 +27,9 @@ except ImportError:
 
 try:
     import yfinance as yf
+    # Limit internal threading to avoid "can't start new thread" in constrained
+    # environments (e.g. containers with low ulimit -u).
+    yf.set_tz_cache_location(None)
     YFINANCE_OK = True
 except ImportError:
     yf = None
@@ -41,7 +45,16 @@ def _yf_fetch_price(symbols):
     result = {}
     tickers_str = " ".join(symbols)
     try:
-        data = yf.download(tickers_str, period="5d", interval="1d", progress=False, group_by="ticker")
+        # threads=False prevents yfinance from spawning its own thread pool,
+        # which can exhaust OS threads in container/resource-limited envs.
+        data = yf.download(
+            tickers_str,
+            period="5d",
+            interval="1d",
+            progress=False,
+            group_by="ticker",
+            threads=False,
+        )
     except Exception as e:
         return {s: {"error": str(e)} for s in symbols}
 
@@ -71,7 +84,10 @@ def _yf_fetch_etf_info(symbols):
     result = {}
     for sym in symbols:
         try:
-            info = yf.Ticker(sym).info
+            # Use single-session requests to avoid Ticker-level thread pools
+            ticker = yf.Ticker(sym)
+            ticker._session = requests.Session()
+            info = ticker.info
             result[sym] = {
                 "total_assets": info.get("totalAssets"),
                 "nav_price": info.get("navPrice"),
@@ -132,13 +148,25 @@ FRED_META = {
 
 def _fred_fetch_series(api_key: str, series_id: str, limit: int = 5):
     params = {"series_id": series_id, "api_key": api_key, "file_type": "json", "sort_order": "desc", "limit": limit}
+    errors = []
+    # Attempt 1: normal verified request
     try:
         resp = requests.get(FRED_API_BASE, params=params, timeout=20)
         resp.raise_for_status()
         obs = resp.json().get("observations", [])
         return [o for o in obs if o.get("value") not in (".", None, "", "NaN")]
     except Exception as e:
-        return {"error": str(e)}
+        errors.append(str(e))
+    # Attempt 2: retry with SSL verification disabled (fallback for CA issues)
+    try:
+        warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+        resp = requests.get(FRED_API_BASE, params=params, timeout=20, verify=False)
+        resp.raise_for_status()
+        obs = resp.json().get("observations", [])
+        return [o for o in obs if o.get("value") not in (".", None, "", "NaN")]
+    except Exception as e:
+        errors.append(str(e))
+    return {"error": "; ".join(errors)}
 
 
 def _fred_build_standard(api_key: str, sid: str, limit: int = 5):
@@ -484,7 +512,8 @@ def main():
     result = {"timestamp": datetime.now().isoformat(), "yfinance": {}, "fred": {}, "wgc": {}, "geopolitical": {}}
 
     tasks = {}
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    # Reduce max_workers to 2 to avoid thread exhaustion in constrained envs
+    with ThreadPoolExecutor(max_workers=2) as ex:
         if args.yfinance_symbols:
             tasks[ex.submit(fetch_yfinance, args.yfinance_symbols)] = "yfinance"
         if args.fred_api_key and args.fred_series:

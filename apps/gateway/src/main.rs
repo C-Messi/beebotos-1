@@ -580,6 +580,21 @@ impl AppState {
                         client_names.len(),
                         client_names
                     );
+                    // Bridge MCP tools into SkillRegistry so workflow steps can
+                    // invoke them via execute_skill_by_id.
+                    match beebotos_agents::mcp::skill_bridge::McpSkillBridge::bridge_all(
+                        &manager,
+                        &skill_registry,
+                    )
+                    .await
+                    {
+                        Ok(count) => {
+                            info!("✅ MCP Skill Bridge registered {} tool(s)", count);
+                        }
+                        Err(e) => {
+                            warn!("⚠️ MCP Skill Bridge failed: {}", e);
+                        }
+                    }
                 }
             } else {
                 info!("ℹ️ MCP auto-init disabled or no servers configured");

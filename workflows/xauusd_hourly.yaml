@@ -110,5 +110,5 @@ steps:
         - 不要只输出摘要。
       report_file: "/root/beebotos/data/reports/xauusd/latest_report.md"
       quant_output: "{{steps.quant_run.output}}"
-    timeout_sec: 30
+    timeout_sec: 60
     retries: 1

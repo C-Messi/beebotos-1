@@ -7,23 +7,35 @@
 //! 🟢 P1 OPTIMIZE: Single-shot command generation for simple requests
 //! avoids the expensive multi-turn ReAct loop (~60s → ~15s).
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use tracing::{debug, info};
+use serde_json::Value;
+use tracing::{debug, error, info};
 
 use crate::communication::{LLMCallInterface, Message as CommMessage, PlatformType};
 use crate::error::AgentError;
+use crate::mcp::MCPManager;
 use crate::skills::tool_set::{default_tool_set, ProcessExecTool, SkillTool};
 
 /// Executor for code-based skills
 pub struct CodeSkillExecutor {
     llm: Arc<dyn LLMCallInterface>,
+    mcp_manager: Option<Arc<MCPManager>>,
 }
 
 impl CodeSkillExecutor {
     pub fn new(llm: Arc<dyn LLMCallInterface>) -> Self {
-        Self { llm }
+        Self {
+            llm,
+            mcp_manager: None,
+        }
+    }
+
+    pub fn with_mcp_manager(mut self, mcp_manager: Option<Arc<MCPManager>>) -> Self {
+        self.mcp_manager = mcp_manager;
+        self
     }
 
     /// Execute a code skill
@@ -100,7 +112,13 @@ impl CodeSkillExecutor {
         // 🆕 FIX: Strip SKILL.md down to essential script usage to prevent LLM from
         // outputting skill self-introduction instead of executing the tool.
         let skill_instructions = extract_skill_usage(&skill_md);
-        let tools = default_tool_set(&skill_path);
+
+        // 🆕 FIX: Build tool set with MCP tools if manager is available
+        let mut tools = default_tool_set(&skill_path);
+        if let Some(ref mcp_mgr) = self.mcp_manager {
+            add_mcp_tools_to_set(mcp_mgr, &mut tools).await;
+        }
+
         let tools_prompt = crate::skills::general_react_prompt::build_general_react_prompt(&tools);
         let system_prompt = format!(
             "{tools_prompt}\n\n## Code Skill Context\n\nYou are the '{}' skill executor. Your \
@@ -225,6 +243,248 @@ impl CodeSkillExecutor {
                 "Single-shot command failed: {}",
                 e
             ))),
+        }
+    }
+}
+
+/// 🆕 FIX: Dynamically add MCP tools to the tool set for skill-internal ReAct.
+async fn add_mcp_tools_to_set(
+    mcp_manager: &Arc<MCPManager>,
+    tools: &mut HashMap<String, Box<dyn SkillTool>>,
+) {
+    // Add mcp_tool_search
+    tools.insert(
+        "mcp_tool_search".to_string(),
+        Box::new(McpToolSearchSkillTool::new(mcp_manager.clone())),
+    );
+
+    // Add all available MCP tools as dynamic SkillTools
+    let client_names = mcp_manager.list_clients().await;
+    for server_name in client_names {
+        let client = match mcp_manager.get_client(&server_name).await {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let tools_result = match client.list_tools(None).await {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("Failed to list MCP tools for '{}': {}", server_name, e);
+                continue;
+            }
+        };
+
+        for mcp_tool in tools_result.tools {
+            let tool_id = format!("mcp:{}/{}", server_name, mcp_tool.name);
+            tools.insert(
+                tool_id.clone(),
+                Box::new(McpDynamicSkillTool::new(
+                    mcp_manager.clone(),
+                    server_name.clone(),
+                    mcp_tool.name.clone(),
+                    mcp_tool.description.clone().unwrap_or_default(),
+                    mcp_tool.input_schema.clone(),
+                )),
+            );
+            debug!(
+                "Registered MCP tool '{}' for skill ReAct",
+                tool_id
+            );
+        }
+    }
+
+    info!(
+        "MCP tools registered for skill ReAct: {} total (including mcp_tool_search)",
+        tools.len()
+    );
+}
+
+/// 🆕 FIX: mcp_tool_search as a SkillTool for skill-internal ReAct
+pub struct McpToolSearchSkillTool {
+    mcp_manager: Arc<MCPManager>,
+}
+
+impl McpToolSearchSkillTool {
+    pub fn new(mcp_manager: Arc<MCPManager>) -> Self {
+        Self { mcp_manager }
+    }
+}
+
+#[async_trait::async_trait]
+impl SkillTool for McpToolSearchSkillTool {
+    fn name(&self) -> &str {
+        "mcp_tool_search"
+    }
+
+    fn description(&self) -> &str {
+        "Load schema details for a connected MCP tool. Prefer passing the exact \
+         catalog name in tool_name, for example mcp:server/tool. You may also \
+         search by query when you only know the intent. This returns lightweight \
+         matches and dynamically exposes selected MCP tool schemas for the next \
+         tool call."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tool_name": { "type": "string", "description": "Exact MCP catalog name in the form mcp:server/tool" },
+                "query": { "type": "string", "description": "Natural-language task or capability to search for when the exact tool_name is unknown" },
+                "server": { "type": "string", "description": "Optional MCP server name to restrict search" },
+                "limit": { "type": "integer", "description": "Maximum tools to return", "default": 5 }
+            }
+        })
+    }
+
+    async fn execute(&self, params: &Value) -> Result<String, String> {
+        let tool_name = params["tool_name"].as_str();
+        let query = params["query"].as_str();
+        let server = params["server"].as_str();
+        let limit = params["limit"].as_u64().unwrap_or(5) as usize;
+
+        let summaries = match self.mcp_manager.list_tool_summaries().await {
+            Ok(s) => s,
+            Err(e) => return Err(format!("MCP tool search failed: {}", e)),
+        };
+
+        let mut results = Vec::new();
+        for summary in summaries {
+            let server_name = &summary.server_name;
+            let tool_name_val = &summary.tool_name;
+
+            // Server filter
+            if let Some(s) = server {
+                if server_name.to_lowercase() != s.to_lowercase() {
+                    continue;
+                }
+            }
+
+            // Exact match
+            if let Some(tn) = tool_name {
+                let expected = format!("mcp:{}/{}", server_name, tool_name_val);
+                if tn == &expected {
+                    let schema = match self.mcp_manager.get_tool_schema(server_name, tool_name_val).await {
+                        Ok(t) => t.input_schema,
+                        Err(_) => Value::Null,
+                    };
+                    return Ok(format!(
+                        "Exact match: {}\nDescription: {}\nSchema: {}",
+                        expected,
+                        summary.description.as_deref().unwrap_or("N/A"),
+                        schema
+                    ));
+                }
+            }
+
+            // Query match
+            if let Some(q) = query {
+                let q_lower = q.to_lowercase();
+                let desc = summary.description.as_deref().unwrap_or("").to_lowercase();
+                if server_name.to_lowercase().contains(&q_lower)
+                    || tool_name_val.to_lowercase().contains(&q_lower)
+                    || desc.contains(&q_lower)
+                {
+                    results.push(format!(
+                        "- mcp:{}/{}: {}",
+                        server_name,
+                        tool_name_val,
+                        summary.description.as_deref().unwrap_or("N/A")
+                    ));
+                }
+            }
+        }
+
+        if results.is_empty() {
+            Ok("No MCP tools matched your search.".to_string())
+        } else {
+            results.truncate(limit.max(1));
+            Ok(format!(
+                "Found {} MCP tool(s):\n{}",
+                results.len(),
+                results.join("\n")
+            ))
+        }
+    }
+}
+
+/// 🆕 FIX: Dynamic MCP tool wrapper as a SkillTool for skill-internal ReAct
+pub struct McpDynamicSkillTool {
+    mcp_manager: Arc<MCPManager>,
+    server_name: String,
+    tool_name: String,
+    description: String,
+    params_schema: Value,
+}
+
+impl McpDynamicSkillTool {
+    pub fn new(
+        mcp_manager: Arc<MCPManager>,
+        server_name: String,
+        tool_name: String,
+        description: String,
+        params_schema: Value,
+    ) -> Self {
+        Self {
+            mcp_manager,
+            server_name,
+            tool_name,
+            description,
+            params_schema,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SkillTool for McpDynamicSkillTool {
+    fn name(&self) -> &str {
+        &self.tool_name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn parameters_schema(&self) -> Value {
+        self.params_schema.clone()
+    }
+
+    async fn execute(&self, params: &Value) -> Result<String, String> {
+        let client = match self.mcp_manager.get_client(&self.server_name).await {
+            Some(c) => c,
+            None => return Err(format!("MCP client '{}' not found", self.server_name)),
+        };
+
+        let args = params.as_object().cloned();
+        match client.call_tool(&self.tool_name, args).await {
+            Ok(result) => {
+                let mut texts = Vec::new();
+                for content in &result.content {
+                    if let crate::mcp::types::ToolContent::Text { text } = content {
+                        texts.push(text.clone());
+                    }
+                }
+                let output = if texts.is_empty() {
+                    serde_json::to_string(&result).unwrap_or_default()
+                } else {
+                    texts.join("\n")
+                };
+                if output.len() > 4000 {
+                    Ok(format!(
+                        "{}...[truncated {} chars]",
+                        &output[..4000],
+                        output.len() - 4000
+                    ))
+                } else {
+                    Ok(output)
+                }
+            }
+            Err(e) => {
+                error!(
+                    "MCP tool {}::{} failed: {}",
+                    self.server_name, self.tool_name, e
+                );
+                Err(format!("MCP tool error: {}", e))
+            }
         }
     }
 }

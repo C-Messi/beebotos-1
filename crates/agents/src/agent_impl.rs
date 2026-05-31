@@ -8002,21 +8002,25 @@ impl Agent {
     ) -> Result<skills::executor::SkillExecutionResult, AgentError> {
         let start_time = std::time::Instant::now();
         let skill_id = registered_skill.skill.id.clone();
-        if skill_id.starts_with("mcp:") {
-            return Ok(skills::executor::SkillExecutionResult {
-                task_id: skill_id.clone(),
-                success: false,
-                output: format!(
-                    "MCP tool '{}' is no longer executable as a skill. Use mcp_tool_search so the \
-                     runtime can load the MCP tool schema dynamically, then call the dynamically \
-                     exposed MCP tool.",
-                    skill_id
-                ),
-                structured_output: None,
-                execution_time_ms: start_time.elapsed().as_millis() as u64,
-            });
-        }
-        let parsed_mcp_skill: Option<(&str, &str)> = None;
+        let parsed_mcp_skill: Option<(&str, &str)> = if skill_id.starts_with("mcp:") {
+            let rest = &skill_id[4..];
+            if let Some((server, tool)) = rest.split_once('/') {
+                Some((server, tool))
+            } else {
+                return Ok(skills::executor::SkillExecutionResult {
+                    task_id: skill_id.clone(),
+                    success: false,
+                    output: format!(
+                        "Invalid MCP skill ID '{}'. Expected format: mcp:server/tool",
+                        skill_id
+                    ),
+                    structured_output: None,
+                    execution_time_ms: start_time.elapsed().as_millis() as u64,
+                });
+            }
+        } else {
+            None
+        };
 
         // 🆕 OPTIMIZATION PHASE 1: Approval gate for destructive operations
         // 🆕 FIX (Plan C): Store pending approval for multi-step user confirmation
@@ -8497,7 +8501,8 @@ impl Agent {
                         "Executing code skill '{}' via ReAct with tools",
                         registered_skill.skill.name
                     );
-                    let executor = skills::CodeSkillExecutor::new(llm.clone());
+                    let executor = skills::CodeSkillExecutor::new(llm.clone())
+                        .with_mcp_manager(self.mcp_manager.clone());
                     executor.execute(source, &enriched_input).await
                 } else {
                     info!(
