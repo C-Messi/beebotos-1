@@ -1905,4 +1905,53 @@ TEXT
 验证：`cargo check -p beebotos-gateway -p beebotos-web` 通过。只有项目里已有的 warning。  
 注意：工作区里原本还有你改过的 `docs/quanttrade/qtrading-note.md`、`docs/windows-packaging.md` 和三张截图，我没有动它们。
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+ 上面的内容做参考，在执行/root/beebotos/workflows/xauusd_hourly.yaml工作流时，内容报告不完整，需要把执行的量化交易报告保存markdown文档，同时在webchat等通道上可以看到报告内容；需要优化完善xauusd_hourly工作流内容和相关的skills.
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+我会采用固定产物路径，而不是继续把 15KB JSON 塞进步骤参数里：fetch_macro 写 data/reports/xauusd/latest_macro.json，generate_report 读这个文件生成 latest_report.md 和带时间戳的报告文件，最后 quant_run 只拿报告路径和宏观文件路径执行决策。这样步骤间传递的是路径，WebChat 回复拿的是最终 Markdown。
+
+实现前我会稍微改一下后端工作流汇总逻辑：它现在对任何超过 5000 字符的 step output 都只显示前 500 字符，而且这个截断还按 byte 切片，对中文不友好。报告型步骤需要更高上限并按字符截断，否则即使工作流生成了完整 Markdown，WebChat 里还是会被切掉。
+
+脚本目录已准备好。接下来我会新增一个纯 Python 报告生成器：它从 latest_macro.json 读取数据，生成中文 Markdown，把完整文件保存到 data/reports/xauusd/，同时 stdout 返回报告内容和文件路径。
+
+报告生成脚本已落地。现在我要更新 xauusd-mt5-trader 的说明，让 CodeSkillExecutor 单发命令更容易选中 generate_report.py，并明确 quant_run 要返回完整 Markdown、不要只给短摘要。
+
+Skill 说明已补上“报告模式”和 workflow 输出契约。下一步改 xauusd_hourly.yaml 为三步：保存宏观 JSON、生成完整报告、再执行交易并输出/追加完整报告。
+
+
+xauusd_hourly.yaml 已切成三步了。现在我会调整后端 /workflow 汇总里的输出截断策略，对 generate_report/quant_run 这类报告步骤放宽展示长度，并改成按字符截断，避免中文切片崩掉。
+
+后端截断策略已改成报告步骤 24K 字符上限，并且全程按字符处理。现在我会跑脚本本地自检：用一个最小 sample JSON 生成报告，确认 Markdown 文件确实保存且 stdout 是完整正文。
+
+我补了一个 finalize_report.py 做最终整理，不过这种步骤会把上一步输出作为参数传给代码技能，我会再把 workflow 提示改得更稳一点：让它优先使用 quant_output 参数写临时文件，再调用脚本。这样比把一大段交易输出塞进命令行安全。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+已按你的参考方案把 `xauusd_hourly` 优化成“采集数据 -> 生成完整 Markdown 报告 -> 执行交易 -> 最终整理报告”的产物链。
+
+这次改动重点：
+
+- [xauusd_hourly.yaml](/root/beebotos/workflows/xauusd_hourly.yaml:36)：`fetch_macro` 不再把完整 JSON 直接塞给下一步，而是保存到 `/root/beebotos/data/reports/xauusd/latest_macro.json`。
+- [xauusd_hourly.yaml](/root/beebotos/workflows/xauusd_hourly.yaml:45)：新增 `generate_report` 步骤，生成完整中文 Markdown 报告。
+- [xauusd_hourly.yaml](/root/beebotos/workflows/xauusd_hourly.yaml:91)：新增 `final_report` 步骤，把 `quant_run` 输出追加进 Markdown，并把完整最终报告返回 WebChat。
+- [generate_report.py](/root/beebotos/skills/xauusd-mt5-trader/scripts/generate_report.py:154)：新增报告生成脚本，输出市场数据、FRED、地缘风险、央行购金、多因子决策矩阵等完整报告。
+- [finalize_report.py](/root/beebotos/skills/xauusd-mt5-trader/scripts/finalize_report.py:22)：新增最终整理脚本，把交易执行结果追加到报告末尾。
+- [fetch_all_macro.py](/root/beebotos/skills/macro-data-aggregator/scripts/fetch_all_macro.py:480)：新增 `--save-json` 参数，支持保存完整宏观 JSON。
+- [SKILL.md](/root/beebotos/skills/xauusd-mt5-trader/SKILL.md:114)：补充报告模式和 workflow 输出要求，要求返回完整 Markdown，不再只给短摘要。
+- [message_processor.rs](/root/beebotos/apps/gateway/src/services/message_processor.rs:187)：放宽 workflow 报告型步骤在 WebChat 中的显示上限，并改为按字符截断，避免中文 byte 切片问题。
+
+验证已完成：
+
+- `generate_report.py` 可生成并保存 `latest_report.md`
+- `finalize_report.py` 可追加交易输出并返回完整 Markdown
+- `fetch_all_macro.py --save-json ... --output summary` 可保存 JSON
+- `cargo check -p beebotos-gateway -p beebotos-web` 通过，只有项目已有 warning
+
+生成后的报告路径会在运行时落到：
+
+`/root/beebotos/data/reports/xauusd/latest_report.md`
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+上面的截图是在beebotos WEB页面的左边的"工作流"子项目的页面内容，XAUUSD Hourly Quant Trader工作流作为例子，问题2个：
+1、点击“开始"，需要输入JSON内容，为什么？ 还有停止，调度，配置，DAG等按钮，检查是否可以正常使用？
+2、当点击开始后，量化交易的报告，怎么可以查看？也可以查看历史记录的报告；

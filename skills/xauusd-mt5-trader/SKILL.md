@@ -111,6 +111,34 @@ metadata:
 
 ## 执行流程
 
+### Report Mode — 生成完整 Markdown 报告
+
+当用户或 Workflow 要求“生成报告”“format report”“读取 macro JSON 生成 markdown”时，必须直接执行脚本：
+
+```bash
+python3 {SKILL_DIR}/scripts/generate_report.py \
+  --macro-json <macro_json_path> \
+  --output-dir data/reports/xauusd
+```
+
+脚本会：
+- 读取宏观聚合 JSON；
+- 生成完整中文 Markdown 报告；
+- 同时保存 `data/reports/xauusd/latest_report.md` 与带时间戳的 `xauusd_report_YYYYMMDD_HHMMSS.md`；
+- 在 stdout 返回 `REPORT_PATH`、`LATEST_REPORT_PATH` 和完整报告正文。
+
+报告步骤必须返回完整 Markdown，不得只返回摘要。
+
+当用户或 Workflow 要求“最终整理报告”“追加交易结果”“finalize report”时，必须直接执行：
+
+```bash
+python3 {SKILL_DIR}/scripts/finalize_report.py \
+  --report-file <latest_report.md> \
+  --quant-output "<quant_run output>"
+```
+
+该脚本会将交易执行输出追加到 Markdown，并把完整最终报告返回 stdout。
+
 ### Step 1 — 数据搜集（必须逐项完成）
 
 按以下维度搜集数据。**优先使用传入数据，缺失则通过工具获取，再缺失标 N/A：**
@@ -249,6 +277,41 @@ metadata:
 ```
 
 数据来源：`mcp:metatrader/get_all_positions` + `mcp:metatrader/get_account_info`。
+
+### Workflow 输出要求
+
+当 Workflow 传入 `report_file` 或要求“基于已有报告追加交易决策”时：
+
+1. 先读取 `report_file` 的完整 Markdown。
+2. 执行 Step 1-5 中需要 MT5 MCP 的价格、账户、持仓和交易动作。
+3. 将交易执行记录、最终状态汇报、报告文件路径追加到 Markdown 末尾。
+4. 返回完整 Markdown 正文，而不是只返回 200-500 字的短摘要。
+5. 如果无法写回文件，也必须在回答中返回完整 Markdown，并说明写回失败原因。
+6. 如果被要求最终整理报告，使用 `scripts/finalize_report.py`，不要手工重写整篇报告。
+
+建议追加格式：
+
+```markdown
+## 9. 交易执行记录
+
+- XAUUSD 当前报价：...
+- 决策倾向：...
+- 执行动作：...
+- 订单结果：...
+
+## 10. 最终状态汇报
+
+- 当前持仓方向：...
+- 入场均价：...
+- 当前浮动盈亏：...
+- 账户总权益：...
+- 今日已平仓交易笔数：...
+
+## 11. 报告文件
+
+- 最新报告：data/reports/xauusd/latest_report.md
+- 本次报告：...
+```
 
 ---
 

@@ -11,6 +11,7 @@ Macro Data Aggregator — 宏观数据统一聚合脚本
 
 import argparse
 import json
+import os
 import sys
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -476,6 +477,7 @@ def main():
     parser.add_argument("--no-wgc", dest="wgc", action="store_false", help="Skip WGC data")
     parser.add_argument("--geopolitical", action="store_true", default=True, help="Fetch geopolitical risk data")
     parser.add_argument("--no-geopolitical", dest="geopolitical", action="store_false", help="Skip geopolitical risk data")
+    parser.add_argument("--save-json", default="", help="Write full JSON result to this file path")
     parser.add_argument("--output", choices=["json", "summary"], default="json")
     args = parser.parse_args()
 
@@ -499,10 +501,19 @@ def main():
             except Exception as e:
                 result[key] = {"error": str(e)}
 
+    if args.save_json:
+        out_dir = os.path.dirname(os.path.abspath(args.save_json))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(args.save_json, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+
     if args.output == "json":
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print("=== Macro Data Summary ===")
+        if args.save_json:
+            print(f"Saved full JSON: {args.save_json}")
         for k, v in result.items():
             if k == "timestamp":
                 print(f"Timestamp: {v}")

@@ -176,6 +176,46 @@ struct WorkflowChatResult {
     tool_calls: Vec<serde_json::Value>,
 }
 
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in text.chars().take(max_chars) {
+        out.push(ch);
+    }
+    out
+}
+
+fn workflow_output_display_limit(step_id: &str, output: &str) -> usize {
+    let lower = step_id.to_lowercase();
+    if lower.contains("report") || lower.contains("quant") || output.contains("# XAUUSD") {
+        24000
+    } else {
+        5000
+    }
+}
+
+fn append_workflow_step_output(result: &mut String, step_id: &str, output: &serde_json::Value) {
+    let output_str = match output {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        _ => serde_json::to_string_pretty(output).unwrap_or_default(),
+    };
+    if output_str.is_empty() {
+        return;
+    }
+
+    let output_chars = output_str.chars().count();
+    let limit = workflow_output_display_limit(step_id, &output_str);
+    if output_chars <= limit {
+        result.push_str(&format!("  - Output: {}\n", output_str));
+    } else {
+        let preview = truncate_chars(&output_str, limit);
+        result.push_str(&format!(
+            "  - Output: {}... (truncated, {} chars total; full report saved on disk)\n",
+            preview, output_chars
+        ));
+    }
+}
+
 /// 消息处理器
 pub struct MessageProcessor {
     /// 去重器
@@ -2490,19 +2530,7 @@ Rules:
                         step_state.duration_secs()
                     ));
                     if let Some(ref output) = step_state.output {
-                        let output_str = match output {
-                            serde_json::Value::String(s) => s.clone(),
-                            serde_json::Value::Null => String::new(),
-                            _ => serde_json::to_string_pretty(output).unwrap_or_default(),
-                        };
-                        if !output_str.is_empty() && output_str.len() < 5000 {
-                            result.push_str(&format!("  - Output: {}\n", output_str));
-                        } else if output_str.len() >= 5000 {
-                            result.push_str(&format!(
-                                "  - Output: {}... (truncated)\n",
-                                &output_str[..500]
-                            ));
-                        }
+                        append_workflow_step_output(&mut result, step_id, output);
                     }
                     if let Some(ref err) = step_state.error {
                         result.push_str(&format!("  - Error: {}\n", err));
@@ -2687,19 +2715,7 @@ Rules:
                         step_state.duration_secs()
                     ));
                     if let Some(ref output) = step_state.output {
-                        let output_str = match output {
-                            serde_json::Value::String(s) => s.clone(),
-                            serde_json::Value::Null => String::new(),
-                            _ => serde_json::to_string_pretty(output).unwrap_or_default(),
-                        };
-                        if !output_str.is_empty() && output_str.len() < 5000 {
-                            result.push_str(&format!("  - Output: {}\n", output_str));
-                        } else if output_str.len() >= 5000 {
-                            result.push_str(&format!(
-                                "  - Output: {}... (truncated)\n",
-                                &output_str[..500]
-                            ));
-                        }
+                        append_workflow_step_output(&mut result, step_id, output);
                     }
                     if let Some(ref err) = step_state.error {
                         result.push_str(&format!("  - Error: {}\n", err));
