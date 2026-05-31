@@ -3363,4 +3363,354 @@ let use_react = has_crypto_symbol && (has_analysis_keyword || is_multi_step);
 build_analysis_tools 是一个加密货币分析专用的遗留函数，它把 alpaca 的 4 个工具 + 3 个假工具写死在代码里。聊天 Agent 的通用 Native ReAct 已经支持动态工具加载，但 execute_with_react_planning 这个旁路仍然依赖这个硬编码函数，导致非加密货币场景无法触发 ReAct，且 metatrader 等 MCP 工具在 ReAct 中完全不可用。
    目前取消这些硬编码的加密通道，聊天Agent只使用通用 Native ReAct即可。
 
+编译任务已经在后台运行了。让我等待它完成。
+不过，让我先回顾一下我做了什么修改，并确认这些修改是否正确。
+修改 1：process_task_v2 中的路由 删除了 should_use_react_planning + execute_with_react_planning 分支。现在所有任务要么走 execute_with_planning，要么走 handle_llm_task_v2。
+修改 2：execute_with_planning 中的 has_crypto 分支 删除了加密货币专用路径。现在所有任务都走通用 Native ReAct 路径（handle_llm_task_v2）。
+效果：
+• 原来含加密货币关键词的任务 → 走 execute_with_react_planning（硬编码 alpaca 的文本 JSON ReAct）
+• 现在含加密货币关键词的任务 → 走 execute_with_planning → handle_llm_task_v2 → handle_llm_task_internal → 通用 Native Tool Loop
+通用 Native Tool Loop 已经支持：
+1. 动态从 SkillRegistry 加载 skill 作为 ToolDefinition
+2. mcp_tool_search 动态暴露 MCP 工具
+3. Native function calling（call_llm_tool_turn）
+4. 多轮工具调用循环
+所以 metatrader 等 MCP 工具现在可以在聊天 Agent 中使用了。
+让我等待编译完成。
+
+打包完成。以下是本次修改总结：
+
+---
+
+### 修改内容
+
+**`crates/agents/src/agent_impl.rs`**
+
+1. **`process_task_v2` 路由**（line 5115-5125）：
+   - 删除了 `should_use_react_planning` + `execute_with_react_planning` 分支
+   - 所有 planning 任务统一走 `execute_with_planning` → 通用 Native ReAct
+
+2. **`execute_with_planning`**（line 8933-9021）：
+   - 删除了 `has_crypto` 加密货币专用分支
+   - 删除了对 `execute_with_react_planning` 的调用
+   - 所有任务直接走通用路径：`handle_llm_task_v2` → `handle_llm_task_internal` → Native Tool Loop
+
+---
+
+### 效果
+
+**修改前**：
+```
+用户问 "分析 BTC 走势"
+  → should_use_react_planning 返回 true
+    → execute_with_react_planning
+      → build_analysis_tools（只认 alpaca，硬编码 4 个工具）
+        → UnifiedReActExecutor（文本 JSON ReAct）
+```
+
+**修改后**：
+```
+用户问 "分析 BTC 走势"
+  → should_use_planning 返回 true
+    → execute_with_planning
+      → handle_llm_task_v2
+        → handle_llm_task_internal
+          → Native Tool Loop（call_llm_tool_turn）
+            → 动态加载所有 SkillRegistry 工具 + MCP 工具
+```
+
+**关键改进**：
+- ❌ 不再硬编码 alpaca 的 4 个加密货币工具
+- ❌ 不再使用 `build_analysis_tools`（遗留函数，虽然还在代码中但不再被调用）
+- ✅ 聊天 Agent 的 ReAct 现在**完全通用**，支持所有 MCP Server（metatrader、alpaca 等）
+- ✅ 统一使用 Native Function Calling（`call_llm_tool_turn`），LLM 通过 `mcp_tool_search` 动态发现 MCP 工具
+
+---
+
+### 打包产物
+
+```
+/root/beebotos/dist/beebotos-x86_64-pc-windows-gnu.zip
+├── beebotos-gateway.exe   (41.6 MB, 2026-05-31 22:44)
+├── config/
+├── migrations_sqlite/
+├── skills/
+├── workflows/
+└── beebotos-run.ps1
+```
+
+完整打包已完成，产物包含全部三个服务：
+
+```
+/root/beebotos/dist/beebotos-x86_64-pc-windows-gnu.zip  (22.4 MB, 2026-05-31 22:53)
+├── beebotos-gateway.exe    41.6 MB  ← 含 MCP 工具修复 + 取消 alpaca 硬编码
+├── web-server.exe           5.1 MB
+├── beehub.exe               1.0 MB
+├── beebotos-web-*.wasm      5.8 MB
+├── beebotos-web-*.js       72.8 KB
+├── index.html
+├── config/
+├── migrations_sqlite/
+├── skills/
+├── workflows/
+└── beebotos-run.ps1
+```
+
+本次修改已全部包含：
+1. **工作流 ReAct 支持 MCP 工具** — `CodeSkillExecutor` 动态枚举所有 MCP 工具
+2. **取消聊天 Agent alpaca 硬编码** — `execute_with_react_planning` 专用路径已移除，所有任务统一走通用 Native ReAct
+3. **Workflow timeout 修复** — `fetch_macro` 120s、`final_report` 60s
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+上面修改后，聊天Agent 通用型ReAct 与工作流的ReAct对比分析一下；
+
+基于最新修改后的代码，重新对比分析：
+
+---
+
+## 聊天 Agent 通用型 ReAct vs 工作流 ReAct 对比
+
+### 1. 调用链（修改后）
+
+```
+聊天 Agent 通用型 ReAct
+├── 入口: Agent::handle_llm_task_internal()  [agent_impl.rs:5939]
+├── 前置: process_task_v2 → handle_llm_task_v2 → handle_llm_task_internal
+├── 触发: 所有含工具调用的任务（不再区分加密货币/非加密货币）
+├── 循环体: for round in 0..max_tool_rounds { call_llm_tool_turn() → execute_native_tool_call() }
+└── 特点: 使用 LLM Native Function Calling
+
+工作流 ReAct
+├── 入口: CodeSkillExecutor::execute()  [code_executor.rs:30]
+├── 前置: execute_registered_skill → CodeSkillExecutor
+├── 触发: Code skill 的 single-shot 失败后 fallback
+├── 循环体: UnifiedReActExecutor::execute() { call_llm() → parse JSON → execute_tool() }
+└── 特点: 使用文本 JSON ReAct
+```
+
+### 2. 核心差异对比表
+
+| 维度 | 聊天 Agent 通用型 ReAct | 工作流 ReAct |
+|------|------------------------|-------------|
+| **LLM 调用方式** | `call_llm_tool_turn()` — **Native Function Calling**（LLM 原生支持 tool_calls） | `call_llm()` — **文本 JSON ReAct**（LLM 输出 `{"thought":"...","action":"call_tool","tool_name":"..."}`） |
+| **工具表示** | `Vec<communication::ToolDefinition>`（schema 给 LLM 看） | `HashMap<String, Box<dyn SkillTool>>`（可执行 trait 对象） |
+| **工具发现机制** | 运行时从 SkillRegistry 检索 + 关键词打分排序 | `default_tool_set()` + `add_mcp_tools_to_set()` 动态枚举所有 MCP 工具 |
+| **MCP 工具支持** | ✅ `mcp_tool_search` → 动态 push `ToolDefinition` 到 `native_tools`，LLM 下一轮可见 | ✅ `mcp_tool_search` + `McpDynamicSkillTool` 已注入 `available_tools` |
+| **工具执行入口** | `Agent::execute_native_tool_call()` | `UnifiedReActExecutor::execute_tool()` → `SkillTool::execute()` |
+| **循环控制** | 手写 `for round in 0..max_tool_rounds`（agent_impl.rs:7140） | `UnifiedReActExecutor` 内部循环（max_rounds=6） |
+| **Cancellation** | ✅ 支持（每轮检查 cancel_rx） | ❌ `None` |
+| **ReAct Trace** | ✅ `emit_react_trace()` 完整事件流 | ❌ 无 |
+| **Session 上下文** | ✅ 支持 history、memory、weather | ❌ 无（单次 skill 调用） |
+| **System Prompt** | Agent 自建（persona + workspace + skill_catalog） | `general_react_prompt` + Skill 上下文（SKILL.md + 脚本信息） |
+| **工具名格式** | `mcp:server-tool`（冒号和斜杠被替换为 `-`，如 `mcp-metatrader-get_xauusd_price`） | `mcp:server/tool`（原始格式） |
+| **Post-processing** | 有（安全过滤、Markdown 格式化） | 无（直接返回脚本输出） |
+
+### 3. 工具执行路径差异
+
+**聊天 Agent**（native tool calling）：
+```
+LLM tool_call("mcp-metatrader-get_xauusd_price")   ← 工具名被规范化（:→-）
+    → Agent::execute_native_tool_call()
+        → is_mcp_search_tool? → execute_mcp_tool_search()
+        → is_mcp_dynamic_tool_name? → execute_mcp_dynamic_tool()
+        → is_builtin_workspace_tool? → execute_builtin_workspace_tool()
+        → resolve_native_skill? → execute_registered_skill()
+```
+
+**工作流**（文本 JSON ReAct）：
+```
+LLM 输出 JSON: {"tool_name":"mcp:metatrader/get_xauusd_price","arguments":{...}}
+    → UnifiedReActExecutor::parse_react_response()
+        → UnifiedReActExecutor::execute_tool()
+            → available_tools.get("mcp:metatrader/get_xauusd_price")
+                → McpDynamicSkillTool::execute()
+                    → MCPClient::call_tool()
+```
+
+### 4. MCP 动态工具加载的异同
+
+| 维度 | 聊天 Agent | 工作流 |
+|------|-----------|--------|
+| **搜索工具** | `mcp_tool_search`（Agent 内置） | `McpToolSearchSkillTool`（新增） |
+| **动态暴露** | 调用 `mcp_tool_search` 后 push `ToolDefinition` 到 `native_tools`，LLM 下一轮可见 | 调用 `mcp_tool_search` 返回文本结果，LLM 需记住工具名并在后续轮次调用 |
+| **工具名格式** | `mcp:server-tool`（冒号和斜杠被替换为 `-`） | `mcp:server/tool`（原始格式） |
+
+### 5. 修改后的关键变化
+
+**聊天 Agent**（本次修改后）：
+- ❌ 删除了 `execute_with_react_planning` 路径（硬编码 alpaca 的文本 JSON ReAct）
+- ✅ 所有任务统一走 `handle_llm_task_internal` → Native Tool Loop
+- ✅ 支持所有 MCP Server（metatrader、alpaca 等），不再只认 alpaca
+
+**工作流**（本次修改后）：
+- ✅ `CodeSkillExecutor` 增加 `mcp_manager`，动态枚举所有 MCP 工具
+- ✅ `McpToolSearchSkillTool` + `McpDynamicSkillTool` 支持 MCP 工具搜索和调用
+
+### 6. 一句话总结
+
+> **聊天 Agent 的 ReAct 是 "Native Function Calling 循环"**（LLM 原生支持 tool_calls，Agent 手写轮询执行，有 session/memory/trace），**工作流的 ReAct 是 "文本 JSON ReAct 循环"**（LLM 输出结构化 JSON，由 `UnifiedReActExecutor` 解析并调度 `SkillTool`，无状态单次调用）。两者**底层 LLM 协议完全不同**，但**都已支持动态 MCP 工具**（聊天 Agent 通过 `native_tools` push，工作流通过 `SkillTool` 包装）。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+两者底层 LLM 协议完全不同，分析一下不同协议内容
+
+两者的底层 LLM 协议差异体现在 **HTTP 请求/响应格式**、**工具注入方式**和**工具调用返回格式**三个层面。
+
+---
+
+## 1. HTTP 请求格式对比
+
+### 聊天 Agent Native Function Calling
+
+**请求体**（OpenAI 标准格式）：
+```json
+{
+  "model": "gpt-4o",
+  "messages": [
+    {"role": "system", "content": "You are a workspace-aware assistant..."},
+    {"role": "user", "content": "帮我查一下 XAUUSD 价格"},
+    {"role": "assistant", "content": null, "tool_calls": [
+      {"id": "call_1", "type": "function", "function": {
+        "name": "mcp_tool_search",
+        "arguments": "{\"query\":\"XAUUSD price\"}"
+      }}
+    ]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "Found: mcp:metatrader/get_xauusd_price"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_tool_search",
+        "description": "Load schema details for a connected MCP tool...",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "tool_name": {"type": "string"},
+            "query": {"type": "string"}
+          }
+        }
+      }
+    },
+    {
+      "type": "function", 
+      "function": {
+        "name": "mcp-metatrader-get-xauusd-price",
+        "description": "获取XAUUSD实时价格",
+        "parameters": {"type": "object", "properties": {}}
+      }
+    }
+  ],
+  "tool_choice": "auto"
+}
+```
+
+**关键特征**：
+- `tools` 字段：以结构化 JSON Schema 描述可用工具
+- `tool_choice: "auto"`：让 LLM 自主决定是否调用工具
+- `messages` 中包含 `role: "tool"` 消息（携带工具执行结果）
+
+### 工作流文本 JSON ReAct
+
+**请求体**（普通 Chat Completion）：
+```json
+{
+  "model": "gpt-4o",
+  "messages": [
+    {"role": "system", "content": "## 可用工具列表\n- file_read: 读取文件内容。参数: path (string)\n- mcp:metatrader/get_xauusd_price: 获取XAUUSD实时价格。参数: ...\n\n你是 BeeBotOS 自主任务执行引擎...\n\n每轮你只能做一件事：\n1. 思考（Thought）...\n2. 行动（Action）：要么调用工具，要么输出最终结果\n\n返回严格 JSON：\n{\"thought\":\"...\",\"action\":\"call_tool\",\"tool_name\":\"...\",\"arguments\":{...},\"reasoning\":\"...\"}\n或 {\"thought\":\"...\",\"action\":\"final_answer\",\"content\":\"...\"}"},
+    {"role": "user", "content": "帮我查一下 XAUUSD 价格"},
+    {"role": "assistant", "content": "```json\n{\"thought\":\"用户需要XAUUSD价格\",\"action\":\"call_tool\",\"tool_name\":\"mcp:metatrader/get_xauusd_price\",\"arguments\":{},\"reasoning\":\"直接调用MT5工具获取价格\"}\n```"},
+    {"role": "user", "content": "[Observation]\n结果：{ \"price\": 2350.50 }\n\nDecide the next step..."}
+  ]
+}
+```
+
+**关键特征**：
+- **没有 `tools` 字段**：工具描述完全通过 System Prompt 文本注入
+- **没有 `tool_choice` 字段**：LLM 自主决定输出什么文本
+- `messages` 中没有 `role: "tool"`，工具结果以普通 user/system 消息文本形式注入
+
+---
+
+## 2. HTTP 响应格式对比
+
+### 聊天 Agent Native Function Calling
+
+**响应体**：
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_abc123",
+          "type": "function",
+          "function": {
+            "name": "mcp-metatrader-get-xauusd-price",
+            "arguments": "{}"
+          }
+        }
+      ],
+      "reasoning_content": "用户想要查询XAUUSD价格，我应该调用metatrader的get_xauusd_price工具..."
+    }
+  }]
+}
+```
+
+**代码解析**（agent_impl.rs:7162）：
+```rust
+let turn = llm.call_llm_tool_turn(messages, native_tools, extra_params).await?;
+// turn.tool_calls: Vec<ToolCall> — 结构化提取，无需解析文本
+for tool_call in &turn.tool_calls {
+    let tool_name = &tool_call.function.name;      // "mcp-metatrader-get-xauusd-price"
+    let arguments = &tool_call.function.arguments; // "{}"
+    let output = self.execute_native_tool_call(tool_call, ...).await;
+}
+```
+
+### 工作流文本 JSON ReAct
+
+**响应体**：
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": "```json\n{\"thought\":\"价格已获取，准备回复用户\",\"action\":\"final_answer\",\"content\":\"XAUUSD 当前价格 $2350.50\"}\n```"
+    }
+  }]
+}
+```
+
+**代码解析**（unified_react_executor.rs:874-924）：
+```rust
+let llm_response = self.llm.call_llm(messages.clone(), None).await?;
+// 返回纯文本，需要手动解析 JSON
+let parsed = parse_react_response(&llm_response)?;
+// parsed.action: CallTool { tool_name: "mcp:metatrader/get_xauusd_price", arguments: {...} }
+// 或 FinalAnswer { content: "..." }
+```
+
+---
+
+## 3. 协议差异总结表
+
+| 维度 | 聊天 Agent Native Function Calling | 工作流文本 JSON ReAct |
+|------|-----------------------------------|----------------------|
+| **HTTP 请求** | `POST /v1/chat/completions` | `POST /v1/chat/completions` |
+| **请求体字段** | 含 `tools`、`tool_choice` | **不含** `tools`、`tool_choice` |
+| **工具描述位置** | `tools[].function`（结构化 Schema） | System Prompt 文本（markdown 列表） |
+| **对 LLM 要求** | 需支持 function calling（GPT-4、Kimi k2.6 等） | 任何文本 LLM 都支持 |
+| **LLM 返回格式** | `choices[0].message.tool_calls`（结构化数组） | `choices[0].message.content`（纯文本） |
+| **工具调用解析** | 直接读取结构化字段 | 正则/JSON 解析文本内容 |
+| **工具结果回传** | `role: "tool"` + `tool_call_id` | 普通 `role: "user"` 消息文本 |
+| **多轮上下文** | 自动保留 tool_call + tool result 配对 | 手动拼接 observation 文本 |
+| **错误处理** | LLM API 层返回格式错误（如无效 tool_name） | 解析失败由代码捕获（JSON parse error） |
+
+---
+
+## 4. 一句话总结
+
+> **Native Function Calling** 是 LLM 协议层的原生能力（OpenAI API 标准），工具定义在 HTTP `tools` 字段中，LLM 返回结构化 `tool_calls`，**可靠但依赖模型支持**。**文本 JSON ReAct** 是在应用层模拟的协议，工具定义写在 prompt 里，LLM 返回普通文本再解析 JSON，**通用但不稳定**（LLM 可能不遵循格式、输出 markdown 包裹等）。
 

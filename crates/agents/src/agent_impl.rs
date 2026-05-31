@@ -5112,13 +5112,10 @@ impl Agent {
                 }
             }
 
-            // 🆕 UNIFIED REACT: ReAct autonomous planning takes priority over
-            // traditional P2 Planning. All planning tasks are delegated to LLM
-            // self-decision (ReAct loop).
-            if self.should_use_react_planning(&message_text, &intent_v2, &selection) {
-                self.execute_with_react_planning(&task, &message_text, &intent_v2)
-                    .await
-            } else if should_use_planning {
+            // 🆕 UNIFIED REACT: All planning tasks delegate to LLM self-decision
+            // via the general native tool loop (handle_llm_task_internal).
+            // Legacy execute_with_react_planning (alpaca hard-coded) removed.
+            if should_use_planning {
                 self.execute_with_planning(task).await
             } else {
                 self.handle_llm_task_v2(&task, &intent_v2, &selection).await
@@ -8947,43 +8944,6 @@ impl Agent {
             "🧠 Unified ReAct planning for task {} (legacy P2 Planning removed)",
             task.id
         );
-
-        let lower = message_text.to_lowercase();
-        let has_crypto = [
-            "btc",
-            "bitcoin",
-            "比特币",
-            "eth",
-            "ethereum",
-            "以太坊",
-            "sol",
-            "xrp",
-            "doge",
-            "加密货币",
-            "crypto",
-            "数字货币",
-        ]
-        .iter()
-        .any(|s| lower.contains(s));
-
-        if has_crypto {
-            // Investment-analysis path: use the multi-round ReAct executor
-            let intent = crate::skill_matching::IntentAnalysisV2 {
-                direct_answer: false,
-                needs_skill: true,
-                needs_planning: true,
-                planning_strategy_hint: None,
-                intent: crate::intent::UserIntent::MultiStepPlanning,
-                entities: std::collections::HashMap::new(),
-                constraints: Vec::new(),
-                confidence: 1.0,
-                query_summary: message_text.clone(),
-                active_toolsets: vec![],
-            };
-            return self
-                .execute_with_react_planning(&task, &message_text, &intent)
-                .await;
-        }
 
         // General path: delegate to LLM with native tool-calling (single-round
         // autonomous skill selection). The LLM decides which tool to call based
