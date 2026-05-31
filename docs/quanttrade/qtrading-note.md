@@ -2138,4 +2138,17 @@ Template resolution: Unknown template variable: steps.generate_report.output
 1. 给 `fetch_all_macro.py` 增加各数据源的独立超时和降级（degraded）返回。
 2. 或把 `continue_on_failure` 改为 `false`，让失败时立即停止并明确报错，而不是继续执行半残流程。
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+已修改完成。
+
+在 `beebotos-dev.ps1` 的 `Pack-Release` 函数中（第 405–407 行），补充了 `workflows/` 目录的自动复制逻辑：
+
+```powershell
+if (Test-Path (Join-Path $ProjectRoot "workflows")) {
+    Copy-Item -Recurse (Join-Path $ProjectRoot "workflows") $outDir
+}
+```
+
+后续重新执行 `pwsh ./beebotos-dev.ps1 pack all` 时，`workflows/` 会被自动打包进 `dist/beebotos/` 和 zip 文件中，无需再手动补充。
+
 
