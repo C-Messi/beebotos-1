@@ -363,7 +363,8 @@ pub struct ThreadPoolExecutor {
     shutdown: Arc<AtomicBool>,
     task_map: Arc<RwLock<HashMap<TaskId, Arc<ExecutableTask>>>>,
     num_workers: usize,
-    /// Isolated tokio runtime for kernel workers to avoid blocking the HTTP runtime
+    /// Isolated tokio runtime for kernel workers to avoid blocking the HTTP
+    /// runtime
     runtime: std::sync::Mutex<Option<tokio::runtime::Runtime>>,
 }
 

@@ -181,87 +181,99 @@ impl SkillExecutor {
         let input_json = build_input_json(&context.input, parameters);
         let input_bytes = input_json.into_bytes();
 
-        let blocking_task = tokio::task::spawn_blocking(move || -> Result<(String, u64), SkillExecutionError> {
-            let module = engine
-                .compile_cached(&skill_id, &wasm_bytes)
-                .map_err(|e| SkillExecutionError::InvalidWasm(e.to_string()))?;
+        let blocking_task =
+            tokio::task::spawn_blocking(move || -> Result<(String, u64), SkillExecutionError> {
+                let module = engine
+                    .compile_cached(&skill_id, &wasm_bytes)
+                    .map_err(|e| SkillExecutionError::InvalidWasm(e.to_string()))?;
 
-            let mut instance = engine
-                .instantiate_with_host(&module, &skill_id)
-                .map_err(|e| SkillExecutionError::InstantiationError(e.to_string()))?;
+                let mut instance = engine
+                    .instantiate_with_host(&module, &skill_id)
+                    .map_err(|e| SkillExecutionError::InstantiationError(e.to_string()))?;
 
-            if has_named_fn && !instance.has_export(&target_func) {
-                return Err(SkillExecutionError::FunctionNotFound(format!(
-                    "Function '{}' not exported by skill '{}'",
-                    target_func, skill_id
-                )));
-            }
-
-            let mem_bytes = instance.memory_size_bytes();
-            let needed = INPUT_BUFFER_OFFSET + input_bytes.len() + 4096;
-            if mem_bytes < needed {
-                let current_pages = (mem_bytes / 65536) as u32;
-                let needed_pages = ((needed + 65535) / 65536) as u32;
-                let delta = needed_pages.saturating_sub(current_pages);
-                if delta > 0 {
-                    instance
-                        .grow_memory(delta)
-                        .map_err(|e| SkillExecutionError::ExecutionFailed(e.to_string()))?;
+                if has_named_fn && !instance.has_export(&target_func) {
+                    return Err(SkillExecutionError::FunctionNotFound(format!(
+                        "Function '{}' not exported by skill '{}'",
+                        target_func, skill_id
+                    )));
                 }
-            }
 
-            instance
-                .write_memory(INPUT_BUFFER_OFFSET, &input_bytes)
-                .map_err(|e| SkillExecutionError::ExecutionFailed(e.to_string()))?;
+                let mem_bytes = instance.memory_size_bytes();
+                let needed = INPUT_BUFFER_OFFSET + input_bytes.len() + 4096;
+                if mem_bytes < needed {
+                    let current_pages = (mem_bytes / 65536) as u32;
+                    let needed_pages = ((needed + 65535) / 65536) as u32;
+                    let delta = needed_pages.saturating_sub(current_pages);
+                    if delta > 0 {
+                        instance
+                            .grow_memory(delta)
+                            .map_err(|e| SkillExecutionError::ExecutionFailed(e.to_string()))?;
+                    }
+                }
 
-            let start_time = std::time::Instant::now();
+                instance
+                    .write_memory(INPUT_BUFFER_OFFSET, &input_bytes)
+                    .map_err(|e| SkillExecutionError::ExecutionFailed(e.to_string()))?;
 
-            let output_ptr = instance
-                .call_typed::<(i32, i32), i32>(
-                    &target_func,
-                    (INPUT_BUFFER_OFFSET as i32, input_bytes.len() as i32),
-                )
-                .map_err(|e| SkillExecutionError::ExecutionFailed(e.to_string()))?;
+                let start_time = std::time::Instant::now();
 
-            let execution_time_ms = start_time.elapsed().as_millis() as u64;
+                let output_ptr = instance
+                    .call_typed::<(i32, i32), i32>(
+                        &target_func,
+                        (INPUT_BUFFER_OFFSET as i32, input_bytes.len() as i32),
+                    )
+                    .map_err(|e| SkillExecutionError::ExecutionFailed(e.to_string()))?;
 
-            let output_len_bytes = instance.read_memory(output_ptr as usize, 4).map_err(|e| {
-                SkillExecutionError::ExecutionFailed(format!("Failed to read output length: {}", e))
-            })?;
-            let output_len = i32::from_le_bytes([
-                output_len_bytes[0],
-                output_len_bytes[1],
-                output_len_bytes[2],
-                output_len_bytes[3],
-            ]) as usize;
+                let execution_time_ms = start_time.elapsed().as_millis() as u64;
 
-            const MAX_OUTPUT_LEN: usize = 1024 * 1024;
-            if output_len > MAX_OUTPUT_LEN {
-                return Err(SkillExecutionError::ExecutionFailed(format!(
-                    "Output length {} exceeds maximum {}",
-                    output_len, MAX_OUTPUT_LEN
-                )));
-            }
+                let output_len_bytes =
+                    instance.read_memory(output_ptr as usize, 4).map_err(|e| {
+                        SkillExecutionError::ExecutionFailed(format!(
+                            "Failed to read output length: {}",
+                            e
+                        ))
+                    })?;
+                let output_len = i32::from_le_bytes([
+                    output_len_bytes[0],
+                    output_len_bytes[1],
+                    output_len_bytes[2],
+                    output_len_bytes[3],
+                ]) as usize;
 
-            let output_data = instance
-                .read_memory(output_ptr as usize + 4, output_len)
-                .map_err(|e| {
-                    SkillExecutionError::ExecutionFailed(format!("Failed to read output data: {}", e))
-                })?;
-            let output = String::from_utf8_lossy(&output_data).to_string();
+                const MAX_OUTPUT_LEN: usize = 1024 * 1024;
+                if output_len > MAX_OUTPUT_LEN {
+                    return Err(SkillExecutionError::ExecutionFailed(format!(
+                        "Output length {} exceeds maximum {}",
+                        output_len, MAX_OUTPUT_LEN
+                    )));
+                }
 
-            Ok((output, execution_time_ms))
-        });
+                let output_data = instance
+                    .read_memory(output_ptr as usize + 4, output_len)
+                    .map_err(|e| {
+                        SkillExecutionError::ExecutionFailed(format!(
+                            "Failed to read output data: {}",
+                            e
+                        ))
+                    })?;
+                let output = String::from_utf8_lossy(&output_data).to_string();
+
+                Ok((output, execution_time_ms))
+            });
 
         if let Some(ms) = timeout_ms {
             tokio::time::timeout(std::time::Duration::from_millis(ms as u64), blocking_task)
                 .await
-                .map_err(|_| SkillExecutionError::ExecutionFailed("Execution timed out".to_string()))?
-                .map_err(|e| SkillExecutionError::ExecutionFailed(format!("Blocking task panicked: {}", e)))?
+                .map_err(|_| {
+                    SkillExecutionError::ExecutionFailed("Execution timed out".to_string())
+                })?
+                .map_err(|e| {
+                    SkillExecutionError::ExecutionFailed(format!("Blocking task panicked: {}", e))
+                })?
         } else {
-            blocking_task
-                .await
-                .map_err(|e| SkillExecutionError::ExecutionFailed(format!("Blocking task panicked: {}", e)))?
+            blocking_task.await.map_err(|e| {
+                SkillExecutionError::ExecutionFailed(format!("Blocking task panicked: {}", e))
+            })?
         }
     }
 

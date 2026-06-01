@@ -63,7 +63,11 @@ pub fn DaoPage() -> impl IntoView {
                 }
                 Err(e) => {
                     create_saving.set(false);
-                    create_error.set(Some(format!("{}: {}", i18n.get().t("dao-create-failed"), e)));
+                    create_error.set(Some(format!(
+                        "{}: {}",
+                        i18n.get().t("dao-create-failed"),
+                        e
+                    )));
                 }
             }
         });

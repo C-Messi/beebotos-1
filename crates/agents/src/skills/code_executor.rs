@@ -286,10 +286,7 @@ async fn add_mcp_tools_to_set(
                     mcp_tool.input_schema.clone(),
                 )),
             );
-            debug!(
-                "Registered MCP tool '{}' for skill ReAct",
-                tool_id
-            );
+            debug!("Registered MCP tool '{}' for skill ReAct", tool_id);
         }
     }
 
@@ -317,11 +314,10 @@ impl SkillTool for McpToolSearchSkillTool {
     }
 
     fn description(&self) -> &str {
-        "Load schema details for a connected MCP tool. Prefer passing the exact \
-         catalog name in tool_name, for example mcp:server/tool. You may also \
-         search by query when you only know the intent. This returns lightweight \
-         matches and dynamically exposes selected MCP tool schemas for the next \
-         tool call."
+        "Load schema details for a connected MCP tool. Prefer passing the exact catalog name in \
+         tool_name, for example mcp:server/tool. You may also search by query when you only know \
+         the intent. This returns lightweight matches and dynamically exposes selected MCP tool \
+         schemas for the next tool call."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -363,7 +359,11 @@ impl SkillTool for McpToolSearchSkillTool {
             if let Some(tn) = tool_name {
                 let expected = format!("mcp:{}/{}", server_name, tool_name_val);
                 if tn == &expected {
-                    let schema = match self.mcp_manager.get_tool_schema(server_name, tool_name_val).await {
+                    let schema = match self
+                        .mcp_manager
+                        .get_tool_schema(server_name, tool_name_val)
+                        .await
+                    {
                         Ok(t) => t.input_schema,
                         Err(_) => Value::Null,
                     };

@@ -1829,10 +1829,7 @@ impl Agent {
         inner(pattern.as_bytes(), text.as_bytes())
     }
 
-    fn collect_workspace_files_sync(
-        root: &Path,
-        limit: usize,
-    ) -> Result<Vec<PathBuf>, AgentError> {
+    fn collect_workspace_files_sync(root: &Path, limit: usize) -> Result<Vec<PathBuf>, AgentError> {
         let mut files = Vec::new();
         let mut stack = vec![root.to_path_buf()];
         while let Some(path) = stack.pop() {
@@ -1866,7 +1863,8 @@ impl Agent {
         pattern: &str,
         max_results: usize,
     ) -> Result<String, AgentError> {
-        let files = Self::collect_workspace_files_sync(root, max_results.saturating_mul(20).max(200))?;
+        let files =
+            Self::collect_workspace_files_sync(root, max_results.saturating_mul(20).max(200))?;
         let mut matches = Vec::new();
         for file in files {
             let rel = file
@@ -2003,7 +2001,14 @@ impl Agent {
     ) -> Result<String, AgentError> {
         let root = self.resolve_tool_path(if path.is_empty() { "." } else { path })?;
         let workspace = Self::normalize_path_without_fs(&self.workspace_dir());
-        Self::execute_workspace_grep_sync(&root, &workspace, pattern, include, case_sensitive, max_matches)
+        Self::execute_workspace_grep_sync(
+            &root,
+            &workspace,
+            pattern,
+            include,
+            case_sensitive,
+            max_matches,
+        )
     }
 
     fn is_blocked_web_host(host: &str) -> bool {
@@ -7971,23 +7976,14 @@ impl Agent {
         });
 
         if timeout_ms > 0 {
-            tokio::time::timeout(
-                std::time::Duration::from_millis(timeout_ms),
-                blocking_task,
-            )
-            .await
-            .map_err(|_| {
-                AgentError::Timeout("WASM sandbox execution timed out".to_string())
-            })?
-            .map_err(|e| {
-                AgentError::Execution(format!("WASM blocking task panicked: {}", e))
-            })?
+            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), blocking_task)
+                .await
+                .map_err(|_| AgentError::Timeout("WASM sandbox execution timed out".to_string()))?
+                .map_err(|e| AgentError::Execution(format!("WASM blocking task panicked: {}", e)))?
         } else {
             blocking_task
                 .await
-                .map_err(|e| {
-                    AgentError::Execution(format!("WASM blocking task panicked: {}", e))
-                })?
+                .map_err(|e| AgentError::Execution(format!("WASM blocking task panicked: {}", e)))?
         }
     }
 

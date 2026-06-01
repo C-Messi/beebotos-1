@@ -339,9 +339,7 @@ impl WorkflowEngine {
                 let mut running_state = StepState::new(&step.id);
                 running_state.mark_ready();
                 running_state.mark_running();
-                instance
-                    .step_states
-                    .insert(step.id.clone(), running_state);
+                instance.step_states.insert(step.id.clone(), running_state);
                 if let Some(reporter) = progress_reporter {
                     reporter
                         .on_step_change(&instance, &step.id, "running")
@@ -393,9 +391,7 @@ impl WorkflowEngine {
                         instance.add_error(Some(step_id.clone()), error.clone());
                         instance.step_states.insert(step_id.clone(), state);
                         if let Some(reporter) = progress_reporter {
-                            reporter
-                                .on_step_change(&instance, &step_id, "failed")
-                                .await;
+                            reporter.on_step_change(&instance, &step_id, "failed").await;
                         }
                         if !definition.config.continue_on_failure {
                             instance.mark_failed();
@@ -411,10 +407,8 @@ impl WorkflowEngine {
                         // Inject empty output so downstream steps that reference
                         // {{steps.<id>.output}} get an empty string instead of a
                         // template resolution error.
-                        template_ctx.add_step_output(
-                            &step_id,
-                            serde_json::Value::String("".to_string()),
-                        );
+                        template_ctx
+                            .add_step_output(&step_id, serde_json::Value::String("".to_string()));
                         instance.step_states.insert(step_id.clone(), state);
                         if let Some(reporter) = progress_reporter {
                             reporter
