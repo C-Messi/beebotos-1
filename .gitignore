@@ -99,6 +99,7 @@ criterion/
 generated/
 
 # Agent-local planning
+/.codex/
 /openspec/
 
 # Terraform
