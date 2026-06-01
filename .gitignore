@@ -98,6 +98,9 @@ criterion/
 *_pb2.py
 generated/
 
+# Agent-local planning
+/openspec/
+
 # Terraform
 *.tfstate
 *.tfstate.*
