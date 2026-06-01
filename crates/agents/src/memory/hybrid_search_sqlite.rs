@@ -223,6 +223,17 @@ impl HybridSearchSqlite {
             crate::error::AgentError::storage(format!("Failed to start transaction: {}", e))
         })?;
 
+        tx.execute(
+            "DELETE FROM ft_items WHERE json_extract(metadata, '$.entry_id') = ?1",
+            params![id.to_string()],
+        )
+        .ok();
+        tx.execute(
+            "DELETE FROM vector_fallback WHERE entry_id = ?1",
+            params![id.to_string()],
+        )
+        .ok();
+
         // 1. Insert into memory_entries
         tx.execute(
             "INSERT OR REPLACE INTO memory_entries 
@@ -986,6 +997,44 @@ mod tests {
         assert!(!results.is_empty());
         // First result should be SQLite entry (better vector match)
         assert_eq!(results[0].entry.id, id1);
+    }
+
+    #[test]
+    fn test_index_entry_replaces_existing_rows_for_same_id() {
+        let (engine, _temp) = create_test_engine();
+        let id = Uuid::new_v4();
+
+        engine
+            .index_entry(
+                id,
+                "old project memory detail",
+                &[1.0, 0.0],
+                HashMap::new(),
+                None,
+            )
+            .unwrap();
+        engine
+            .index_entry(
+                id,
+                "updated project memory detail",
+                &[0.0, 1.0],
+                HashMap::new(),
+                None,
+            )
+            .unwrap();
+
+        let stats = engine.get_stats().unwrap();
+        assert_eq!(stats.total_entries, 1);
+        assert_eq!(stats.vector_entries, 1);
+        assert_eq!(stats.fts_entries, 1);
+
+        let old_hits = engine.search("old", None, 10).unwrap();
+        assert!(old_hits.is_empty());
+
+        let updated_hits = engine.search("updated", None, 10).unwrap();
+        assert_eq!(updated_hits.len(), 1);
+        assert_eq!(updated_hits[0].entry.id, id);
+        assert!(updated_hits[0].entry.content.contains("updated"));
     }
 
     #[test]
