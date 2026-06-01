@@ -32,6 +32,8 @@ pub struct BeeBotOSConfig {
     #[serde(default)]
     pub image_generation: ImageGenerationConfig,
     #[serde(default)]
+    pub video_generation: VideoGenerationConfig,
+    #[serde(default)]
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -140,6 +142,7 @@ impl Default for BeeBotOSConfig {
             tls: None,
             models: ModelsConfig::default(),
             image_generation: ImageGenerationConfig::default(),
+            video_generation: VideoGenerationConfig::default(),
             channels: ChannelsConfig::default(),
             logging: LoggingConfig::default(),
             metrics: MetricsConfig::default(),
@@ -445,6 +448,32 @@ pub struct ImageGenerationConfig {
     pub timeout_seconds: u64,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VideoGenerationConfig {
+    #[serde(default = "default_video_generation_base_url")]
+    pub base_url: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_empty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub api_key: Option<String>,
+    #[serde(default = "default_video_generation_model")]
+    pub model: String,
+    #[serde(default = "default_video_generation_timeout")]
+    pub timeout_seconds: u64,
+    #[serde(default = "default_video_generation_resolution")]
+    pub resolution: String,
+    #[serde(default = "default_video_generation_ratio")]
+    pub ratio: String,
+    #[serde(default = "default_video_generation_duration")]
+    pub duration_seconds: u8,
+    #[serde(default = "default_video_generation_audio")]
+    pub generate_audio: bool,
+    #[serde(default)]
+    pub watermark: bool,
+}
+
 impl Default for ImageGenerationConfig {
     fn default() -> Self {
         Self {
@@ -452,6 +481,22 @@ impl Default for ImageGenerationConfig {
             api_key: None,
             model: default_image_generation_model(),
             timeout_seconds: default_image_generation_timeout(),
+        }
+    }
+}
+
+impl Default for VideoGenerationConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_video_generation_base_url(),
+            api_key: None,
+            model: default_video_generation_model(),
+            timeout_seconds: default_video_generation_timeout(),
+            resolution: default_video_generation_resolution(),
+            ratio: default_video_generation_ratio(),
+            duration_seconds: default_video_generation_duration(),
+            generate_audio: default_video_generation_audio(),
+            watermark: false,
         }
     }
 }
@@ -468,6 +513,34 @@ fn default_image_generation_timeout() -> u64 {
     180
 }
 
+fn default_video_generation_base_url() -> String {
+    "https://ark.cn-beijing.volces.com/api/v3".to_string()
+}
+
+fn default_video_generation_model() -> String {
+    "doubao-seedance-2-0-260128".to_string()
+}
+
+fn default_video_generation_timeout() -> u64 {
+    300
+}
+
+fn default_video_generation_resolution() -> String {
+    "720p".to_string()
+}
+
+fn default_video_generation_ratio() -> String {
+    "9:16".to_string()
+}
+
+fn default_video_generation_duration() -> u8 {
+    5
+}
+
+fn default_video_generation_audio() -> bool {
+    true
+}
+
 fn deserialize_optional_non_empty_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error>
@@ -476,6 +549,20 @@ where
 {
     let value = Option::<String>::deserialize(deserializer)?;
     Ok(value.filter(|value| !value.trim().is_empty()))
+}
+
+fn env_string(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_parsed<T>(key: &str) -> Option<T>
+where
+    T: std::str::FromStr,
+{
+    env_string(key).and_then(|value| value.parse::<T>().ok())
 }
 
 /// Channels configuration - flattened structure like beebot
@@ -692,6 +779,7 @@ impl BeeBotOSConfig {
 
         let mut cfg: Self = config.try_deserialize()?;
         cfg.apply_image_generation_env();
+        cfg.apply_video_generation_env();
 
         // 数据库路径归一化：如果是相对路径，则转换为基于配置文件目录的绝对路径
         if cfg.database.url.starts_with("sqlite:") && !cfg.database.url.starts_with("sqlite://") {
@@ -747,22 +835,54 @@ impl BeeBotOSConfig {
     }
 
     fn apply_image_generation_env(&mut self) {
-        if let Ok(base_url) = std::env::var("IMAGE_GENERATION_BASE_URL") {
-            if !base_url.trim().is_empty() {
-                self.image_generation.base_url = base_url;
-            }
+        if let Some(base_url) = env_string("IMAGE_GENERATION_BASE_URL") {
+            self.image_generation.base_url = base_url;
         }
 
-        if let Ok(api_key) = std::env::var("IMAGE_GENERATION_API_KEY") {
-            if !api_key.trim().is_empty() {
-                self.image_generation.api_key = Some(api_key);
-            }
+        if let Some(api_key) = env_string("IMAGE_GENERATION_API_KEY") {
+            self.image_generation.api_key = Some(api_key);
         }
 
-        if let Ok(model) = std::env::var("IMAGE_GENERATION_MODEL") {
-            if !model.trim().is_empty() {
-                self.image_generation.model = model;
-            }
+        if let Some(model) = env_string("IMAGE_GENERATION_MODEL") {
+            self.image_generation.model = model;
+        }
+    }
+
+    fn apply_video_generation_env(&mut self) {
+        if let Some(base_url) = env_string("VIDEO_GENERATION_BASE_URL") {
+            self.video_generation.base_url = base_url;
+        }
+
+        if let Some(api_key) = env_string("VIDEO_GENERATION_API_KEY") {
+            self.video_generation.api_key = Some(api_key);
+        }
+
+        if let Some(model) = env_string("VIDEO_GENERATION_MODEL") {
+            self.video_generation.model = model;
+        }
+
+        if let Some(timeout) = env_parsed("VIDEO_GENERATION_TIMEOUT_SECONDS") {
+            self.video_generation.timeout_seconds = timeout;
+        }
+
+        if let Some(resolution) = env_string("VIDEO_GENERATION_RESOLUTION") {
+            self.video_generation.resolution = resolution;
+        }
+
+        if let Some(ratio) = env_string("VIDEO_GENERATION_RATIO") {
+            self.video_generation.ratio = ratio;
+        }
+
+        if let Some(duration) = env_parsed("VIDEO_GENERATION_DURATION_SECONDS") {
+            self.video_generation.duration_seconds = duration;
+        }
+
+        if let Some(generate_audio) = env_parsed("VIDEO_GENERATION_GENERATE_AUDIO") {
+            self.video_generation.generate_audio = generate_audio;
+        }
+
+        if let Some(watermark) = env_parsed("VIDEO_GENERATION_WATERMARK") {
+            self.video_generation.watermark = watermark;
         }
     }
 
@@ -1037,6 +1157,21 @@ mod tests {
     }
 
     #[test]
+    fn default_video_generation_config_targets_volcengine_seedance() {
+        let config = VideoGenerationConfig::default();
+
+        assert_eq!(config.base_url, "https://ark.cn-beijing.volces.com/api/v3");
+        assert!(config.api_key.is_none());
+        assert_eq!(config.model, "doubao-seedance-2-0-260128");
+        assert_eq!(config.timeout_seconds, 300);
+        assert_eq!(config.resolution, "720p");
+        assert_eq!(config.ratio, "9:16");
+        assert_eq!(config.duration_seconds, 5);
+        assert!(config.generate_audio);
+        assert!(!config.watermark);
+    }
+
+    #[test]
     fn image_generation_config_reads_env_override() {
         let _lock = IMAGE_GENERATION_ENV_LOCK.lock().unwrap();
         let _env = EnvVarGuard::new(&[
@@ -1058,6 +1193,108 @@ mod tests {
             Some("img-test-key")
         );
         assert_eq!(config.image_generation.model, "gpt-image-2");
+    }
+
+    #[test]
+    fn image_generation_config_trims_env_override_values() {
+        let _lock = IMAGE_GENERATION_ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::new(&[
+            "IMAGE_GENERATION_BASE_URL",
+            "IMAGE_GENERATION_API_KEY",
+            "IMAGE_GENERATION_MODEL",
+        ]);
+
+        std::env::set_var("IMAGE_GENERATION_BASE_URL", " https://relay.example/v1 ");
+        std::env::set_var("IMAGE_GENERATION_API_KEY", " img-test-key ");
+        std::env::set_var("IMAGE_GENERATION_MODEL", " gpt-image-2 ");
+
+        let mut config = BeeBotOSConfig::default();
+        config.apply_image_generation_env();
+
+        assert_eq!(config.image_generation.base_url, "https://relay.example/v1");
+        assert_eq!(
+            config.image_generation.api_key.as_deref(),
+            Some("img-test-key")
+        );
+        assert_eq!(config.image_generation.model, "gpt-image-2");
+    }
+
+    #[test]
+    fn video_generation_config_reads_env_override() {
+        let _lock = IMAGE_GENERATION_ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::new(&[
+            "VIDEO_GENERATION_BASE_URL",
+            "VIDEO_GENERATION_API_KEY",
+            "VIDEO_GENERATION_MODEL",
+            "VIDEO_GENERATION_TIMEOUT_SECONDS",
+            "VIDEO_GENERATION_RESOLUTION",
+            "VIDEO_GENERATION_RATIO",
+            "VIDEO_GENERATION_DURATION_SECONDS",
+            "VIDEO_GENERATION_GENERATE_AUDIO",
+            "VIDEO_GENERATION_WATERMARK",
+        ]);
+
+        std::env::set_var("VIDEO_GENERATION_BASE_URL", "https://ark.example/api/v3");
+        std::env::set_var("VIDEO_GENERATION_API_KEY", "video-test-key");
+        std::env::set_var("VIDEO_GENERATION_MODEL", "seedance-test");
+        std::env::set_var("VIDEO_GENERATION_TIMEOUT_SECONDS", "420");
+        std::env::set_var("VIDEO_GENERATION_RESOLUTION", "1080p");
+        std::env::set_var("VIDEO_GENERATION_RATIO", "16:9");
+        std::env::set_var("VIDEO_GENERATION_DURATION_SECONDS", "8");
+        std::env::set_var("VIDEO_GENERATION_GENERATE_AUDIO", "false");
+        std::env::set_var("VIDEO_GENERATION_WATERMARK", "true");
+
+        let mut config = BeeBotOSConfig::default();
+        config.apply_video_generation_env();
+
+        assert_eq!(
+            config.video_generation.base_url,
+            "https://ark.example/api/v3"
+        );
+        assert_eq!(
+            config.video_generation.api_key.as_deref(),
+            Some("video-test-key")
+        );
+        assert_eq!(config.video_generation.model, "seedance-test");
+        assert_eq!(config.video_generation.timeout_seconds, 420);
+        assert_eq!(config.video_generation.resolution, "1080p");
+        assert_eq!(config.video_generation.ratio, "16:9");
+        assert_eq!(config.video_generation.duration_seconds, 8);
+        assert!(!config.video_generation.generate_audio);
+        assert!(config.video_generation.watermark);
+    }
+
+    #[test]
+    fn video_generation_config_trims_env_override_values() {
+        let _lock = IMAGE_GENERATION_ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::new(&[
+            "VIDEO_GENERATION_BASE_URL",
+            "VIDEO_GENERATION_API_KEY",
+            "VIDEO_GENERATION_MODEL",
+            "VIDEO_GENERATION_RESOLUTION",
+            "VIDEO_GENERATION_RATIO",
+        ]);
+
+        std::env::set_var("VIDEO_GENERATION_BASE_URL", " https://ark.example/api/v3 ");
+        std::env::set_var("VIDEO_GENERATION_API_KEY", " video-test-key ");
+        std::env::set_var("VIDEO_GENERATION_MODEL", " seedance-test ");
+        std::env::set_var("VIDEO_GENERATION_RESOLUTION", " 1080p ");
+        std::env::set_var("VIDEO_GENERATION_RATIO", " 16:9 ");
+
+        let mut config = BeeBotOSConfig::default();
+        config.apply_video_generation_env();
+
+        assert_eq!(
+            config.video_generation.base_url,
+            "https://ark.example/api/v3"
+        );
+        assert_eq!(
+            config.video_generation.api_key.as_deref(),
+            Some("video-test-key")
+        );
+        assert_eq!(config.video_generation.model, "seedance-test");
+        assert_eq!(config.video_generation.resolution, "1080p");
+        assert_eq!(config.video_generation.ratio, "16:9");
     }
 
     #[test]
@@ -1144,6 +1381,7 @@ api_key = ""
                 },
             },
             image_generation: ImageGenerationConfig::default(),
+            video_generation: VideoGenerationConfig::default(),
             channels: ChannelsConfig {
                 auto_download_media: true,
                 media_storage_path: "./data/media".to_string(),
