@@ -34,6 +34,8 @@ pub struct BeeBotOSConfig {
     #[serde(default)]
     pub video_generation: VideoGenerationConfig,
     #[serde(default)]
+    pub voice_marketing: VoiceMarketingConfig,
+    #[serde(default)]
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -143,6 +145,7 @@ impl Default for BeeBotOSConfig {
             models: ModelsConfig::default(),
             image_generation: ImageGenerationConfig::default(),
             video_generation: VideoGenerationConfig::default(),
+            voice_marketing: VoiceMarketingConfig::default(),
             channels: ChannelsConfig::default(),
             logging: LoggingConfig::default(),
             metrics: MetricsConfig::default(),
@@ -474,6 +477,50 @@ pub struct VideoGenerationConfig {
     pub watermark: bool,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct VoiceMarketingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_empty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub access_key_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_empty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub access_key_secret: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_empty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub security_token: Option<String>,
+    #[serde(default = "default_voice_marketing_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_voice_marketing_version")]
+    pub api_version: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_empty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub caller_id_number: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_empty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tts_code: Option<String>,
+    #[serde(default = "default_voice_marketing_country_id")]
+    pub country_id: String,
+    #[serde(default = "default_voice_marketing_play_times")]
+    pub play_times: u8,
+}
+
 impl Default for ImageGenerationConfig {
     fn default() -> Self {
         Self {
@@ -499,6 +546,22 @@ impl Default for VideoGenerationConfig {
             watermark: false,
         }
     }
+}
+
+fn default_voice_marketing_endpoint() -> String {
+    "dyvmsapi-intl.ap-southeast-1.aliyuncs.com".to_string()
+}
+
+fn default_voice_marketing_version() -> String {
+    "2021-10-15".to_string()
+}
+
+fn default_voice_marketing_country_id() -> String {
+    "CN".to_string()
+}
+
+fn default_voice_marketing_play_times() -> u8 {
+    1
 }
 
 fn default_image_generation_base_url() -> String {
@@ -780,6 +843,7 @@ impl BeeBotOSConfig {
         let mut cfg: Self = config.try_deserialize()?;
         cfg.apply_image_generation_env();
         cfg.apply_video_generation_env();
+        cfg.apply_voice_marketing_env();
 
         // 数据库路径归一化：如果是相对路径，则转换为基于配置文件目录的绝对路径
         if cfg.database.url.starts_with("sqlite:") && !cfg.database.url.starts_with("sqlite://") {
@@ -886,6 +950,50 @@ impl BeeBotOSConfig {
         }
     }
 
+    fn apply_voice_marketing_env(&mut self) {
+        if let Some(enabled) = env_parsed("VOICE_MARKETING_ENABLED") {
+            self.voice_marketing.enabled = enabled;
+        }
+
+        if let Some(access_key_id) = env_string("ALIYUN_VOICE_ACCESS_KEY_ID")
+            .or_else(|| env_string("ALIBABA_CLOUD_ACCESS_KEY_ID"))
+        {
+            self.voice_marketing.access_key_id = Some(access_key_id);
+        }
+
+        if let Some(access_key_secret) = env_string("ALIYUN_VOICE_ACCESS_KEY_SECRET")
+            .or_else(|| env_string("ALIBABA_CLOUD_ACCESS_KEY_SECRET"))
+        {
+            self.voice_marketing.access_key_secret = Some(access_key_secret);
+        }
+
+        if let Some(security_token) = env_string("ALIYUN_VOICE_SECURITY_TOKEN")
+            .or_else(|| env_string("ALIBABA_CLOUD_SECURITY_TOKEN"))
+        {
+            self.voice_marketing.security_token = Some(security_token);
+        }
+
+        if let Some(endpoint) = env_string("ALIYUN_VOICE_ENDPOINT") {
+            self.voice_marketing.endpoint = endpoint;
+        }
+
+        if let Some(caller_id_number) = env_string("ALIYUN_VOICE_CALLER_ID_NUMBER") {
+            self.voice_marketing.caller_id_number = Some(caller_id_number);
+        }
+
+        if let Some(tts_code) = env_string("ALIYUN_VOICE_TTS_CODE") {
+            self.voice_marketing.tts_code = Some(tts_code);
+        }
+
+        if let Some(country_id) = env_string("ALIYUN_VOICE_COUNTRY_ID") {
+            self.voice_marketing.country_id = country_id;
+        }
+
+        if let Some(play_times) = env_parsed("ALIYUN_VOICE_PLAY_TIMES") {
+            self.voice_marketing.play_times = play_times;
+        }
+    }
+
     /// Migrate non-prefixed environment variables to BEE__ prefixed ones
     /// This allows using .env files without the BEE__ prefix
     fn migrate_env_vars() {
@@ -902,6 +1010,7 @@ impl BeeBotOSConfig {
             "TRACING__",
             "RATE_LIMIT__",
             "SECURITY__",
+            "VOICE_MARKETING__",
             "SERVICES__",
             "APP__",
         ];
@@ -1382,6 +1491,7 @@ api_key = ""
             },
             image_generation: ImageGenerationConfig::default(),
             video_generation: VideoGenerationConfig::default(),
+            voice_marketing: VoiceMarketingConfig::default(),
             channels: ChannelsConfig {
                 auto_download_media: true,
                 media_storage_path: "./data/media".to_string(),

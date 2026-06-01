@@ -2406,6 +2406,15 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
             "/api/v1/ai-store-manager/graphic-images/:id",
             get(handlers::http::ai_store_manager::get_graphic_image),
         )
+        // Voice Marketing API
+        .route(
+            "/api/v1/voice-marketing/scripts",
+            post(handlers::http::voice_marketing::generate_script),
+        )
+        .route(
+            "/api/v1/voice-marketing/calls",
+            post(handlers::http::voice_marketing::create_call),
+        )
         // Admin Config API
         .route(
             "/api/v1/admin/config",
@@ -3321,6 +3330,7 @@ mod tests {
             },
             image_generation: config::ImageGenerationConfig::default(),
             video_generation: config::VideoGenerationConfig::default(),
+            voice_marketing: config::VoiceMarketingConfig::default(),
             channels: config::ChannelsConfig {
                 auto_download_media: true,
                 media_storage_path: "./data/media".to_string(),

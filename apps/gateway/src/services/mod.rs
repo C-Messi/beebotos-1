@@ -23,6 +23,7 @@ pub mod multichain_config;
 pub mod react_trace_ws;
 pub mod state_machine_service;
 pub mod task_monitor;
+pub mod voice_marketing;
 pub mod wallet_service;
 pub mod webchat_service;
 // Re-export commonly used services
