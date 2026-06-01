@@ -4379,6 +4379,11 @@ impl Agent {
             .with_content_preview(&input_text),
         )
         .await;
+        // 🛡️ Circuit-breaker: abort if the same tool keeps failing.
+        const MAX_CONSECUTIVE_TOOL_ERRORS: u32 = 3;
+        const LLM_TURN_TIMEOUT_SECS: u64 = 30;
+        let mut consecutive_tool_errors: u32 = 0;
+
         for round in 0..max_tool_rounds {
             let round_number = round + 1;
             if Self::is_cancelled(&cancel_rx) {
@@ -4389,14 +4394,25 @@ impl Agent {
                 return Ok(("⏹️ 已停止当前任务。".to_string(), vec![]));
             }
             extra_params.insert("react_round".to_string(), round_number.to_string());
-            let turn = llm
-                .call_llm_tool_turn(
+
+            // Guard each LLM turn with a hard timeout so a stalled provider cannot
+            // hang the whole ReAct loop for minutes.
+            let turn = tokio::time::timeout(
+                std::time::Duration::from_secs(LLM_TURN_TIMEOUT_SECS),
+                llm.call_llm_tool_turn(
                     loop_messages.clone(),
                     tools.clone(),
                     Some(extra_params.clone()),
-                )
-                .await
-                .map_err(|e| AgentError::Execution(format!("LLM ReAct turn failed: {}", e)))?;
+                ),
+            )
+            .await
+            .map_err(|_| {
+                AgentError::Execution(format!(
+                    "LLM ReAct turn timed out after {}s (round {})",
+                    LLM_TURN_TIMEOUT_SECS, round_number
+                ))
+            })?
+            .map_err(|e| AgentError::Execution(format!("LLM ReAct turn failed: {}", e)))?;
 
             if turn.tool_calls.is_empty() {
                 let response = Self::cleanup_thinking_process(&turn.content);
@@ -4499,6 +4515,7 @@ impl Agent {
                     .await
                 {
                     Ok(output) => {
+                        consecutive_tool_errors = 0;
                         self.emit_react_trace(
                             crate::react_trace::ReActTraceEvent::new(
                                 run_id.clone(),
@@ -4515,7 +4532,22 @@ impl Agent {
                         output
                     }
                     Err(e) => {
-                        warn!("ReAct tool '{}' failed: {}", tool_call.function.name, e);
+                        consecutive_tool_errors += 1;
+                        warn!(
+                            "ReAct tool '{}' failed ({}/{}): {}",
+                            tool_call.function.name,
+                            consecutive_tool_errors,
+                            MAX_CONSECUTIVE_TOOL_ERRORS,
+                            e
+                        );
+                        if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS {
+                            let msg = format!(
+                                "工具连续失败 {} 次（最近失败: {}），任务已终止。建议：请简化需求、检查文件路径或参数格式。",
+                                MAX_CONSECUTIVE_TOOL_ERRORS,
+                                tool_call.function.name
+                            );
+                            return Ok((msg, vec![]));
+                        }
                         let output = Self::recoverable_tool_error(&tool_call.function.name, e);
                         self.emit_react_trace(
                             crate::react_trace::ReActTraceEvent::new(

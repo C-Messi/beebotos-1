@@ -225,8 +225,8 @@ impl KernelAgentConfig {
             agent_config: AgentConfig::default(),
             capabilities,
             initial_state: AgentState::Registered,
-            task_receive_timeout_secs: 1,     // Default: 1 second
-            task_execution_timeout_secs: 300, // Default: 5 minutes
+            task_receive_timeout_secs: 1,    // Default: 1 second
+            task_execution_timeout_secs: 60, // Default: 1 minute
         }
     }
 

@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AgentError;
 
-pub const DEFAULT_REACT_MAX_TOOL_ROUNDS: u32 = 100;
-pub const MAX_REACT_TOOL_ROUNDS_LIMIT: u32 = 100;
+pub const DEFAULT_REACT_MAX_TOOL_ROUNDS: u32 = 15;
+pub const MAX_REACT_TOOL_ROUNDS_LIMIT: u32 = 30;
 pub const REACT_TRACE_PREVIEW_CHARS: usize = 1000;
 
 pub fn clamp_react_max_tool_rounds(rounds: u32) -> u32 {

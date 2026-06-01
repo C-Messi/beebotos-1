@@ -437,11 +437,21 @@ impl GatewayAgentRuntime {
                         GatewayError::agent(format!("Failed to transition agent state: {}", e))
                     })?;
             }
-            AgentState::Idle | AgentState::Working { .. } | AgentState::Paused => {
+            AgentState::Idle | AgentState::Paused => {
                 info!(
                     "Agent {} is in {:?} state, skipping Start transition during recovery",
                     agent_id, state
                 );
+            }
+            AgentState::Working { .. } => {
+                warn!(
+                    "Agent {} was in Working state during recovery; forcing transition to Idle",
+                    agent_id
+                );
+                let _ = self
+                    .state_manager
+                    .transition(agent_id, StateTransition::CompleteTask { success: false })
+                    .await;
             }
             _ => {}
         }
@@ -1161,13 +1171,17 @@ impl AgentRuntime for GatewayAgentRuntime {
             stream_tx: task.stream_tx.clone(),
         };
 
+        // 🛡️ Guard against excessively long timeouts that make the system appear dead.
+        const MAX_TASK_TIMEOUT_SECS: u64 = 120;
+        let timeout_secs = task.timeout_secs.min(MAX_TASK_TIMEOUT_SECS);
+
         // Create oneshot channel for result
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
         // Send task to agent
         let kernel_request = crate::kernel_integration::KernelTaskRequest {
             task: agent_task,
-            timeout_secs: task.timeout_secs,
+            timeout_secs,
             result_tx,
         };
 
@@ -1179,7 +1193,7 @@ impl AgentRuntime for GatewayAgentRuntime {
         // Wait for result with a small grace period. The kernel worker applies
         // the real execution timeout; this caller-side timeout only protects
         // the gateway if the worker itself cannot report back.
-        let timeout = tokio::time::Duration::from_secs(task.timeout_secs.saturating_add(5));
+        let timeout = tokio::time::Duration::from_secs(timeout_secs.saturating_add(5));
         let result = tokio::time::timeout(timeout, result_rx)
             .await
             .map_err(|_| GatewayError::agent("Task execution timeout".to_string()))?
