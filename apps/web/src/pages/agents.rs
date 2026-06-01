@@ -6,9 +6,9 @@ use leptos_router::components::A;
 
 use crate::api::{AgentInfo, AgentStatus, CreateAgentRequest};
 use crate::components::{ErrorContext, Modal, Pagination, PaginationState, SkeletonGrid};
+use crate::i18n::I18nContext;
 use crate::state::use_app_state;
 use crate::utils::{FormValidator, StringValidators};
-use crate::i18n::I18nContext;
 
 const PAGE_SIZE: usize = 9;
 

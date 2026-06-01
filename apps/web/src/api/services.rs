@@ -170,10 +170,14 @@ impl SkillService {
 
     pub async fn uninstall(&self, skill_id: &str) -> Result<(), ApiError> {
         self.client
-            .delete(&ApiEndpoints::SKILL_UNINSTALL.replace(
-                "{id}",
-                &js_sys::encode_uri_component(skill_id).as_string().unwrap_or_else(|| skill_id.to_string()),
-            ))
+            .delete(
+                &ApiEndpoints::SKILL_UNINSTALL.replace(
+                    "{id}",
+                    &js_sys::encode_uri_component(skill_id)
+                        .as_string()
+                        .unwrap_or_else(|| skill_id.to_string()),
+                ),
+            )
             .await
     }
 

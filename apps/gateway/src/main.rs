@@ -2267,10 +2267,20 @@ fn graphic_image_route_timeout(config: &BeeBotOSConfig) -> Duration {
     )
 }
 
+fn video_generation_route_timeout(config: &BeeBotOSConfig) -> Duration {
+    Duration::from_secs(
+        config
+            .server
+            .timeout_seconds
+            .max(config.video_generation.timeout_seconds),
+    )
+}
+
 /// Create API router combining gateway-lib middleware with business handlers
 pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>) -> Router {
     let standard_request_timeout = Duration::from_secs(app_state.config.server.timeout_seconds);
     let graphic_image_request_timeout = graphic_image_route_timeout(&app_state.config);
+    let video_generation_request_timeout = video_generation_route_timeout(&app_state.config);
 
     // Public routes (no auth required)
     let public_routes = Router::new()
@@ -2389,20 +2399,21 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         )
         // AI Store Manager API
         .route(
-            "/api/v1/ai-store-manager/video-tasks",
-            post(handlers::http::ai_store_manager::create_video_task),
-        )
-        .route(
-            "/api/v1/ai-store-manager/video-tasks/:id",
-            get(handlers::http::ai_store_manager::get_video_task),
-        )
-        .route(
             "/api/v1/ai-store-manager/graphic-packages",
             post(handlers::http::ai_store_manager::create_graphic_package_handler),
         )
         .route(
             "/api/v1/ai-store-manager/graphic-images/:id",
             get(handlers::http::ai_store_manager::get_graphic_image),
+        )
+        // Voice Marketing API
+        .route(
+            "/api/v1/voice-marketing/scripts",
+            post(handlers::http::voice_marketing::generate_script),
+        )
+        .route(
+            "/api/v1/voice-marketing/calls",
+            post(handlers::http::voice_marketing::create_call),
         )
         // Admin Config API
         .route(
@@ -2986,6 +2997,18 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         .layer(from_fn_with_state(gateway_state.clone(), auth_middleware))
         .layer(TimeoutLayer::new(standard_request_timeout));
 
+    let video_generation_routes = Router::new()
+        .route(
+            "/api/v1/ai-store-manager/video-tasks",
+            post(handlers::http::ai_store_manager::create_video_task),
+        )
+        .route(
+            "/api/v1/ai-store-manager/video-tasks/:id",
+            get(handlers::http::ai_store_manager::get_video_task),
+        )
+        .layer(from_fn_with_state(gateway_state.clone(), auth_middleware))
+        .layer(TimeoutLayer::new(video_generation_request_timeout));
+
     let graphic_image_routes = Router::new()
         .route(
             "/api/v1/ai-store-manager/graphic-images",
@@ -3002,6 +3025,7 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
     let app = Router::new()
         .merge(public_routes)
         .merge(api_routes)
+        .merge(video_generation_routes)
         .merge(graphic_image_routes);
 
     // Apply layers one by one
@@ -3305,6 +3329,8 @@ mod tests {
                 },
             },
             image_generation: config::ImageGenerationConfig::default(),
+            video_generation: config::VideoGenerationConfig::default(),
+            voice_marketing: config::VoiceMarketingConfig::default(),
             channels: config::ChannelsConfig {
                 auto_download_media: true,
                 media_storage_path: "./data/media".to_string(),

@@ -120,7 +120,8 @@ pub fn TreasuryPage() -> impl IntoView {
             match service.transfer(&to, &amount).await {
                 Ok(resp) => {
                     transfer_saving.set(false);
-                    let tx_hash = resp.get("tx_hash")
+                    let tx_hash = resp
+                        .get("tx_hash")
                         .and_then(|v| v.as_str())
                         .unwrap_or("N/A");
                     transfer_success.set(Some(format!(
@@ -133,7 +134,11 @@ pub fn TreasuryPage() -> impl IntoView {
                 }
                 Err(e) => {
                     transfer_saving.set(false);
-                    transfer_error.set(Some(format!("{}: {}", i18n.t("treasury-transfer-failed"), e)));
+                    transfer_error.set(Some(format!(
+                        "{}: {}",
+                        i18n.t("treasury-transfer-failed"),
+                        e
+                    )));
                 }
             }
         });

@@ -366,7 +366,11 @@ impl MessageProcessor {
                 timestamp: chrono::Utc::now(),
             };
 
-            if let Some(channel) = self.channel_registry.get_channel_by_platform(platform).await {
+            if let Some(channel) = self
+                .channel_registry
+                .get_channel_by_platform(platform)
+                .await
+            {
                 channel
                     .read()
                     .await
@@ -2509,9 +2513,9 @@ Rules:
                 &def,
                 &agent,
                 trigger_context,
-                progress_reporter
-                    .as_ref()
-                    .map(|reporter| reporter as &dyn beebotos_agents::workflow::StepProgressReporter),
+                progress_reporter.as_ref().map(|reporter| {
+                    reporter as &dyn beebotos_agents::workflow::StepProgressReporter
+                }),
             )
             .await
         {

@@ -5,8 +5,8 @@ use leptos::view;
 use leptos_meta::*;
 
 use crate::api::{Settings as ApiSettings, SettingsService, Theme};
-use crate::state::use_app_state;
 use crate::i18n::I18nContext;
+use crate::state::use_app_state;
 use crate::utils::{
     event_target_checked, event_target_value, use_theme, FormValidator, StringValidators,
 };

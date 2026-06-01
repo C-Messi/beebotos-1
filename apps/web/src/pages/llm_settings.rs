@@ -10,8 +10,8 @@ use leptos_meta::*;
 
 use crate::api::{LlmGlobalConfig, UpdateLlmConfigRequest};
 use crate::components::InlineLoading;
-use crate::state::use_app_state;
 use crate::i18n::I18nContext;
+use crate::state::use_app_state;
 
 /// Predefined model options for thinking-capable providers.
 /// `thinking` maps directly to the backend TOML value.

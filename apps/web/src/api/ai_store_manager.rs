@@ -8,12 +8,18 @@ pub struct CreateVideoTaskRequest {
     pub platform: String,
     pub version: String,
     pub prompt: String,
+    pub duration_seconds: u8,
+    pub resolution: String,
+    pub ratio: String,
+    pub generate_audio: bool,
+    pub watermark: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VideoTaskResponse {
     pub id: String,
     pub provider: String,
+    pub model: String,
     pub status: String,
     pub message: String,
     pub preview_url: Option<String>,

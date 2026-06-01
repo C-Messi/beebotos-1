@@ -38,6 +38,15 @@ pub struct VideoMarketingTask {
     pub style: String,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct VideoGenerationOptions {
+    pub duration_seconds: u8,
+    pub resolution: &'static str,
+    pub ratio: &'static str,
+    pub generate_audio: bool,
+    pub watermark: bool,
+}
+
 const VIDEO_VERSIONS: [VideoMarketingVersion; 3] = [
     VideoMarketingVersion {
         name: "强转化版",
@@ -177,6 +186,37 @@ fn build_seedance_prompt(task: &VideoMarketingTask, results: &[VideoMarketingRes
     )
 }
 
+fn video_generation_options(task: &VideoMarketingTask) -> VideoGenerationOptions {
+    let duration_seconds = match task.duration.as_str() {
+        "15 秒" => 5,
+        "30 秒" => 8,
+        "60 秒" => 12,
+        _ => 5,
+    };
+
+    VideoGenerationOptions {
+        duration_seconds,
+        resolution: "720p",
+        ratio: "9:16",
+        generate_audio: true,
+        watermark: false,
+    }
+}
+
+fn should_poll_video_task(task: &VideoTaskResponse) -> bool {
+    matches!(task.status.as_str(), "queued" | "running")
+}
+
+fn video_task_status_label(status: &str) -> &'static str {
+    match status {
+        "blocked" => "待配置",
+        "completed" => "视频已生成",
+        "failed" | "expired" | "cancelled" => "生成失败",
+        "queued" | "running" => "视频生成中",
+        _ => "状态已更新",
+    }
+}
+
 #[component]
 pub fn AiVideoMarketingPage() -> impl IntoView {
     let (task, set_task) = signal(default_video_marketing_task());
@@ -201,11 +241,17 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
         let current_task = task.get();
         let current_results = results.get();
         let version = selected_version.get();
+        let options = video_generation_options(&current_task);
         let req = CreateVideoTaskRequest {
             product: current_task.product.clone(),
             platform: current_task.platform.clone(),
             version,
             prompt: build_seedance_prompt(&current_task, &current_results),
+            duration_seconds: options.duration_seconds,
+            resolution: options.resolution.to_string(),
+            ratio: options.ratio.to_string(),
+            generate_audio: options.generate_audio,
+            watermark: options.watermark,
         };
 
         set_video_loading.set(true);
@@ -215,16 +261,24 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
 
         spawn_local(async move {
             match service.create_video_task(&req).await {
-                Ok(created) => match service.get_video_task(&created.id).await {
-                    Ok(status) => {
-                        set_video_task.set(Some(status));
-                        set_task_status.set("视频已生成".to_string());
+                Ok(created) => {
+                    if should_poll_video_task(&created) {
+                        match service.get_video_task(&created.id).await {
+                            Ok(status) => {
+                                set_task_status
+                                    .set(video_task_status_label(&status.status).to_string());
+                                set_video_task.set(Some(status));
+                            }
+                            Err(err) => {
+                                set_video_error.set(Some(err.to_string()));
+                                set_task_status.set("生成失败".to_string());
+                            }
+                        }
+                    } else {
+                        set_task_status.set(video_task_status_label(&created.status).to_string());
+                        set_video_task.set(Some(created));
                     }
-                    Err(err) => {
-                        set_video_error.set(Some(err.to_string()));
-                        set_task_status.set("生成失败".to_string());
-                    }
-                },
+                }
                 Err(err) => {
                     set_video_error.set(Some(err.to_string()));
                     set_task_status.set("生成失败".to_string());
@@ -366,7 +420,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                     } else {
                         view! {
                             <div class="ai-video-task-card">
-                                "点击生成视频后，会先创建 Seedance 预留任务；当前使用 mock provider。"
+                                "点击生成视频后，会提交 Seedance 2.0 视频任务；未配置火山方舟密钥时会停在待配置状态。"
                             </div>
                         }.into_any()
                     }
@@ -472,6 +526,10 @@ fn VideoTaskCard(task: VideoTaskResponse) -> impl IntoView {
                 <strong>{task.provider}</strong>
             </div>
             <div>
+                <span>"模型"</span>
+                <strong>{task.model}</strong>
+            </div>
+            <div>
                 <span>"状态"</span>
                 <strong>{task.status}</strong>
             </div>
@@ -527,5 +585,39 @@ mod tests {
         assert!(prompt.contains("云柑礼盒"));
         assert!(prompt.contains("爆款标题"));
         assert!(prompt.contains("抖音"));
+    }
+
+    #[test]
+    fn video_generation_options_map_task_duration_and_platform() {
+        let mut task = default_video_marketing_task();
+        task.duration = "60 秒".to_string();
+        task.platform = "视频号".to_string();
+
+        let options = video_generation_options(&task);
+
+        assert_eq!(options.duration_seconds, 12);
+        assert_eq!(options.resolution, "720p");
+        assert_eq!(options.ratio, "9:16");
+        assert!(options.generate_audio);
+        assert!(!options.watermark);
+    }
+
+    #[test]
+    fn should_poll_only_live_seedance_statuses() {
+        let mut response = VideoTaskResponse {
+            id: "task-1".to_string(),
+            provider: "volcengine-ark".to_string(),
+            model: "doubao-seedance-2-0-260128".to_string(),
+            status: "queued".to_string(),
+            message: "queued".to_string(),
+            preview_url: None,
+        };
+
+        assert!(should_poll_video_task(&response));
+        response.status = "blocked".to_string();
+        assert!(!should_poll_video_task(&response));
+        response.status = "completed".to_string();
+        response.preview_url = Some("https://cdn.example/video.mp4".to_string());
+        assert!(!should_poll_video_task(&response));
     }
 }

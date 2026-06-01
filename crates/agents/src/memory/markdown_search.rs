@@ -391,11 +391,9 @@ impl UnifiedMemorySystem {
 
         let start_time = std::time::Instant::now();
 
-        // Clear existing index
         {
-            let _search = self.search.read().await;
-            // Note: In a real implementation, we might want a method to clear
-            // the index For now, we'll just re-index everything
+            let search = self.search.read().await;
+            MemorySearch::clear(&*search).await?;
         }
 
         let mut indexed = self.indexed_hashes.write().await;
@@ -902,5 +900,28 @@ mod tests {
             stats.total_entries
         );
         assert!(stats.duration_secs > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_index_clears_existing_search_rows() {
+        let (system, _temp) = create_test_system().await;
+
+        let entry = MarkdownMemoryEntry::new("Stable Memory", "stable searchable content")
+            .with_category("technical");
+        system
+            .store(MemoryFileType::Core, &entry, None)
+            .await
+            .unwrap();
+
+        system.rebuild_index(None).await.unwrap();
+        let first = system.get_search_stats().await.unwrap();
+        assert_eq!(first.fts_entries, first.total_entries);
+        assert_eq!(first.vector_entries, first.total_entries);
+
+        system.rebuild_index(None).await.unwrap();
+        let second = system.get_search_stats().await.unwrap();
+        assert_eq!(second.total_entries, first.total_entries);
+        assert_eq!(second.fts_entries, first.fts_entries);
+        assert_eq!(second.vector_entries, first.vector_entries);
     }
 }

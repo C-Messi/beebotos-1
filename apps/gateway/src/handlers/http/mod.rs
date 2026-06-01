@@ -24,6 +24,7 @@ pub mod task_monitor;
 pub mod treasury;
 pub mod user_channels;
 pub mod user_settings;
+pub mod voice_marketing;
 pub mod webchat;
 pub mod webhooks;
 pub mod workflows;

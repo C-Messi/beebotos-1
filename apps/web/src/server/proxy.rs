@@ -10,6 +10,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 const GRAPHIC_IMAGE_PROXY_TIMEOUT_SECS: u64 = 180;
+const VIDEO_GENERATION_PROXY_TIMEOUT_SECS: u64 = 300;
 
 /// 代理状态
 #[derive(Clone)]
@@ -29,7 +30,9 @@ impl ProxyState {
     pub fn new(gateway_url: String, timeout_secs: u64, forward_host: bool) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(
-                timeout_secs.max(GRAPHIC_IMAGE_PROXY_TIMEOUT_SECS),
+                timeout_secs
+                    .max(GRAPHIC_IMAGE_PROXY_TIMEOUT_SECS)
+                    .max(VIDEO_GENERATION_PROXY_TIMEOUT_SECS),
             ))
             .connect_timeout(Duration::from_secs(10))
             .pool_idle_timeout(Duration::from_secs(300))
@@ -50,6 +53,8 @@ fn proxy_timeout_secs(path: &str, default_secs: u64) -> u64 {
         || path.contains("/ai-store-manager/graphic-image-edits")
     {
         default_secs.max(GRAPHIC_IMAGE_PROXY_TIMEOUT_SECS)
+    } else if path.contains("/ai-store-manager/video-tasks") {
+        default_secs.max(VIDEO_GENERATION_PROXY_TIMEOUT_SECS)
     } else {
         default_secs
     }
@@ -222,6 +227,18 @@ mod tests {
             180
         );
         assert_eq!(proxy_timeout_secs("/v1/agents", 30), 30);
+    }
+
+    #[test]
+    fn test_proxy_timeout_for_ai_video_generation() {
+        assert_eq!(
+            proxy_timeout_secs("/v1/ai-store-manager/video-tasks", 30),
+            300
+        );
+        assert_eq!(
+            proxy_timeout_secs("/api/v1/ai-store-manager/video-tasks/task-1", 30),
+            300
+        );
     }
 
     #[test]

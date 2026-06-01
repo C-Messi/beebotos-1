@@ -19,15 +19,84 @@ pub struct CreateVideoTaskRequest {
     pub platform: String,
     pub version: String,
     pub prompt: String,
+    #[serde(default = "default_video_task_duration")]
+    pub duration_seconds: u8,
+    #[serde(default = "default_video_task_resolution")]
+    pub resolution: String,
+    #[serde(default = "default_video_task_ratio")]
+    pub ratio: String,
+    #[serde(default = "default_video_task_audio")]
+    pub generate_audio: bool,
+    #[serde(default)]
+    pub watermark: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VideoTaskResponse {
     pub id: String,
     pub provider: String,
+    pub model: String,
     pub status: String,
     pub message: String,
     pub preview_url: Option<String>,
+}
+
+fn default_video_task_duration() -> u8 {
+    5
+}
+
+fn default_video_task_resolution() -> String {
+    "720p".to_string()
+}
+
+fn default_video_task_ratio() -> String {
+    "9:16".to_string()
+}
+
+fn default_video_task_audio() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct VolcengineVideoTaskRequest {
+    model: String,
+    content: Vec<VolcengineVideoContentInput>,
+    resolution: String,
+    ratio: String,
+    duration: u8,
+    generate_audio: bool,
+    watermark: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct VolcengineVideoContentInput {
+    #[serde(rename = "type")]
+    kind: String,
+    text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct VolcengineVideoTaskCreateResponse {
+    id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct VolcengineVideoTaskStatusResponse {
+    id: String,
+    model: Option<String>,
+    status: String,
+    content: Option<VolcengineVideoTaskContent>,
+    error: Option<VolcengineVideoTaskError>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct VolcengineVideoTaskContent {
+    video_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct VolcengineVideoTaskError {
+    message: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -58,23 +127,140 @@ pub struct GraphicPackageResponse {
     pub checks: Vec<GraphicMarketingCheck>,
 }
 
-pub fn create_mock_video_task(req: &CreateVideoTaskRequest) -> VideoTaskResponse {
+fn build_seedance_video_payload(
+    model: &str,
+    req: &CreateVideoTaskRequest,
+) -> VolcengineVideoTaskRequest {
+    VolcengineVideoTaskRequest {
+        model: model.to_string(),
+        content: vec![VolcengineVideoContentInput {
+            kind: "text".to_string(),
+            text: req.prompt.trim().to_string(),
+        }],
+        resolution: req.resolution.trim().to_string(),
+        ratio: req.ratio.trim().to_string(),
+        duration: req.duration_seconds,
+        generate_audio: req.generate_audio,
+        watermark: req.watermark,
+    }
+}
+
+fn validate_video_task_request(req: &CreateVideoTaskRequest) -> Result<(), GatewayError> {
+    if req.product.trim().is_empty() {
+        return Err(GatewayError::bad_request("商品不能为空"));
+    }
+    if req.platform.trim().is_empty() {
+        return Err(GatewayError::bad_request("平台不能为空"));
+    }
+    if req.version.trim().is_empty() {
+        return Err(GatewayError::bad_request("素材版本不能为空"));
+    }
+    if req.prompt.trim().is_empty() {
+        return Err(GatewayError::bad_request("视频提示词不能为空"));
+    }
+    if !(4..=15).contains(&req.duration_seconds) {
+        return Err(GatewayError::bad_request("视频时长需在 4 到 15 秒之间"));
+    }
+    if !matches!(req.resolution.trim(), "480p" | "720p" | "1080p") {
+        return Err(GatewayError::bad_request("不支持的视频分辨率"));
+    }
+    if !matches!(
+        req.ratio.trim(),
+        "16:9" | "4:3" | "1:1" | "3:4" | "9:16" | "21:9" | "adaptive"
+    ) {
+        return Err(GatewayError::bad_request("不支持的视频比例"));
+    }
+    Ok(())
+}
+
+fn video_task_url(base_url: &str) -> String {
+    format!(
+        "{}/contents/generations/tasks",
+        base_url.trim_end_matches('/')
+    )
+}
+
+fn video_task_status_url(base_url: &str, id: &str) -> String {
+    format!("{}/{}", video_task_url(base_url), id)
+}
+
+fn video_generation_config_required_response(model: &str) -> VideoTaskResponse {
     VideoTaskResponse {
-        id: format!("seedance-mock-{}-{}", req.platform, req.version).replace(' ', "-"),
-        provider: "seedance2-mock".to_string(),
-        status: "queued".to_string(),
-        message: format!("{} 视频生成任务已进入 Seedance 预留队列。", req.product),
+        id: "seedance2-config-required".to_string(),
+        provider: "volcengine-ark".to_string(),
+        model: model.to_string(),
+        status: "blocked".to_string(),
+        message: "火山方舟视频生成未配置 VIDEO_GENERATION_API_KEY；开通 Seedance 2.0 \
+                  并配置后即可提交真实任务。"
+            .to_string(),
         preview_url: None,
     }
 }
 
-pub fn mock_video_task_status(id: &str) -> VideoTaskResponse {
+fn video_upstream_unavailable_response(
+    model: &str,
+    status: reqwest::StatusCode,
+) -> VideoTaskResponse {
+    let blocked =
+        matches!(status.as_u16(), 401 | 402 | 403) || status == reqwest::StatusCode::NOT_FOUND;
     VideoTaskResponse {
-        id: id.to_string(),
-        provider: "seedance2-mock".to_string(),
-        status: "completed".to_string(),
-        message: "mock 视频已生成，可替换为 Seedance 真实结果。".to_string(),
-        preview_url: Some("/public/mock/ai-video-marketing-preview.mp4".to_string()),
+        id: "seedance2-upstream-unavailable".to_string(),
+        provider: "volcengine-ark".to_string(),
+        model: model.to_string(),
+        status: if blocked { "blocked" } else { "failed" }.to_string(),
+        message: if blocked {
+            format!("火山方舟鉴权、余额或模型订阅未就绪: HTTP {}", status)
+        } else {
+            format!("火山方舟视频任务提交失败: HTTP {}", status)
+        },
+        preview_url: None,
+    }
+}
+
+fn video_create_to_response(
+    created: VolcengineVideoTaskCreateResponse,
+    model: &str,
+) -> VideoTaskResponse {
+    VideoTaskResponse {
+        id: created.id,
+        provider: "volcengine-ark".to_string(),
+        model: model.to_string(),
+        status: "queued".to_string(),
+        message: "Seedance 2.0 视频任务已提交，正在排队生成。".to_string(),
+        preview_url: None,
+    }
+}
+
+fn video_status_to_response(
+    upstream: VolcengineVideoTaskStatusResponse,
+    fallback_model: &str,
+) -> VideoTaskResponse {
+    let status = match upstream.status.as_str() {
+        "succeeded" => "completed",
+        "queued" | "running" | "failed" | "expired" | "cancelled" => upstream.status.as_str(),
+        _ => "running",
+    };
+    let preview_url = upstream.content.and_then(|content| content.video_url);
+    let message = upstream
+        .error
+        .and_then(|error| error.message)
+        .unwrap_or_else(|| match status {
+            "completed" => "Seedance 2.0 视频已生成。".to_string(),
+            "queued" => "Seedance 2.0 视频任务排队中。".to_string(),
+            "running" => "Seedance 2.0 视频生成中。".to_string(),
+            "expired" => "Seedance 2.0 视频任务已超时。".to_string(),
+            "cancelled" => "Seedance 2.0 视频任务已取消。".to_string(),
+            "failed" => "Seedance 2.0 视频任务失败。".to_string(),
+            _ => "Seedance 2.0 视频任务状态已更新。".to_string(),
+        });
+
+    VideoTaskResponse {
+        id: upstream.id,
+        provider: "volcengine-ark".to_string(),
+        model: upstream.model.unwrap_or_else(|| fallback_model.to_string()),
+        status: status.to_string(),
+        message,
+        preview_url,
     }
 }
 
@@ -415,7 +601,48 @@ pub async fn create_video_task(
     Json(req): Json<CreateVideoTaskRequest>,
 ) -> Result<Json<VideoTaskResponse>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
-    Ok(Json(create_mock_video_task(&req)))
+    validate_video_task_request(&req)?;
+
+    let config = BeeBotOSConfig::load()
+        .map_err(|err| GatewayError::internal(format!("加载视频生成配置失败: {}", err)))?;
+    let model = config.video_generation.model.clone();
+    let api_key = match config
+        .video_generation
+        .api_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+    {
+        Some(api_key) => api_key,
+        None => return Ok(Json(video_generation_config_required_response(&model))),
+    };
+
+    let payload = build_seedance_video_payload(&model, &req);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            config.video_generation.timeout_seconds,
+        ))
+        .build()
+        .map_err(|err| GatewayError::internal(format!("视频生成客户端创建失败: {}", err)))?;
+
+    let response = client
+        .post(video_task_url(&config.video_generation.base_url))
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|err| GatewayError::internal(format!("视频生成请求失败: {}", err)))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Ok(Json(video_upstream_unavailable_response(&model, status)));
+    }
+
+    let created = response
+        .json::<VolcengineVideoTaskCreateResponse>()
+        .await
+        .map_err(|err| GatewayError::internal(format!("视频生成响应解析失败: {}", err)))?;
+
+    Ok(Json(video_create_to_response(created, &model)))
 }
 
 pub async fn create_graphic_package_handler(
@@ -562,7 +789,53 @@ pub async fn get_video_task(
     Path(id): Path<String>,
 ) -> Result<Json<VideoTaskResponse>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
-    Ok(Json(mock_video_task_status(&id)))
+    let config = BeeBotOSConfig::load()
+        .map_err(|err| GatewayError::internal(format!("加载视频生成配置失败: {}", err)))?;
+    let model = config.video_generation.model.clone();
+    let api_key = match config
+        .video_generation
+        .api_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+    {
+        Some(api_key) => api_key,
+        None => {
+            let mut response = video_generation_config_required_response(&model);
+            response.id = id;
+            return Ok(Json(response));
+        }
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            config.video_generation.timeout_seconds,
+        ))
+        .build()
+        .map_err(|err| GatewayError::internal(format!("视频生成客户端创建失败: {}", err)))?;
+
+    let response = client
+        .get(video_task_status_url(
+            &config.video_generation.base_url,
+            &id,
+        ))
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|err| GatewayError::internal(format!("视频任务查询失败: {}", err)))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let mut fallback = video_upstream_unavailable_response(&model, status);
+        fallback.id = id;
+        return Ok(Json(fallback));
+    }
+
+    let upstream = response
+        .json::<VolcengineVideoTaskStatusResponse>()
+        .await
+        .map_err(|err| GatewayError::internal(format!("视频任务响应解析失败: {}", err)))?;
+
+    Ok(Json(video_status_to_response(upstream, &model)))
 }
 
 pub async fn get_graphic_image(
@@ -585,19 +858,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mock_seedance_task_uses_seedance_provider_name() {
+    fn seedance_payload_uses_text_content_and_generation_options() {
         let req = CreateVideoTaskRequest {
             product: "云柑礼盒".to_string(),
             platform: "抖音".to_string(),
             version: "种草版".to_string(),
-            prompt: "生成短视频".to_string(),
+            prompt: "为云柑礼盒生成短视频".to_string(),
+            duration_seconds: 8,
+            resolution: "1080p".to_string(),
+            ratio: "16:9".to_string(),
+            generate_audio: false,
+            watermark: true,
         };
 
-        let task = create_mock_video_task(&req);
+        let payload = build_seedance_video_payload("doubao-seedance-2-0-260128", &req);
 
-        assert_eq!(task.provider, "seedance2-mock");
-        assert_eq!(task.status, "queued");
-        assert!(task.id.contains("seedance-mock"));
+        assert_eq!(payload.model, "doubao-seedance-2-0-260128");
+        assert_eq!(payload.content[0].kind, "text");
+        assert_eq!(payload.content[0].text, "为云柑礼盒生成短视频");
+        assert_eq!(payload.duration, 8);
+        assert_eq!(payload.resolution, "1080p");
+        assert_eq!(payload.ratio, "16:9");
+        assert!(!payload.generate_audio);
+        assert!(payload.watermark);
+    }
+
+    #[test]
+    fn seedance_status_response_maps_succeeded_to_completed_preview() {
+        let upstream = VolcengineVideoTaskStatusResponse {
+            id: "task-1".to_string(),
+            model: Some("doubao-seedance-2-0-260128".to_string()),
+            status: "succeeded".to_string(),
+            content: Some(VolcengineVideoTaskContent {
+                video_url: Some("https://cdn.example/video.mp4".to_string()),
+            }),
+            error: None,
+        };
+
+        let response = video_status_to_response(upstream, "fallback-model");
+
+        assert_eq!(response.id, "task-1");
+        assert_eq!(response.provider, "volcengine-ark");
+        assert_eq!(response.model, "doubao-seedance-2-0-260128");
+        assert_eq!(response.status, "completed");
+        assert_eq!(
+            response.preview_url.as_deref(),
+            Some("https://cdn.example/video.mp4")
+        );
+    }
+
+    #[test]
+    fn seedance_config_required_response_is_blocked() {
+        let response = video_generation_config_required_response("doubao-seedance-2-0-260128");
+
+        assert_eq!(response.provider, "volcengine-ark");
+        assert_eq!(response.model, "doubao-seedance-2-0-260128");
+        assert_eq!(response.status, "blocked");
+        assert!(response.message.contains("VIDEO_GENERATION_API_KEY"));
+        assert!(response.preview_url.is_none());
     }
 
     #[test]

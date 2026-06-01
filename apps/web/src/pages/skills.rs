@@ -342,23 +342,38 @@ fn SkillCard(
     };
 
     let category_icon = if skill.tags.iter().any(|t| t.to_lowercase() == "trading")
-        || skill.capabilities.iter().any(|c| c.to_lowercase().contains("trade"))
+        || skill
+            .capabilities
+            .iter()
+            .any(|c| c.to_lowercase().contains("trade"))
     {
         "📈"
     } else if skill.tags.iter().any(|t| t.to_lowercase() == "data")
-        || skill.capabilities.iter().any(|c| c.to_lowercase().contains("data"))
+        || skill
+            .capabilities
+            .iter()
+            .any(|c| c.to_lowercase().contains("data"))
     {
         "📊"
     } else if skill.tags.iter().any(|t| t.to_lowercase() == "social")
-        || skill.capabilities.iter().any(|c| c.to_lowercase().contains("social"))
+        || skill
+            .capabilities
+            .iter()
+            .any(|c| c.to_lowercase().contains("social"))
     {
         "💬"
     } else if skill.tags.iter().any(|t| t.to_lowercase() == "automation")
-        || skill.capabilities.iter().any(|c| c.to_lowercase().contains("auto"))
+        || skill
+            .capabilities
+            .iter()
+            .any(|c| c.to_lowercase().contains("auto"))
     {
         "⚙️"
     } else if skill.tags.iter().any(|t| t.to_lowercase() == "analysis")
-        || skill.capabilities.iter().any(|c| c.to_lowercase().contains("analy"))
+        || skill
+            .capabilities
+            .iter()
+            .any(|c| c.to_lowercase().contains("analy"))
     {
         "🔍"
     } else {
@@ -709,9 +724,7 @@ fn SkillsEmpty(
 }
 
 #[component]
-fn SkillsError(
-    #[prop(into)] message: String,
-) -> impl IntoView {
+fn SkillsError(#[prop(into)] message: String) -> impl IntoView {
     let i18n = use_context::<I18nContext>().expect("i18n context not found");
     let is_hub_unavailable =
         message.contains("502") || message.contains("503") || message.contains("unavailable");

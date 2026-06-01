@@ -318,26 +318,41 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("footer-resources", "资源");
     zh.insert("footer-community", "社区");
     zh.insert("ai-commerce-title", "ai电商");
-    zh.insert("ai-commerce-subtitle", "集中管理外部小店入口，后续接入链接后一键进入。");
+    zh.insert(
+        "ai-commerce-subtitle",
+        "集中管理外部小店入口，后续接入链接后一键进入。",
+    );
     zh.insert("ai-commerce-enter-store", "进入小店");
     zh.insert("ai-commerce-coming-soon", "即将接入");
     zh.insert("ai-commerce-status-pending", "待接入");
     zh.insert("ai-store-manager-title", "AI 店长");
-    zh.insert("ai-store-manager-subtitle", "用 AI 批量生成视频、图文和电话营销任务。");
+    zh.insert(
+        "ai-store-manager-subtitle",
+        "用 AI 批量生成视频、图文和电话营销任务。",
+    );
     zh.insert("ai-store-manager-import-products", "导入商品");
     zh.insert("ai-store-manager-create-task", "创建营销任务");
     zh.insert("ai-store-manager-marketing-entries", "营销入口");
     zh.insert("ai-store-manager-todo", "营销待办");
     zh.insert("ai-store-manager-video-marketing", "AI 视频营销");
-    zh.insert("ai-store-manager-video-desc", "按商品、卖点和平台生成短视频脚本、分镜、标题、口播词和字幕。");
+    zh.insert(
+        "ai-store-manager-video-desc",
+        "按商品、卖点和平台生成短视频脚本、分镜、标题、口播词和字幕。",
+    );
     zh.insert("ai-store-manager-video-core", "核心能力");
     zh.insert("ai-store-manager-create-video", "创建视频任务");
     zh.insert("ai-store-manager-graphic-marketing", "AI 图文营销");
-    zh.insert("ai-store-manager-graphic-desc", "生成种草文案、朋友圈内容、海报文案和商品详情优化建议。");
+    zh.insert(
+        "ai-store-manager-graphic-desc",
+        "生成种草文案、朋友圈内容、海报文案和商品详情优化建议。",
+    );
     zh.insert("ai-store-manager-graphic-core", "核心能力");
     zh.insert("ai-store-manager-create-graphic", "创建图文任务");
     zh.insert("ai-store-manager-phone-marketing", "AI 电话营销");
-    zh.insert("ai-store-manager-phone-desc", "面向老客复购、活动通知和高意向线索生成外呼话术与跟进任务。");
+    zh.insert(
+        "ai-store-manager-phone-desc",
+        "面向老客复购、活动通知和高意向线索生成外呼话术与跟进任务。",
+    );
     zh.insert("ai-store-manager-phone-core", "核心能力");
     zh.insert("ai-store-manager-create-phone", "创建外呼任务");
     zh.insert("skill-instances-title", "实例管理");
@@ -360,7 +375,10 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("skill-instances-running", "运行中...");
     zh.insert("skill-instances-delete", "删除");
     zh.insert("skill-instances-empty-title", "暂无实例");
-    zh.insert("skill-instances-empty-desc", "创建一个新实例以绑定技能到智能体");
+    zh.insert(
+        "skill-instances-empty-desc",
+        "创建一个新实例以绑定技能到智能体",
+    );
     zh.insert("skill-instances-error-title", "加载实例失败");
     zh.insert("skill-instances-missing-fields", "缺少字段");
     zh.insert("skill-instances-fill-fields", "请填写技能 ID 和智能体 ID");
@@ -410,13 +428,22 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("workflows-uninstall-failed", "卸载失败");
     zh.insert("workflows-dag", "DAG");
     zh.insert("workflows-reports", "报告");
-    zh.insert("workflows-no-reports", "暂无报告。执行完成后可在这里查看最新报告和历史报告。");
+    zh.insert(
+        "workflows-no-reports",
+        "暂无报告。执行完成后可在这里查看最新报告和历史报告。",
+    );
     zh.insert("workflows-select-report", "请选择一个报告");
-    zh.insert("workflows-start-hint", "点击执行会使用默认空上下文启动工作流；只有需要覆盖参数时才展开高级 JSON。");
+    zh.insert(
+        "workflows-start-hint",
+        "点击执行会使用默认空上下文启动工作流；只有需要覆盖参数时才展开高级 JSON。",
+    );
     zh.insert("workflows-show-context", "高级参数 JSON");
     zh.insert("workflows-hide-context", "收起高级参数");
     zh.insert("workflows-trigger-context", "触发上下文 (可选 JSON)");
-    zh.insert("workflows-trigger-hint", "默认 {} 即可；可输入 JSON 对象作为触发上下文。");
+    zh.insert(
+        "workflows-trigger-hint",
+        "默认 {} 即可；可输入 JSON 对象作为触发上下文。",
+    );
     zh.insert("workflows-execute", "执行");
     zh.insert("workflows-executing", "执行中...");
     zh.insert("workflows-started", "工作流已启动");
@@ -426,8 +453,14 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("workflows-close", "关闭");
     zh.insert("workflows-cron-expression", "Cron 表达式");
     zh.insert("workflows-timezone", "时区");
-    zh.insert("workflows-cron-placeholder", "例如：0 9 * * *（每天上午 9 点）, 0 */6 * * *（每 6 小时）");
-    zh.insert("workflows-timezone-placeholder", "例如：UTC, Asia/Shanghai, America/New_York");
+    zh.insert(
+        "workflows-cron-placeholder",
+        "例如：0 9 * * *（每天上午 9 点）, 0 */6 * * *（每 6 小时）",
+    );
+    zh.insert(
+        "workflows-timezone-placeholder",
+        "例如：UTC, Asia/Shanghai, America/New_York",
+    );
     zh.insert("workflows-parse-failed", "解析失败");
     zh.insert("workflows-schedule-updated", "调度已更新");
     zh.insert("workflows-schedule-update-failed", "更新失败");
@@ -436,20 +469,29 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("workflows-saving", "保存中...");
     zh.insert("workflows-install-title", "安装工作流");
     zh.insert("workflows-file-path", "工作流文件路径");
-    zh.insert("workflows-file-hint", "YAML/JSON 工作流文件的绝对或相对路径");
+    zh.insert(
+        "workflows-file-hint",
+        "YAML/JSON 工作流文件的绝对或相对路径",
+    );
     zh.insert("workflows-install", "安装");
     zh.insert("workflows-installing", "安装中...");
     zh.insert("workflows-installed", "工作流已安装");
     zh.insert("workflows-install-failed", "安装失败");
     zh.insert("workflows-load-failed", "加载失败");
     zh.insert("workflows-definition-yaml", "工作流定义 (YAML)");
-    zh.insert("workflows-definition-hint", "直接编辑工作流定义。注意 YAML 语法。");
+    zh.insert(
+        "workflows-definition-hint",
+        "直接编辑工作流定义。注意 YAML 语法。",
+    );
     zh.insert("workflows-updated", "工作流已更新");
     zh.insert("workflows-saved", "配置保存成功");
     zh.insert("workflows-update-failed", "更新失败");
     zh.insert("workflows-save", "保存");
     zh.insert("workflows-no-compositions", "尚未定义技能组合");
-    zh.insert("workflows-composition-hint", "通过 API 或在 data/compositions/ 中创建 YAML 文件来创建组合");
+    zh.insert(
+        "workflows-composition-hint",
+        "通过 API 或在 data/compositions/ 中创建 YAML 文件来创建组合",
+    );
     zh.insert("workflows-composition-executed", "组合已执行");
     zh.insert("workflows-composition-execution-failed", "组合执行失败");
     zh.insert("workflows-composition-delete", "删除组合");
@@ -470,7 +512,10 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("cron-jobs-create", "新建定时任务");
     zh.insert("cron-jobs-history", "执行历史");
     zh.insert("cron-jobs-empty-title", "暂无定时任务");
-    zh.insert("cron-jobs-empty-hint", "点击右上角「新建任务」创建第一个定时任务");
+    zh.insert(
+        "cron-jobs-empty-hint",
+        "点击右上角「新建任务」创建第一个定时任务",
+    );
     zh.insert("cron-jobs-table-name", "名称");
     zh.insert("cron-jobs-table-schedule", "调度方式");
     zh.insert("cron-jobs-table-expression", "表达式");
@@ -497,11 +542,17 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("cron-jobs-form-cron-placeholder", "*/5 * * * *");
     zh.insert("cron-jobs-form-interval-placeholder", "30m");
     zh.insert("cron-jobs-form-cron-hint", "5 字段 cron：分 时 日 月 星期");
-    zh.insert("cron-jobs-form-interval-hint", "支持 s/m/h/d，如 30m, 1h, 4h, 1d");
+    zh.insert(
+        "cron-jobs-form-interval-hint",
+        "支持 s/m/h/d，如 30m, 1h, 4h, 1d",
+    );
     zh.insert("cron-jobs-form-timezone", "时区");
     zh.insert("cron-jobs-form-timezone-placeholder", "Asia/Shanghai");
     zh.insert("cron-jobs-form-prompt", "执行提示词 (Prompt)");
-    zh.insert("cron-jobs-form-prompt-placeholder", "任务触发时发送给 Agent 的提示词");
+    zh.insert(
+        "cron-jobs-form-prompt-placeholder",
+        "任务触发时发送给 Agent 的提示词",
+    );
     zh.insert("cron-jobs-form-context-mode", "上下文模式");
     zh.insert("cron-jobs-form-context-standalone", "独立会话");
     zh.insert("cron-jobs-form-context-shared", "主会话共享");
@@ -511,7 +562,10 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("cron-jobs-form-channel-webchat", "网页聊天");
     zh.insert("cron-jobs-form-channel-webhook", "Webhook");
     zh.insert("cron-jobs-form-target", "投递目标");
-    zh.insert("cron-jobs-form-target-webchat-hint", "WebSocket 频道名（默认 webchat）");
+    zh.insert(
+        "cron-jobs-form-target-webchat-hint",
+        "WebSocket 频道名（默认 webchat）",
+    );
     zh.insert("cron-jobs-form-target-webhook-hint", "接收 POST 请求的 URL");
     zh.insert("cron-jobs-form-enabled", "启用此任务");
     zh.insert("cron-jobs-form-cancel", "取消");
@@ -523,19 +577,32 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("cron-jobs-history-error", "加载失败");
     zh.insert("cron-jobs-error-load", "加载定时任务列表失败");
     zh.insert("llm-settings-title", "大模型设置");
-    zh.insert("llm-settings-subtitle", "选择并配置当前使用的大语言模型及其参数");
+    zh.insert(
+        "llm-settings-subtitle",
+        "选择并配置当前使用的大语言模型及其参数",
+    );
     zh.insert("llm-settings-retry", "重试");
     zh.insert("llm-settings-provider", "模型提供商");
     zh.insert("llm-settings-select-provider", "选择提供商");
     zh.insert("llm-settings-model-version", "模型版本");
     zh.insert("llm-settings-select-kimi", "选择 Kimi 模型");
-    zh.insert("llm-settings-kimi-hint", "选择会同步写入 model、thinking 和 temperature。");
+    zh.insert(
+        "llm-settings-kimi-hint",
+        "选择会同步写入 model、thinking 和 temperature。",
+    );
     zh.insert("llm-settings-select-deepseek", "选择 DeepSeek 模型");
-    zh.insert("llm-settings-deepseek-hint", "DeepSeek 官方当前模型为 deepseek-v4-flash / deepseek-v4-pro，选择会同步写入 thinking 和 reasoning_effort。");
+    zh.insert(
+        "llm-settings-deepseek-hint",
+        "DeepSeek 官方当前模型为 deepseek-v4-flash / deepseek-v4-pro，选择会同步写入 thinking 和 \
+         reasoning_effort。",
+    );
     zh.insert("llm-settings-model-name", "模型名称");
     zh.insert("llm-settings-model-placeholder", "例如: gpt-4o");
     zh.insert("llm-settings-temperature", "温度");
-    zh.insert("llm-settings-temperature-hint", "取值范围 0.0 ~ 2.0，越低越确定，越高越 creative");
+    zh.insert(
+        "llm-settings-temperature-hint",
+        "取值范围 0.0 ~ 2.0，越低越确定，越高越 creative",
+    );
     zh.insert("llm-settings-select-provider-first", "请先选择模型提供商");
     zh.insert("llm-settings-current-params", "当前参数");
     zh.insert("llm-settings-provider-label", "提供商");
@@ -551,7 +618,10 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("llm-settings-reload-success", "配置已重载");
     zh.insert("llm-settings-reloading", "重载中...");
     zh.insert("llm-settings-reload-restart", "重启生效 (Reload)");
-    zh.insert("llm-settings-reload-hint", "保存后会自动写入 config/beebotos.toml 并热重载。如需完全生效，请点击");
+    zh.insert(
+        "llm-settings-reload-hint",
+        "保存后会自动写入 config/beebotos.toml 并热重载。如需完全生效，请点击",
+    );
     zh.insert("agents-page-title", "智能体");
     zh.insert("agents-page-subtitle", "管理您的自主 AI 智能体");
     zh.insert("agents-new", "新建智能体");
@@ -579,7 +649,10 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("agents-create-desc-placeholder", "输入智能体描述");
     zh.insert("agents-create-provider", "模型提供商");
     zh.insert("agents-create-model", "模型名称");
-    zh.insert("agents-create-model-placeholder", "例如：gpt-4, claude-3-opus-20240229");
+    zh.insert(
+        "agents-create-model-placeholder",
+        "例如：gpt-4, claude-3-opus-20240229",
+    );
     zh.insert("agents-create-cancel", "取消");
     zh.insert("agents-create-creating", "创建中...");
     zh.insert("agents-create-submit", "创建智能体");
@@ -598,12 +671,18 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("settings-korean", "한국어");
     zh.insert("settings-notifications", "通知");
     zh.insert("settings-enable-notifications", "启用通知");
-    zh.insert("settings-notifications-hint", "接收智能体状态和 DAO 治理的提醒");
+    zh.insert(
+        "settings-notifications-hint",
+        "接收智能体状态和 DAO 治理的提醒",
+    );
     zh.insert("settings-auto-update", "自动更新");
     zh.insert("settings-auto-update-hint", "自动更新到最新版本");
     zh.insert("settings-network", "网络");
     zh.insert("settings-api-endpoint", "API 端点");
-    zh.insert("settings-api-endpoint-hint", "自定义 API 端点（留空使用默认）");
+    zh.insert(
+        "settings-api-endpoint-hint",
+        "自定义 API 端点（留空使用默认）",
+    );
     zh.insert("settings-wallet", "钱包");
     zh.insert("settings-wallet-address", "钱包地址");
     zh.insert("settings-wallet-placeholder", "0x...");
@@ -748,11 +827,20 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("treasury-view-all", "查看全部 →");
     zh.insert("treasury-about", "关于金库");
     zh.insert("treasury-multi-sig", "多重签名保护");
-    zh.insert("treasury-multi-sig-desc", "所有提款都需要 DAO 理事会成员的多重签名");
+    zh.insert(
+        "treasury-multi-sig-desc",
+        "所有提款都需要 DAO 理事会成员的多重签名",
+    );
     zh.insert("treasury-transparent", "透明");
-    zh.insert("treasury-transparent-desc", "所有交易都记录在链上，可公开验证");
+    zh.insert(
+        "treasury-transparent-desc",
+        "所有交易都记录在链上，可公开验证",
+    );
     zh.insert("treasury-governance", "治理控制");
-    zh.insert("treasury-governance-desc", "重大资金分配需要通过 DAO 提案进行社区投票");
+    zh.insert(
+        "treasury-governance-desc",
+        "重大资金分配需要通过 DAO 提案进行社区投票",
+    );
     zh.insert("treasury-no-assets", "金库中没有资产");
     zh.insert("treasury-first-deposit", "进行首笔存入");
     zh.insert("treasury-no-transactions", "暂无近期交易");
@@ -1025,13 +1113,25 @@ pub fn init_i18n() -> I18nContext {
     en.insert("skill-installing", "Installing...");
     en.insert("skills-no-results", "No results");
     en.insert("skills-search-hint", "Enter a keyword to search for skills");
-    en.insert("skills-try-different", "Try a different search term or switch to Local skills");
+    en.insert(
+        "skills-try-different",
+        "Try a different search term or switch to Local skills",
+    );
     en.insert("skills-failed-load", "Failed to load skills");
-    en.insert("skills-hub-unreachable", "The skill hub is currently unreachable");
-    en.insert("skills-check-network", "Please switch to Local skills or check Gateway network configuration");
+    en.insert(
+        "skills-hub-unreachable",
+        "The skill hub is currently unreachable",
+    );
+    en.insert(
+        "skills-check-network",
+        "Please switch to Local skills or check Gateway network configuration",
+    );
     en.insert("skills-retry", "Retry");
     en.insert("skills-no-skills-found", "No skills found");
-    en.insert("skills-adjust-search", "Try adjusting your search or filters");
+    en.insert(
+        "skills-adjust-search",
+        "Try adjusting your search or filters",
+    );
     en.insert("settings-title", "Settings");
     en.insert("settings-subtitle", "Configure your BeeBotOS instance");
     en.insert("settings-general", "General");
@@ -1077,30 +1177,51 @@ pub fn init_i18n() -> I18nContext {
     en.insert("footer-resources", "Resources");
     en.insert("footer-community", "Community");
     en.insert("ai-commerce-title", "AI Commerce");
-    en.insert("ai-commerce-subtitle", "Manage external store entries, one-click access after linking.");
+    en.insert(
+        "ai-commerce-subtitle",
+        "Manage external store entries, one-click access after linking.",
+    );
     en.insert("ai-commerce-enter-store", "Enter Store");
     en.insert("ai-commerce-coming-soon", "Coming Soon");
     en.insert("ai-commerce-status-pending", "Pending");
     en.insert("ai-store-manager-title", "AI Store Manager");
-    en.insert("ai-store-manager-subtitle", "Use AI to batch-generate video, graphic, and phone marketing tasks.");
+    en.insert(
+        "ai-store-manager-subtitle",
+        "Use AI to batch-generate video, graphic, and phone marketing tasks.",
+    );
     en.insert("ai-store-manager-import-products", "Import Products");
     en.insert("ai-store-manager-create-task", "Create Marketing Task");
     en.insert("ai-store-manager-marketing-entries", "Marketing Entries");
     en.insert("ai-store-manager-todo", "Marketing To-Do");
     en.insert("ai-store-manager-video-marketing", "AI Video Marketing");
-    en.insert("ai-store-manager-video-desc", "Generate short video scripts, storyboards, titles, voiceover scripts, and subtitles by product, selling point, and platform.");
+    en.insert(
+        "ai-store-manager-video-desc",
+        "Generate short video scripts, storyboards, titles, voiceover scripts, and subtitles by \
+         product, selling point, and platform.",
+    );
     en.insert("ai-store-manager-video-core", "Core Capabilities");
     en.insert("ai-store-manager-create-video", "Create Video Task");
     en.insert("ai-store-manager-graphic-marketing", "AI Graphic Marketing");
-    en.insert("ai-store-manager-graphic-desc", "Generate seeding copy, Moments content, poster copy, and product detail optimization suggestions.");
+    en.insert(
+        "ai-store-manager-graphic-desc",
+        "Generate seeding copy, Moments content, poster copy, and product detail optimization \
+         suggestions.",
+    );
     en.insert("ai-store-manager-graphic-core", "Core Capabilities");
     en.insert("ai-store-manager-create-graphic", "Create Graphic Task");
     en.insert("ai-store-manager-phone-marketing", "AI Phone Marketing");
-    en.insert("ai-store-manager-phone-desc", "Generate outbound call scripts and follow-up tasks for existing customer repurchase, event notifications, and high-intent leads.");
+    en.insert(
+        "ai-store-manager-phone-desc",
+        "Generate outbound call scripts and follow-up tasks for existing customer repurchase, \
+         event notifications, and high-intent leads.",
+    );
     en.insert("ai-store-manager-phone-core", "Core Capabilities");
     en.insert("ai-store-manager-create-phone", "Create Call Task");
     en.insert("skill-instances-title", "Instance Management");
-    en.insert("skill-instances-subtitle", "Manage skill instances bound to your agents");
+    en.insert(
+        "skill-instances-subtitle",
+        "Manage skill instances bound to your agents",
+    );
     en.insert("skill-instances-new", "New Instance");
     en.insert("skill-instances-cancel", "Cancel");
     en.insert("skill-instances-create", "Create Instance");
@@ -1119,10 +1240,16 @@ pub fn init_i18n() -> I18nContext {
     en.insert("skill-instances-running", "Running...");
     en.insert("skill-instances-delete", "Delete");
     en.insert("skill-instances-empty-title", "No instances yet");
-    en.insert("skill-instances-empty-desc", "Create a new instance to bind a skill to an agent");
+    en.insert(
+        "skill-instances-empty-desc",
+        "Create a new instance to bind a skill to an agent",
+    );
     en.insert("skill-instances-error-title", "Failed to load instances");
     en.insert("skill-instances-missing-fields", "Missing Fields");
-    en.insert("skill-instances-fill-fields", "Please fill in both Skill ID and Agent ID");
+    en.insert(
+        "skill-instances-fill-fields",
+        "Please fill in both Skill ID and Agent ID",
+    );
     en.insert("skill-instances-created", "Instance Created");
     en.insert("skill-instances-creation-failed", "Creation Failed");
     en.insert("skill-instances-deleted", "Instance Deleted");
@@ -1130,7 +1257,10 @@ pub fn init_i18n() -> I18nContext {
     en.insert("skill-instances-execution-result", "Execution Result");
     en.insert("skill-instances-execution-failed", "Execution Failed");
     en.insert("workflows-title", "Workflows");
-    en.insert("workflows-subtitle", "Monitor workflow definitions, executions, and skill compositions");
+    en.insert(
+        "workflows-subtitle",
+        "Monitor workflow definitions, executions, and skill compositions",
+    );
     en.insert("workflows-refresh", "Refresh");
     en.insert("workflows-refreshing", "Refreshing...");
     en.insert("workflows-tab-orchestration", "📋 Workflow Orchestration");
@@ -1160,7 +1290,10 @@ pub fn init_i18n() -> I18nContext {
     en.insert("workflows-stopping", "Stopping...");
     en.insert("workflows-stop-latest", "Stop latest running instance");
     en.insert("workflows-no-running", "No Running Instance");
-    en.insert("workflows-not-running", "This workflow is not currently running");
+    en.insert(
+        "workflows-not-running",
+        "This workflow is not currently running",
+    );
     en.insert("workflows-schedule", "Schedule");
     en.insert("workflows-config", "Config");
     en.insert("workflows-uninstall", "Uninstall");
@@ -1169,13 +1302,26 @@ pub fn init_i18n() -> I18nContext {
     en.insert("workflows-uninstall-failed", "Uninstall Failed");
     en.insert("workflows-dag", "DAG");
     en.insert("workflows-reports", "Reports");
-    en.insert("workflows-no-reports", "No reports yet. Run the workflow to view the latest and historical reports here.");
+    en.insert(
+        "workflows-no-reports",
+        "No reports yet. Run the workflow to view the latest and historical reports here.",
+    );
     en.insert("workflows-select-report", "Select a report");
-    en.insert("workflows-start-hint", "Execute starts the workflow with an empty default context. Expand advanced JSON only when you need to override parameters.");
+    en.insert(
+        "workflows-start-hint",
+        "Execute starts the workflow with an empty default context. Expand advanced JSON only \
+         when you need to override parameters.",
+    );
     en.insert("workflows-show-context", "Advanced JSON");
     en.insert("workflows-hide-context", "Hide advanced parameters");
-    en.insert("workflows-trigger-context", "Trigger Context (optional JSON)");
-    en.insert("workflows-trigger-hint", "Keep the default {} unless you need to pass a JSON object as trigger context.");
+    en.insert(
+        "workflows-trigger-context",
+        "Trigger Context (optional JSON)",
+    );
+    en.insert(
+        "workflows-trigger-hint",
+        "Keep the default {} unless you need to pass a JSON object as trigger context.",
+    );
     en.insert("workflows-execute", "Execute");
     en.insert("workflows-executing", "Executing...");
     en.insert("workflows-started", "Workflow Started");
@@ -1185,8 +1331,14 @@ pub fn init_i18n() -> I18nContext {
     en.insert("workflows-close", "Close");
     en.insert("workflows-cron-expression", "Cron Expression");
     en.insert("workflows-timezone", "Timezone");
-    en.insert("workflows-cron-placeholder", "e.g. 0 9 * * * (daily at 9am), 0 */6 * * * (every 6 hours)");
-    en.insert("workflows-timezone-placeholder", "e.g. UTC, Asia/Shanghai, America/New_York");
+    en.insert(
+        "workflows-cron-placeholder",
+        "e.g. 0 9 * * * (daily at 9am), 0 */6 * * * (every 6 hours)",
+    );
+    en.insert(
+        "workflows-timezone-placeholder",
+        "e.g. UTC, Asia/Shanghai, America/New_York",
+    );
     en.insert("workflows-parse-failed", "Parse Failed");
     en.insert("workflows-schedule-updated", "Schedule Updated");
     en.insert("workflows-schedule-update-failed", "Update Failed");
@@ -1195,20 +1347,32 @@ pub fn init_i18n() -> I18nContext {
     en.insert("workflows-saving", "Saving...");
     en.insert("workflows-install-title", "Install Workflow");
     en.insert("workflows-file-path", "Workflow File Path");
-    en.insert("workflows-file-hint", "Absolute or relative path to a YAML/JSON workflow file");
+    en.insert(
+        "workflows-file-hint",
+        "Absolute or relative path to a YAML/JSON workflow file",
+    );
     en.insert("workflows-install", "Install");
     en.insert("workflows-installing", "Installing...");
     en.insert("workflows-installed", "Workflow Installed");
     en.insert("workflows-install-failed", "Install Failed");
     en.insert("workflows-load-failed", "Load Failed");
     en.insert("workflows-definition-yaml", "Workflow Definition (YAML)");
-    en.insert("workflows-definition-hint", "Edit the workflow definition directly. Be careful with YAML syntax.");
+    en.insert(
+        "workflows-definition-hint",
+        "Edit the workflow definition directly. Be careful with YAML syntax.",
+    );
     en.insert("workflows-updated", "Workflow Updated");
     en.insert("workflows-saved", "Configuration saved successfully");
     en.insert("workflows-update-failed", "Update Failed");
     en.insert("workflows-save", "Save");
-    en.insert("workflows-no-compositions", "No skill compositions defined yet");
-    en.insert("workflows-composition-hint", "Create compositions via API or YAML files in data/compositions/");
+    en.insert(
+        "workflows-no-compositions",
+        "No skill compositions defined yet",
+    );
+    en.insert(
+        "workflows-composition-hint",
+        "Create compositions via API or YAML files in data/compositions/",
+    );
     en.insert("workflows-composition-executed", "Composition Executed");
     en.insert("workflows-composition-execution-failed", "Execution Failed");
     en.insert("workflows-composition-delete", "Delete composition");
@@ -1218,8 +1382,14 @@ pub fn init_i18n() -> I18nContext {
     en.insert("workflows-execute-composition", "Execute composition");
     en.insert("workflows-composition-running", "Running...");
     en.insert("workflows-error-recent", "Failed to load recent instances");
-    en.insert("workflows-error-definitions", "Failed to load workflow definitions");
-    en.insert("workflows-error-compositions", "Failed to load skill compositions");
+    en.insert(
+        "workflows-error-definitions",
+        "Failed to load workflow definitions",
+    );
+    en.insert(
+        "workflows-error-compositions",
+        "Failed to load skill compositions",
+    );
     en.insert("cron-jobs-title", "Cron Jobs");
     en.insert("cron-jobs-subtitle", "Manage scheduled automation tasks");
     en.insert("cron-jobs-refresh", "Refresh");
@@ -1229,7 +1399,10 @@ pub fn init_i18n() -> I18nContext {
     en.insert("cron-jobs-create", "Create Cron Job");
     en.insert("cron-jobs-history", "Execution History");
     en.insert("cron-jobs-empty-title", "No cron jobs yet");
-    en.insert("cron-jobs-empty-hint", "Click \"New Task\" in the top right to create your first cron job");
+    en.insert(
+        "cron-jobs-empty-hint",
+        "Click \"New Task\" in the top right to create your first cron job",
+    );
     en.insert("cron-jobs-table-name", "Name");
     en.insert("cron-jobs-table-schedule", "Schedule Type");
     en.insert("cron-jobs-table-expression", "Expression");
@@ -1250,28 +1423,49 @@ pub fn init_i18n() -> I18nContext {
     en.insert("cron-jobs-form-name", "Job Name");
     en.insert("cron-jobs-form-name-placeholder", "e.g. Daily Report");
     en.insert("cron-jobs-form-desc", "Description");
-    en.insert("cron-jobs-form-desc-placeholder", "Briefly describe the task purpose");
+    en.insert(
+        "cron-jobs-form-desc-placeholder",
+        "Briefly describe the task purpose",
+    );
     en.insert("cron-jobs-form-schedule-type", "Schedule Type");
     en.insert("cron-jobs-form-expression", "Schedule Expression");
     en.insert("cron-jobs-form-cron-placeholder", "*/5 * * * *");
     en.insert("cron-jobs-form-interval-placeholder", "30m");
-    en.insert("cron-jobs-form-cron-hint", "5-field cron: minute hour day month weekday");
-    en.insert("cron-jobs-form-interval-hint", "Supports s/m/h/d, e.g. 30m, 1h, 4h, 1d");
+    en.insert(
+        "cron-jobs-form-cron-hint",
+        "5-field cron: minute hour day month weekday",
+    );
+    en.insert(
+        "cron-jobs-form-interval-hint",
+        "Supports s/m/h/d, e.g. 30m, 1h, 4h, 1d",
+    );
     en.insert("cron-jobs-form-timezone", "Timezone");
     en.insert("cron-jobs-form-timezone-placeholder", "Asia/Shanghai");
     en.insert("cron-jobs-form-prompt", "Execution Prompt");
-    en.insert("cron-jobs-form-prompt-placeholder", "Prompt sent to Agent when task triggers");
+    en.insert(
+        "cron-jobs-form-prompt-placeholder",
+        "Prompt sent to Agent when task triggers",
+    );
     en.insert("cron-jobs-form-context-mode", "Context Mode");
     en.insert("cron-jobs-form-context-standalone", "Standalone Session");
     en.insert("cron-jobs-form-context-shared", "Shared Session");
     en.insert("cron-jobs-form-max-runs", "Max Runs");
-    en.insert("cron-jobs-form-max-runs-placeholder", "Leave empty for unlimited");
+    en.insert(
+        "cron-jobs-form-max-runs-placeholder",
+        "Leave empty for unlimited",
+    );
     en.insert("cron-jobs-form-channel", "Notification Channel");
     en.insert("cron-jobs-form-channel-webchat", "WebChat");
     en.insert("cron-jobs-form-channel-webhook", "Webhook");
     en.insert("cron-jobs-form-target", "Delivery Target");
-    en.insert("cron-jobs-form-target-webchat-hint", "WebSocket channel name (default: webchat)");
-    en.insert("cron-jobs-form-target-webhook-hint", "URL to receive POST requests");
+    en.insert(
+        "cron-jobs-form-target-webchat-hint",
+        "WebSocket channel name (default: webchat)",
+    );
+    en.insert(
+        "cron-jobs-form-target-webhook-hint",
+        "URL to receive POST requests",
+    );
     en.insert("cron-jobs-form-enabled", "Enable this task");
     en.insert("cron-jobs-form-cancel", "Cancel");
     en.insert("cron-jobs-form-saving", "Saving...");
@@ -1282,20 +1476,36 @@ pub fn init_i18n() -> I18nContext {
     en.insert("cron-jobs-history-error", "Load Failed");
     en.insert("cron-jobs-error-load", "Failed to load cron jobs");
     en.insert("llm-settings-title", "LLM Settings");
-    en.insert("llm-settings-subtitle", "Select and configure the current large language model and its parameters");
+    en.insert(
+        "llm-settings-subtitle",
+        "Select and configure the current large language model and its parameters",
+    );
     en.insert("llm-settings-retry", "Retry");
     en.insert("llm-settings-provider", "Model Provider");
     en.insert("llm-settings-select-provider", "Select Provider");
     en.insert("llm-settings-model-version", "Model Version");
     en.insert("llm-settings-select-kimi", "Select Kimi Model");
-    en.insert("llm-settings-kimi-hint", "Selection will sync model, thinking, and temperature.");
+    en.insert(
+        "llm-settings-kimi-hint",
+        "Selection will sync model, thinking, and temperature.",
+    );
     en.insert("llm-settings-select-deepseek", "Select DeepSeek Model");
-    en.insert("llm-settings-deepseek-hint", "DeepSeek official models are deepseek-v4-flash / deepseek-v4-pro, selection will sync thinking and reasoning_effort.");
+    en.insert(
+        "llm-settings-deepseek-hint",
+        "DeepSeek official models are deepseek-v4-flash / deepseek-v4-pro, selection will sync \
+         thinking and reasoning_effort.",
+    );
     en.insert("llm-settings-model-name", "Model Name");
     en.insert("llm-settings-model-placeholder", "e.g. gpt-4o");
     en.insert("llm-settings-temperature", "Temperature");
-    en.insert("llm-settings-temperature-hint", "Range 0.0 ~ 2.0, lower is more deterministic, higher is more creative");
-    en.insert("llm-settings-select-provider-first", "Please select a model provider first");
+    en.insert(
+        "llm-settings-temperature-hint",
+        "Range 0.0 ~ 2.0, lower is more deterministic, higher is more creative",
+    );
+    en.insert(
+        "llm-settings-select-provider-first",
+        "Please select a model provider first",
+    );
     en.insert("llm-settings-current-params", "Current Parameters");
     en.insert("llm-settings-provider-label", "Provider");
     en.insert("llm-settings-model-label", "Model");
@@ -1304,13 +1514,20 @@ pub fn init_i18n() -> I18nContext {
     en.insert("llm-settings-reasoning-label", "Reasoning Effort");
     en.insert("llm-settings-actions", "Actions");
     en.insert("llm-settings-save-success", "Saved successfully");
-    en.insert("llm-settings-select-provider-model", "Please select provider and model");
+    en.insert(
+        "llm-settings-select-provider-model",
+        "Please select provider and model",
+    );
     en.insert("llm-settings-saving", "Saving...");
     en.insert("llm-settings-save-config", "Save Configuration");
     en.insert("llm-settings-reload-success", "Config reloaded");
     en.insert("llm-settings-reloading", "Reloading...");
     en.insert("llm-settings-reload-restart", "Restart to apply (Reload)");
-    en.insert("llm-settings-reload-hint", "Saved config will be written to config/beebotos.toml and hot-reloaded. For full effect, click");
+    en.insert(
+        "llm-settings-reload-hint",
+        "Saved config will be written to config/beebotos.toml and hot-reloaded. For full effect, \
+         click",
+    );
     en.insert("agents-page-title", "Agents");
     en.insert("agents-page-subtitle", "Manage your autonomous AI agents");
     en.insert("agents-new", "New Agent");
@@ -1325,7 +1542,10 @@ pub fn init_i18n() -> I18nContext {
     en.insert("agents-started", "Agent Started");
     en.insert("agents-start-failed", "Start Failed");
     en.insert("agents-empty-title", "No agents yet");
-    en.insert("agents-empty-desc", "Create your first autonomous agent to get started");
+    en.insert(
+        "agents-empty-desc",
+        "Create your first autonomous agent to get started",
+    );
     en.insert("agents-empty-create", "Create Agent");
     en.insert("agents-error-title", "Failed to load agents");
     en.insert("agents-retry", "Retry");
@@ -1338,12 +1558,18 @@ pub fn init_i18n() -> I18nContext {
     en.insert("agents-create-desc-placeholder", "Enter agent description");
     en.insert("agents-create-provider", "Model Provider");
     en.insert("agents-create-model", "Model Name");
-    en.insert("agents-create-model-placeholder", "e.g. gpt-4, claude-3-opus-20240229");
+    en.insert(
+        "agents-create-model-placeholder",
+        "e.g. gpt-4, claude-3-opus-20240229",
+    );
     en.insert("agents-create-cancel", "Cancel");
     en.insert("agents-create-creating", "Creating...");
     en.insert("agents-create-submit", "Create Agent");
     en.insert("settings-page-title", "Settings");
-    en.insert("settings-page-subtitle", "Manage your preferences and system configuration");
+    en.insert(
+        "settings-page-subtitle",
+        "Manage your preferences and system configuration",
+    );
     en.insert("settings-loading", "Loading settings...");
     en.insert("settings-appearance", "Appearance");
     en.insert("settings-theme", "Theme");
@@ -1357,23 +1583,41 @@ pub fn init_i18n() -> I18nContext {
     en.insert("settings-korean", "한국어");
     en.insert("settings-notifications", "Notifications");
     en.insert("settings-enable-notifications", "Enable notifications");
-    en.insert("settings-notifications-hint", "Receive alerts about agent status and DAO governance");
+    en.insert(
+        "settings-notifications-hint",
+        "Receive alerts about agent status and DAO governance",
+    );
     en.insert("settings-auto-update", "Auto-update");
-    en.insert("settings-auto-update-hint", "Automatically update to the latest version");
+    en.insert(
+        "settings-auto-update-hint",
+        "Automatically update to the latest version",
+    );
     en.insert("settings-network", "Network");
     en.insert("settings-api-endpoint", "API Endpoint");
-    en.insert("settings-api-endpoint-hint", "Custom API endpoint (leave empty for default)");
+    en.insert(
+        "settings-api-endpoint-hint",
+        "Custom API endpoint (leave empty for default)",
+    );
     en.insert("settings-wallet", "Wallet");
     en.insert("settings-wallet-address", "Wallet Address");
     en.insert("settings-wallet-placeholder", "0x...");
-    en.insert("settings-wallet-hint", "Your wallet address for DAO participation");
+    en.insert(
+        "settings-wallet-hint",
+        "Your wallet address for DAO participation",
+    );
     en.insert("settings-connect-wallet", "Connect Wallet");
     en.insert("settings-disconnect", "Disconnect");
     en.insert("settings-ai-config", "AI Configuration");
-    en.insert("settings-ai-config-hint", "View global LLM provider settings and metrics");
+    en.insert(
+        "settings-ai-config-hint",
+        "View global LLM provider settings and metrics",
+    );
     en.insert("settings-open-llm", "Open LLM Configuration →");
     en.insert("settings-gateway", "Gateway Setup");
-    en.insert("settings-gateway-hint", "Run the configuration wizard to setup or reconfigure Gateway");
+    en.insert(
+        "settings-gateway-hint",
+        "Run the configuration wizard to setup or reconfigure Gateway",
+    );
     en.insert("settings-open-wizard", "Configuration Wizard →");
     en.insert("settings-system-info", "System");
     en.insert("settings-version", "Version");
@@ -1399,8 +1643,14 @@ pub fn init_i18n() -> I18nContext {
     en.insert("priority-medium", "Medium");
     en.insert("workflows-stop-success", "Workflow Stopped");
     en.insert("workflows-error-recent", "Failed to load recent instances");
-    en.insert("workflows-error-definitions", "Failed to load workflow definitions");
-    en.insert("workflows-error-compositions", "Failed to load skill compositions");
+    en.insert(
+        "workflows-error-definitions",
+        "Failed to load workflow definitions",
+    );
+    en.insert(
+        "workflows-error-compositions",
+        "Failed to load skill compositions",
+    );
 
     // Browser page
     en.insert("browser-title", "Browser");
@@ -1443,7 +1693,10 @@ pub fn init_i18n() -> I18nContext {
     // DAO page
     en.insert("dao-page-title", "DAO Governance");
     en.insert("dao-governance", "DAO Governance");
-    en.insert("dao-subtitle", "Participate in community-driven decision making");
+    en.insert(
+        "dao-subtitle",
+        "Participate in community-driven decision making",
+    );
     en.insert("dao-view-treasury", "View Treasury →");
     en.insert("dao-members", "DAO Members");
     en.insert("dao-active-proposals", "Active Proposals");
@@ -1477,20 +1730,29 @@ pub fn init_i18n() -> I18nContext {
     en.insert("dao-vote-for", "Vote For");
     en.insert("dao-vote-against", "Vote Against");
     en.insert("dao-vote-submitted", "Vote Submitted");
-    en.insert("dao-vote-recorded", "Your vote has been recorded successfully");
+    en.insert(
+        "dao-vote-recorded",
+        "Your vote has been recorded successfully",
+    );
     en.insert("dao-vote-failed", "Vote Failed");
     en.insert("dao-vote-submit-failed", "Failed to submit vote");
     en.insert("dao-voting", "Voting...");
     en.insert("dao-voted-for", "✓ You voted For");
     en.insert("dao-voted-against", "✓ You voted Against");
     en.insert("dao-no-proposals", "No proposals yet");
-    en.insert("dao-first-proposal", "Be the first to create a governance proposal");
+    en.insert(
+        "dao-first-proposal",
+        "Be the first to create a governance proposal",
+    );
     // Treasury page
     en.insert("treasury-page-title", "Treasury");
     en.insert("treasury-breadcrumb-dao", "DAO");
     en.insert("treasury-breadcrumb-treasury", "Treasury");
     en.insert("treasury-title", "DAO Treasury");
-    en.insert("treasury-subtitle", "Manage community funds with transparent, on-chain governance");
+    en.insert(
+        "treasury-subtitle",
+        "Manage community funds with transparent, on-chain governance",
+    );
     en.insert("treasury-transfer", "Transfer");
     en.insert("treasury-to-address", "To Address");
     en.insert("treasury-address-placeholder", "0x...");
@@ -1507,20 +1769,35 @@ pub fn init_i18n() -> I18nContext {
     en.insert("treasury-view-all", "View All →");
     en.insert("treasury-about", "About the Treasury");
     en.insert("treasury-multi-sig", "Multi-Sig Protected");
-    en.insert("treasury-multi-sig-desc", "All withdrawals require multiple signatures from DAO council members");
+    en.insert(
+        "treasury-multi-sig-desc",
+        "All withdrawals require multiple signatures from DAO council members",
+    );
     en.insert("treasury-transparent", "Transparent");
-    en.insert("treasury-transparent-desc", "All transactions are recorded on-chain and publicly verifiable");
+    en.insert(
+        "treasury-transparent-desc",
+        "All transactions are recorded on-chain and publicly verifiable",
+    );
     en.insert("treasury-governance", "Governance Controlled");
-    en.insert("treasury-governance-desc", "Major allocations require community vote through DAO proposals");
+    en.insert(
+        "treasury-governance-desc",
+        "Major allocations require community vote through DAO proposals",
+    );
     en.insert("treasury-no-assets", "No assets in treasury");
     en.insert("treasury-first-deposit", "Make First Deposit");
     en.insert("treasury-no-transactions", "No recent transactions");
     en.insert("treasury-failed-load", "Failed to load treasury");
     en.insert("treasury-retry", "Retry");
     en.insert("treasury-transactions-title", "Transaction History");
-    en.insert("treasury-transactions-subtitle", "All treasury transactions are recorded on-chain");
+    en.insert(
+        "treasury-transactions-subtitle",
+        "All treasury transactions are recorded on-chain",
+    );
     en.insert("treasury-all-transactions", "All Transactions");
-    en.insert("treasury-address-required", "Address and amount are required");
+    en.insert(
+        "treasury-address-required",
+        "Address and amount are required",
+    );
     en.insert("treasury-transfer-submitted", "Transfer submitted");
     en.insert("treasury-transfer-failed", "Transfer failed");
     en.insert("treasury-breadcrumb-transactions", "Transactions");

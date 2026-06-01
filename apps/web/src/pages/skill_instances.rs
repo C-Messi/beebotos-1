@@ -71,7 +71,11 @@ pub fn SkillInstancesPage() -> impl IntoView {
                         app_state.notify(
                             crate::state::notification::NotificationType::Success,
                             &i18n.t("skill-instances-created"),
-                            format!("{} {}", i18n.t("skill-instances-created"), instance.instance_id),
+                            format!(
+                                "{} {}",
+                                i18n.t("skill-instances-created"),
+                                instance.instance_id
+                            ),
                         );
                         create_skill_id.set(String::new());
                         create_agent_id.set(String::new());
