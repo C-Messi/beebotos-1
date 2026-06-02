@@ -60,7 +60,7 @@ timeout_ms = 60000
 [models]
 default_provider = "deepseek"
 fallback_chain = []
-max_tokens = 4096
+max_tokens = 8192
 request_timeout = 180
 system_prompt = "You are a helpful assistant."
 

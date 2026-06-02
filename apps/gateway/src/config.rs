@@ -217,7 +217,7 @@ fn default_default_provider() -> String {
     "deepseek".to_string()
 }
 fn default_max_tokens() -> u32 {
-    4096
+    8192
 }
 fn default_system_prompt() -> String {
     "You are a helpful assistant.".to_string()
@@ -1469,7 +1469,7 @@ api_key = ""
                 fallback_chain: Vec::new(),
                 request_timeout: default_request_timeout(),
                 cost_optimization: false,
-                max_tokens: 4096,
+                max_tokens: 8192,
                 system_prompt: "You are a helpful assistant.".to_string(),
                 providers: {
                     let mut map = HashMap::new();

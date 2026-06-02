@@ -551,7 +551,7 @@ fn StepLlmModels(state: RwSignal<WizardState>) -> impl IntoView {
                     <input
                         type="number"
                         prop:value=move || state.get().models.max_tokens.to_string()
-                        on:change=move |e| state.update(|s| s.models.max_tokens = event_target_value(&e).parse().unwrap_or(4096))
+                        on:change=move |e| state.update(|s| s.models.max_tokens = event_target_value(&e).parse().unwrap_or(8192))
                     />
                 </div>
                 <div class="form-group">

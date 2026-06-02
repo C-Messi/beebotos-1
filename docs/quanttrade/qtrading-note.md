@@ -4024,4 +4024,71 @@ loop {
 由于已实施的**轮次限制+超时限制+熔断**三重保护已经从根源上消除了 8 分钟死循环的可能，这个架构缺陷在新约束下已**不具备实际危害**。如果未来需要彻底消除这一风险，建议作为独立的重构任务，将 `Agent::execute_task` 拆分为"无锁执行 + 显式状态回写"模式。
 
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+由于已实施的**轮次限制+超时限制+熔断**三重保护已经从根源上消除了 8 分钟死循环的可能，这个架构缺陷在新约束下已**不具备实际危害**。如果未来需要彻底消除这一风险，建议作为独立的重构任务，将 `Agent::execute_task` 拆分为"无锁执行 + 显式状态回写"模式。
+     作为独立的重构任务，将 `Agent::execute_task` 拆分为"无锁执行 + 显式状态回写"模式，按这个任务要求完成修复完善。
+
+
+但关键的区别是：timeout 分支不需要获取锁了！
+在新的设计中：
+• execution = async { let agent = self.agent.read().await; agent.execute_task(task).await }
+• timeout 分支：let agent = self.agent.read().await; *agent.state.lock().unwrap() = AgentState::Idle;
+timeout 分支中的 self.agent.read().await 不会与 execution 内部的 read().await 竞争！因为 tokio::sync::RwLock 允许多个 reader 并发。
+所以当 tokio::select! 选择 timeout 分支时：
+1. execution future 被取消（drop）
+2. timeout 分支立即执行 self.agent.read().await — 这不会阻塞，因为 read lock 可以并发
+3. timeout 分支设置 agent.state.lock().unwrap() = Idle — std::sync::Mutex 的 lock 是同步的，极快
+4. timeout 分支返回错误
+即使 execution future 的 drop 需要数秒，timeout 分支也不会被阻塞！
+这就是重构的意义：消除 tokio::select! 取消分支中的锁竞争。
+
+
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+编译全部通过，没有错误。
+
+**本次完成的关键修改：**
+
+1. **`Agent::execute_task` 签名改为 `&self`**（已在 `agent_impl.rs` 中完成）
+   - 不再要求 `&mut self`，因此调用方不需要获取排他写锁
+   - 内部状态变更通过已有的 `std::sync::Mutex<AgentState>` 完成
+
+2. **`AgentKernelTask::handle_task_request` 全部改为 `read().await`**（`kernel_integration.rs`）
+   - 3 处 `self.agent.write().await` 在任务执行前全部替换为 `self.agent.read().await`
+   - `timeout` 和 `cancellation` 分支已经使用 `read().await`，保持不变
+
+3. **修复 `get_state()` 编译错误**
+   - `*self.state.lock().unwrap()` → `self.state.lock().unwrap().clone()`（因为 `AgentState` 包含 `String`，不能 `Copy`）
+
+**最终架构效果：**
+
+- `execution` future 内部持有的是 `tokio::sync::RwLockReadGuard`
+- `tokio::select!` 的 timeout/cancel 分支也只需要 `read().await`
+- **两者不互斥**：`tokio::sync::RwLock` 允许多个 reader 并发
+- 当 `select!` 触发 timeout 分支时，它可以**立即**获取 read lock、通过 `std::sync::Mutex` 快速重置状态并返回错误
+- `execution` future 的 drop（即使需要遍历深层的 ReAct future 树）不再阻塞 timeout 分支
+- 从根本上消除了 "write-guard-held-across-await + timeout branch blocked on same write lock" 的架构级死锁风险
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+1、目前设定 LLM 大模型的 最大输出4096，修改为8千多，具体数字按标准来；
+2、修改为以前的参数：默认 100 轮，上限 100 pub const DEFAULT_REACT_MAX_TOOL_ROUNDS: u32 = 100; pub const MAX_REACT_TOOL_ROUNDS_LIMIT: u32 = 100;
+
+全部修改完成，编译通过。具体改动如下：
+
+**1. LLM max_tokens 默认值 4096 → 8192**
+- `apps/gateway/src/config.rs`：`default_max_tokens()` 返回值 + 测试配置默认值
+- `apps/gateway/src/main.rs`：`unwrap_or(4096)` + 默认 `ModelsConfig`
+- `apps/gateway/src/capability.rs`：LLM capability 解析 fallback
+- `config/beebotos.toml`：`max_tokens = 8192`
+- `apps/web/src/state/wizard.rs`：Web 向导默认值（两处）
+- `apps/web/src/pages/setup.rs`：设置页面输入框 fallback
+- `crates/sdk/src/types.rs`：SDK `ModelConfig` 默认（原为 2048，一并统一为 8192）
+
+**2. ReAct 轮数回退到原始值**
+- `crates/agents/src/react_trace.rs`：
+  - `DEFAULT_REACT_MAX_TOOL_ROUNDS`: `15` → `100`
+  - `MAX_REACT_TOOL_ROUNDS_LIMIT`: `30` → `100`
+
 

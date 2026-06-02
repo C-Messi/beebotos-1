@@ -449,12 +449,13 @@ impl AgentKernelTask {
                         "Agent {} task {} interrupted before execution for session {}",
                         self.config.agent_id, task_id, session_id
                     );
-                    let mut agent = self.agent.write().await;
-                    agent.state = AgentState::Idle;
+                    let agent = self.agent.read().await;
+                    *agent.state.lock().unwrap() = AgentState::Idle;
+                    drop(agent);
                     Err(AgentError::Timeout(format!("Task {} interrupted", task_id)))
                 } else {
                     let execution = async {
-                        let mut agent = self.agent.write().await;
+                        let agent = self.agent.read().await;
                         agent.execute_task(task).await
                     };
                     let timeout =
@@ -472,8 +473,9 @@ impl AgentKernelTask {
                             // `Agent::execute_task` normally returns the in-memory
                             // agent to Idle. If the future is cancelled by timeout,
                             // do that cleanup here before accepting the next request.
-                            let mut agent = self.agent.write().await;
-                            agent.state = AgentState::Idle;
+                            let agent = self.agent.read().await;
+                            *agent.state.lock().unwrap() = AgentState::Idle;
+                            drop(agent);
 
                             Err(AgentError::Timeout(format!(
                                 "Task {} timed out after {}s",
@@ -494,8 +496,9 @@ impl AgentKernelTask {
                                 );
                             }
 
-                            let mut agent = self.agent.write().await;
-                            agent.state = AgentState::Idle;
+                            let agent = self.agent.read().await;
+                            *agent.state.lock().unwrap() = AgentState::Idle;
+                            drop(agent);
 
                             Err(AgentError::Timeout(format!("Task {} interrupted", task_id)))
                         }
@@ -503,7 +506,7 @@ impl AgentKernelTask {
                 }
             } else {
                 match tokio::time::timeout(tokio::time::Duration::from_secs(timeout_secs), async {
-                    let mut agent = self.agent.write().await;
+                    let agent = self.agent.read().await;
                     agent.execute_task(task).await
                 })
                 .await
@@ -515,8 +518,9 @@ impl AgentKernelTask {
                             self.config.agent_id, task_id, timeout_secs
                         );
 
-                        let mut agent = self.agent.write().await;
-                        agent.state = AgentState::Idle;
+                        let agent = self.agent.read().await;
+                        *agent.state.lock().unwrap() = AgentState::Idle;
+                        drop(agent);
 
                         Err(AgentError::Timeout(format!(
                             "Task {} timed out after {}s",
@@ -527,7 +531,7 @@ impl AgentKernelTask {
             }
         } else {
             match tokio::time::timeout(tokio::time::Duration::from_secs(timeout_secs), async {
-                let mut agent = self.agent.write().await;
+                let agent = self.agent.read().await;
                 agent.execute_task(task).await
             })
             .await
@@ -539,8 +543,9 @@ impl AgentKernelTask {
                         self.config.agent_id, task_id, timeout_secs
                     );
 
-                    let mut agent = self.agent.write().await;
-                    agent.state = AgentState::Idle;
+                    let agent = self.agent.read().await;
+                    *agent.state.lock().unwrap() = AgentState::Idle;
+                    drop(agent);
 
                     Err(AgentError::Timeout(format!(
                         "Task {} timed out after {}s",

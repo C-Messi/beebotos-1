@@ -282,7 +282,7 @@ impl AgentCapability {
                 })
             }
             "llm" => {
-                let max_tokens_per_request = parts.get(1)?.parse::<u32>().unwrap_or(4096);
+                let max_tokens_per_request = parts.get(1)?.parse::<u32>().unwrap_or(8192);
                 let providers = parts.get(2)?.split(',').map(|s| s.to_string()).collect();
                 Some(AgentCapability::Llm {
                     providers,

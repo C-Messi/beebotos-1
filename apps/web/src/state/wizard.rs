@@ -644,7 +644,7 @@ impl WizardState {
                     default_provider: "deepseek".to_string(),
                     fallback_chain: vec!["deepseek".to_string()],
                     cost_optimization: false,
-                    max_tokens: 4096,
+                    max_tokens: 8192,
                     request_timeout: 60,
                     system_prompt: "You are a helpful assistant.".to_string(),
                     providers: vec![ProviderDraft {
@@ -820,7 +820,7 @@ impl Default for ModelsConfigDraft {
             default_provider: "deepseek".to_string(),
             fallback_chain: vec!["deepseek".to_string()],
             cost_optimization: false,
-            max_tokens: 4096,
+            max_tokens: 8192,
             system_prompt: "You are a helpful assistant.".to_string(),
             request_timeout: 60,
             providers: vec![ProviderDraft {

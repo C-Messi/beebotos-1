@@ -3209,7 +3209,7 @@ async fn ensure_default_agent(
         max_tokens: model_config
             .as_ref()
             .and_then(|m| m.context_window)
-            .unwrap_or(4096) as u32,
+            .unwrap_or(8192) as u32,
     };
 
     let agent_config = gateway::agent_runtime::AgentConfigBuilder::new(agent_id, "Default Agent")
@@ -3308,7 +3308,7 @@ mod tests {
                 fallback_chain: Vec::new(),
                 request_timeout: 60,
                 cost_optimization: false,
-                max_tokens: 4096,
+                max_tokens: 8192,
                 system_prompt: "You are a helpful assistant.".to_string(),
                 providers: {
                     let mut map = HashMap::new();

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -64,8 +64,10 @@ pub struct Agent {
     pub(crate) event_bus: Option<events::AgentEventBus>,
     // 🔒 P0 FIX: Kernel integration for WASM sandbox execution
     pub(crate) kernel: Option<Arc<beebotos_kernel::Kernel>>,
-    // 🔒 P0 FIX: Agent state (from state_manager)
-    pub(crate) state: state_manager::AgentState,
+    // 🔒 P0 FIX: Agent state (from state_manager) — Mutex allows state updates
+    // without &mut self so the kernel task never needs to hold a write-lock
+    // across an await point.
+    pub(crate) state: Mutex<state_manager::AgentState>,
     // 🆕 PLANNING FIX: Planning module integration
     pub(crate) planning_engine: Option<Arc<PlanningEngine>>,
     pub(crate) plan_executor: Option<Arc<PlanExecutor>>,
@@ -2812,7 +2814,7 @@ impl Agent {
             queue_manager: None,
             skill_registry: None,
             llm_interface: None,
-            state: state_manager::AgentState::Registered,
+            state: Mutex::new(state_manager::AgentState::Registered),
             wallet: None,    // 🔒 P0 FIX: Initialize wallet as None
             event_bus: None, // 🟢 P1 FIX: Initialize event bus as None
             kernel: None,    // 🔒 P0 FIX: Initialize kernel as None
@@ -3970,26 +3972,29 @@ impl Agent {
         // Channel lifecycle is managed globally by ChannelInstanceManager, not
         // per-agent.
 
-        self.state = state_manager::AgentState::Idle;
+        *self.state.lock().unwrap() = state_manager::AgentState::Idle;
         Ok(())
     }
 
-    pub fn get_state(&self) -> &state_manager::AgentState {
-        &self.state
+    pub fn get_state(&self) -> state_manager::AgentState {
+        self.state.lock().unwrap().clone()
     }
 
     pub fn get_config(&self) -> &AgentConfig {
         &self.config
     }
 
-    pub async fn execute_task(&mut self, task: Task) -> Result<TaskResult, AgentError> {
-        self.state = state_manager::AgentState::Working {
+    /// 🛡️ CRITICAL FIX: Changed from &mut self to &self so the kernel task can
+    /// call execute_task while only holding a *read* lock (or no lock at all).
+    /// State transitions are handled internally via std::sync::Mutex.
+    pub async fn execute_task(&self, task: Task) -> Result<TaskResult, AgentError> {
+        *self.state.lock().unwrap() = state_manager::AgentState::Working {
             task_id: task.id.clone(),
         };
 
         let result = self.process_task(task).await;
 
-        self.state = state_manager::AgentState::Idle;
+        *self.state.lock().unwrap() = state_manager::AgentState::Idle;
         result
     }
 
@@ -8886,7 +8891,7 @@ impl Agent {
 
     pub async fn shutdown(&mut self) -> Result<(), AgentError> {
         info!("Agent {} initiating graceful shutdown", self.config.id);
-        self.state = state_manager::AgentState::ShuttingDown;
+        *self.state.lock().unwrap() = state_manager::AgentState::ShuttingDown;
 
         if let Some(queue) = self.queue_manager.take() {
             info!("Shutting down queue manager...");
