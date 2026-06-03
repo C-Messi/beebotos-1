@@ -454,7 +454,7 @@ impl SlashCommandManager {
                 name: "title".to_string(),
                 description: "会话标题（可选）".to_string(),
                 required: false,
-                default_value: Some("New Chat".to_string()),
+                default_value: Some("新会话".to_string()),
             }],
             handler_type: handler.handler_type(),
             handler,

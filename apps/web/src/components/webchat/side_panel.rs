@@ -49,8 +49,8 @@ pub fn SidePanel(
                 {if questions.is_empty() {
                     view! {
                         <div class="empty-side-questions">
-                            <p>"No side questions yet"</p>
-                            <p>"Use /btw to ask a side question"</p>
+                            <p>"暂无侧边提问"</p>
+                            <p>"使用 /btw 发起侧边提问"</p>
                         </div>
                     }.into_any()
                 } else {
@@ -72,7 +72,7 @@ pub fn SidePanel(
                 <div class="new-question-input">
                     <input
                         type="text"
-                        placeholder="Ask a side question..."
+                        placeholder="输入侧边提问..."
                         prop:value=new_question
                         on:input=move |ev| {
                             set_new_question.set(event_target_value(&ev));

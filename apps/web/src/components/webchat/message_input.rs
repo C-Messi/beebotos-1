@@ -14,7 +14,7 @@ pub fn MessageInput(
     #[prop(optional)] on_stop: Option<Box<dyn Fn()>>,
     #[prop(optional)] on_typing: Option<Box<dyn Fn(String)>>,
 ) -> impl IntoView {
-    let placeholder = placeholder.unwrap_or_else(|| "Type a message...".to_string());
+    let placeholder = placeholder.unwrap_or_else(|| "输入消息...".to_string());
     let (value, set_value) = signal(String::new());
 
     let on_submit_callback = on_submit.map(|cb| {
@@ -108,8 +108,8 @@ pub fn MessageInput(
             </div>
 
             <div class="input-hints">
-                <span>"Press Enter to send, Shift+Enter for new line"</span>
-                <span>"Use /btw for side question"</span>
+                <span>"按 Enter 发送，Shift+Enter 换行"</span>
+                <span>"使用 /btw 进行侧边提问"</span>
             </div>
         </div>
     }

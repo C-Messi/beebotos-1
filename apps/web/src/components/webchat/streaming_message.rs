@@ -32,7 +32,7 @@ pub fn WaitingMessage() -> impl IntoView {
         <div class="message assistant waiting">
             <div class="message-avatar">"🤖"</div>
             <div class="message-content thinking-message">
-                <span>"Thinking"</span>
+                <span>"思考中"</span>
                 <span class="thinking-dots" aria-hidden="true">
                     <span></span>
                     <span></span>
@@ -63,7 +63,7 @@ pub fn ToolCallList(
                     on:click=move |_| expanded.update(|value| *value = !*value)
                 >
                     <span class="tool-call-chevron">{move || if expanded.get() { "⌄" } else { "›" }}</span>
-                    <span>{format!("Tool calls · {} steps", count)}</span>
+                    <span>{format!("工具调用 · {} 步", count)}</span>
                 </button>
                 {move || {
                     if expanded.get() {
@@ -110,7 +110,7 @@ fn ToolCallBadge(call: ToolCallEvent) -> impl IntoView {
             <div class="tool-call-icon" title="工具调用">"⌁"</div>
             <div class="tool-call-body">
                 <div class="tool-call-header">
-                    <span class="tool-call-label">"Tool"</span>
+                    <span class="tool-call-label">"工具"</span>
                     <span class="tool-call-name">{tool_name}</span>
                     <span class="tool-call-round">{format!("#{}", round)}</span>
                 </div>

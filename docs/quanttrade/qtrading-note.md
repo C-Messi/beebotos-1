@@ -4438,5 +4438,168 @@ cd /root/beebotos && cargo run -p beebotos-gateway --release
 const MAX_CONSECUTIVE_TOOL_ERRORS: u32 = 3;  修改为：u32 = 10；
 
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+1、分析一下，一个任务在ReAct循环中，最大任务工作时间是多少？每轮的最大工作时间和等待时间分别多少？目前的状态，系统超时限制：每轮 ReAct 30秒，总任务 60秒，是否是这样？
+2、在webchat 进度过程中，显示了tool call的过程内容，目前是英文显示，必须修改为中文展显示。
+
+
+修改已完成。以下是两个问题的详细分析和处理结果：
+
+---
+
+### 问题 1：ReAct 循环超时限制分析
+
+根据 `crates/agents/src/skills/unified_react_executor.rs` 和配置中心的源码，当前超时体系如下：
+
+| 层级 | 配置项 | 默认值 | 说明 |
+|------|--------|--------|------|
+| **ReAct 单轮 LLM** | `round_timeout_sec` | **30 秒** | 每轮调用 LLM 的最大等待时间 |
+| **ReAct 单工具** | `tool_timeout_sec` | **60 秒** | 每个工具执行的最大等待时间 |
+| **ReAct 总轮数** | `max_rounds` | **30 轮** | 循环硬上限，LLM 自主决定提前终止 |
+| **队列任务超时** | `task_timeout_secs` | **300 秒**（5 分钟） | `config_center.rs` 中 `QueueConfig` 的默认值 |
+| **运行时任务超时** | `task_timeout` | **500 秒** | `runtime/executor.rs` 中的默认值 |
+
+**结论：**
+- ✅ **"每轮 ReAct 30 秒"** 是对的——对应 `round_timeout_sec`
+- ❌ **"总任务 60 秒"** **不是**系统限制。ReAct 循环本身没有 60 秒的总上限，真正的总任务超时由更上层的 `AgentRuntime` / `Queue` 控制，默认是 **300~500 秒**。如果在你的环境中观察到 60 秒的总限制，那应该是**外部网关/代理层**（如 Nginx、Cloudflare、API Gateway）或**前端请求超时**的配置，而非 ReAct executor 自身的限制。
+
+---
+
+### 问题 2：webchat Tool Call 英文显示改中文 ✅ 已修改
+
+修改文件：`apps/web/src/components/webchat/streaming_message.rs`
+
+| 位置 | 原文 | 修改后 |
+|------|------|--------|
+| `WaitingMessage` | `"Thinking"` | `"思考中"` |
+| `ToolCallList` 汇总 | `"Tool calls · {} steps"` | `"工具调用 · {} 步"` |
+| `ToolCallBadge` 标签 | `"Tool"` | `"工具"` |
+
+修改后的界面效果：
+- 等待状态显示：**"思考中"** + 闪烁动画
+- 工具调用折叠栏：**"工具调用 · 3 步"**
+- 单个工具卡片标签：**"工具"** `tool_name` `#1`
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+参考/root/beebotos/docs/quanttrade/process1.PNG，从截图中可以看到，tool call 卡片中的内容确实是英文： • "TOOL" 标签 • reasoning 内容是英文，如 "The user is frustrated because the workflow output is truncated..." • "Let me investigate this issue. Looking at the workflow execution..." • "Let me look at the workflow definitions stored in the system." • "I need to see the workflow definitions to understand what's happening." 但这些 reasoning 内容是 LLM 返回的，不是前端代码写死的。前端只是渲染 LLM 返回的 reasoning 字段。 问题的要求是，这些 reasoning 内容是 LLM 返回的，要求LLM返回的必须是中文。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+修改已全部完成。以下是完整的修改清单：
+
+---
+
+### 一、前端固定 UI 文本（7 个文件）
+
+| 文件 | 修改项 | 原文 | 改后 |
+|------|--------|------|------|
+| `streaming_message.rs` | 等待状态 | "Thinking" | **"思考中"** |
+| `streaming_message.rs` | 工具汇总 | "Tool calls · {} steps" | **"工具调用 · {} 步"** |
+| `streaming_message.rs` | 工具标签 | "Tool" | **"工具"** |
+| `pages/webchat.rs` | 新建会话标题 ×2 | "New Chat" | **"新会话"** |
+| `pages/webchat.rs` | 输入框占位符 | "Type a message... (use /btw for side question)" | **"输入消息... (使用 /btw 进行侧边提问)"** |
+| `message_input.rs` | 默认占位符 | "Type a message..." | **"输入消息..."** |
+| `message_input.rs` | 发送提示 | "Press Enter to send, Shift+Enter for new line" | **"按 Enter 发送，Shift+Enter 换行"** |
+| `message_input.rs` | 侧边提问提示 | "Use /btw for side question" | **"使用 /btw 进行侧边提问"** |
+| `side_panel.rs` | 空状态提示 | "No side questions yet" / "Use /btw to ask a side question" | **"暂无侧边提问"** / **"使用 /btw 发起侧边提问"** |
+| `side_panel.rs` | 侧边提问输入框 | "Ask a side question..." | **"输入侧边提问..."** |
+| `webchat/mod.rs` | 默认会话标题 | "New Chat" | **"新会话"** |
+
+---
+
+### 二、后端系统提示词（要求 LLM 必须返回中文 reasoning）
+
+| 文件 | 修改位置 | 说明 |
+|------|----------|------|
+| `unified_react_executor.rs` | Round 0 初始提示 | 改为中文，明确要求 **thought 和 reasoning 必须使用中文** |
+| `unified_react_executor.rs` | 历史记录/当前状态提示 | 全部改为中文 |
+| `unified_react_executor.rs` | 格式错误纠正提示 | 改为中文，附加中文要求 |
+| `unified_react_executor.rs` | final_answer 检查提示 | 改为中文，附加中文要求 |
+| `unified_react_executor.rs` | 最大轮数强制提示 | 改为中文，附加中文要求 |
+| `agent_impl.rs` | 基础人设提示（cached） | 改为中文，附加中文要求 |
+| `agent_impl.rs` | OpenClaw ReAct 系统提示 | **核心提示词**全部改为中文，明确要求 thought/reasoning 用中文 |
+| `agent_impl.rs` | 直接回答路径系统提示 | 改为中文，附加中文要求 |
+| `agent_impl.rs` | Skill 执行路径系统提示 | 改为中文，附加中文要求 |
+| `agent_impl.rs` | 技能目录注入提示 | 改为中文 |
+
+---
+
+**核心改动逻辑：** 截图里那些英文 reasoning（如 *"The user is frustrated because..."*）是 **LLM 在后端生成的**，前端只是原样渲染。因此除了改前端固定文本外，最关键的是**把所有系统提示词改成中文，并强制要求 LLM 用中文输出 thought 和 reasoning**。这样工具调用卡片里的动态内容才会显示为中文。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+### 问题 1：ReAct 循环超时限制分析
+
+根据 `crates/agents/src/skills/unified_react_executor.rs` 和配置中心的源码，当前超时体系如下：
+
+| 层级 | 配置项 | 默认值 | 说明 |
+|------|--------|--------|------|
+| **ReAct 单轮 LLM** | `round_timeout_sec` | **120 秒** | 每轮调用 LLM 的最大等待时间 |
+| **ReAct 单工具** | `tool_timeout_sec` | **120 秒** | 每个工具执行的最大等待时间 |
+| **ReAct 总轮数** | `max_rounds` | **100 轮** | 循环硬上限，LLM 自主决定提前终止 |
+| **队列任务超时** | `task_timeout_secs` | **500 秒** | `config_center.rs` 中 `QueueConfig` 的默认值 |
+| **运行时任务超时** | `task_timeout` | **500 秒** | `runtime/executor.rs` 中的默认值 |
+
+
+按以上内容参数修改。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+已全部按新参数修改完成。以下是修改汇总：
+
+| 文件 | 配置项 | 原值 | 新值 |
+|------|--------|------|------|
+| `unified_react_executor.rs` | `max_rounds` | 30 | **100** |
+| `unified_react_executor.rs` | `round_timeout_sec` | 30 | **120** |
+| `unified_react_executor.rs` | `tool_timeout_sec` | 60 | **120** |
+| `config_center.rs` | `QueueConfig.task_timeout_secs` | 300 | **500** |
+| `queue/dag_scheduler.rs` | `task_timeout_sec` | 300 | **500** |
+| `kernel_integration.rs` | `task_execution_timeout_secs` | 300 | **500** |
+| `planning/engine.rs` | `plan_timeout_sec` | 300 | **500** |
+| `workflow/engine.rs` | `timeout_sec.unwrap_or` | 300 | **500** |
+| `workflow/dag_bridge.rs` | `task_timeout_sec` | 300 | **500** |
+| `workflow/dag_bridge.rs` | `workflow_timeout_sec` | 300 | **500** |
+| `workflow/definition.rs` | `timeout_sec` | 300 | **500** |
+| `runtime/executor.rs` | `task_timeout` | 500 | 500（保持不变） |
+
+**当前超时体系：**
+
+| 层级 | 配置项 | 默认值 | 说明 |
+|------|--------|--------|------|
+| **ReAct 单轮 LLM** | `round_timeout_sec` | **120 秒** | 每轮调用 LLM 的最大等待时间 |
+| **ReAct 单工具** | `tool_timeout_sec` | **120 秒** | 每个工具执行的最大等待时间 |
+| **ReAct 总轮数** | `max_rounds` | **100 轮** | 循环硬上限 |
+| **队列任务超时** | `task_timeout_secs` | **500 秒** | `QueueConfig` 默认值 |
+| **运行时任务超时** | `task_timeout` | **500 秒** | `runtime/executor.rs` 默认值 |
+| **计划超时** | `plan_timeout_sec` | **500 秒** | `planning/engine.rs` 默认值 |
+| **工作流超时** | `workflow_timeout_sec` | **500 秒** | `workflow/dag_bridge.rs` 默认值 |
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+打包已完成！
+
+| 产物 | 路径 | 大小 |
+|------|------|------|
+| **Zip 包** | `dist/beebotos-x86_64-pc-windows-gnu.zip` | **22.5 MB** |
+| **Gateway** | `dist/beebotos/beebotos-gateway.exe` | 41.9 MB |
+| **Web Server** | `dist/beebotos/web-server.exe` | 5.1 MB |
+| **BeeHub** | `dist/beebotos/beehub.exe` | 1.0 MB |
+
+**Zip 包内容验证：**
+- ✅ 3 个 `.exe` 文件
+- ✅ 132 个 skills 文件
+- ✅ 13 个 workflows 文件
+- ✅ SQLite 数据库迁移脚本
+- ✅ Web 前端静态资源（`index.html`、`.wasm`、`.js`、`style/`、`public/`）
+- ✅ 配置文件（`config/beebotos.toml`、`config/web-server.toml`）
+- ✅ 启动脚本 `beebotos-run.ps1`
+
+**编译时间戳：**
+- `beebotos-gateway.exe`：18:52（包含最新的中文系统提示词修改）
+- `web-server.exe`：19:03（最新编译）
+- `index.html` / `.wasm`：18:57（包含前端中文文本修改）
+
 
 

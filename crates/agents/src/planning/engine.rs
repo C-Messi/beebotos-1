@@ -87,7 +87,7 @@ impl PlanningConfig {
             default_strategy: PlanStrategy::ReAct,
             enable_replanning: true,
             max_iterations: 10,
-            plan_timeout_sec: 300,
+            plan_timeout_sec: 500,
             tool_registry,
         }
     }
@@ -99,7 +99,7 @@ impl Default for PlanningConfig {
             default_strategy: PlanStrategy::ReAct,
             enable_replanning: true,
             max_iterations: 10,
-            plan_timeout_sec: 300,
+            plan_timeout_sec: 500,
             tool_registry: PlannerToolRegistry::default(),
         }
     }

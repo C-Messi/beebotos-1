@@ -233,7 +233,7 @@ triggers:
     timezone: "Asia/Shanghai"
   - type: manual
 config:
-  timeout_sec: 300
+  timeout_sec: 500
   continue_on_failure: false
 steps:
   - id: fetch_news

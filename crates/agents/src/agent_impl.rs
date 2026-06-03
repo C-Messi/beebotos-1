@@ -3425,8 +3425,7 @@ impl Agent {
     /// avoiding repeated token assembly for identical agent configurations.
     async fn build_system_prompt_cached(&self, intent: &crate::intent::UserIntent) -> String {
         let base_persona = format!(
-            "You are {} ({}). Please remain friendly, professional, and helpful when answering \
-             questions.",
+            "你是 {} ({})。回答问题时请保持友好、专业、有帮助。所有内部思考过程和工具调用理由必须使用中文。",
             self.config.name, self.config.description
         );
         if let Some(ref cache) = self.prompt_cache {
@@ -3502,16 +3501,7 @@ impl Agent {
                 uuid::Uuid::new_v4(),
                 communication::PlatformType::Custom,
                 format!(
-                    "[System Context] You have access to the following \
-                     skills.\n\n{}\n\nINSTRUCTION:\n1. These skills are context packs. MCP tools \
-                     are not skills; use mcp_tool_search when an external MCP capability is \
-                     needed.\n2. When a non-MCP skill matches the user request, reply ONLY with \
-                     SKILL:<id>|{{\"key\":\"value\"}} using REAL values.\n2. If no skill matches, \
-                     answer directly.\n3. NEVER analyze, explain, or think out loud. NEVER list \
-                     parameters. NEVER use placeholders like <id> or {{\"param\":\"value\"}}.\n4. \
-                     If info is missing, ask in ONE short sentence.\n\nEXAMPLES:\nUser: What's \
-                     the weather in Beijing?\nOutput: \
-                     SKILL:weather_assistant|{{\"city\":\"Beijing\"}}",
+                    "[System Context] 你可以使用以下技能。\n\n{}\n\n指令：\n1. 这些技能是上下文包。MCP 工具不是技能；需要外部 MCP 能力时使用 mcp_tool_search。\n2. 当非 MCP 技能匹配用户请求时，仅回复 SKILL:<id>|{{\"key\":\"value\"}} 格式，使用真实值。\n3. 如果没有匹配的技能，直接回答。\n4. 不要分析、解释或大声思考。不要列出参数。不要使用 <id> 或 {{\"param\":\"value\"}} 等占位符。\n5. 如果缺少信息，用一句话简短提问。\n\n示例：\n用户：北京天气怎么样？\n输出：SKILL:weather_assistant|{{\"city\":\"北京\"}}",
                     catalog
                 ),
             )];
@@ -4217,17 +4207,8 @@ impl Agent {
         };
         let runtime_context = Self::runtime_context_prompt();
         let mut system = format!(
-            "You are {} ({}).\n\nUse an OpenClaw-style ReAct loop: answer directly when no tool \
-             is needed; otherwise call the most appropriate tool, observe the result, then \
-             continue until you can give the user a natural final answer. Do not claim you cannot \
-             inspect the environment; use tools when inspection is needed.\n\n{}\n\n## \
-             Workspace\nWorking directory: {}\nRelative paths resolve from this directory. \
-             Absolute paths are allowed when the user asks you to inspect or configure files \
-             elsewhere.\n\nThis is the BeeBotOS user workspace, normally ./data/workspace \
-             relative to the repo. Treat it as your current working directory, not the repository \
-             root.\n\n## Tools\nExecutable tools include read_file, list_dir, glob, grep, \
-             write_file, edit_file, exec, web_fetch, web_search, activate_skill, and \
-             mcp_tool_search when enabled by runtime policy. {}\n\n## Skills\n{}",
+            "你是 {} ({})。\n\n使用 OpenClaw 风格的 ReAct 循环：不需要工具时直接回答；否则调用最合适的工具，观察结果，然后继续，直到能给用户一个自然的最终答案。不要声称你无法检查环境；需要检查时使用工具。\n\n{}\n\n## \
+             工作区\n工作目录：{}\n相对路径从此目录解析。当用户要求检查或配置其他位置的文件时，允许使用绝对路径。\n\n这是 BeeBotOS 用户工作区，通常相对于仓库是 ./data/workspace。将其视为当前工作目录，而不是仓库根目录。\n\n## 工具\n可用工具包括 read_file、list_dir、glob、grep、write_file、edit_file、exec、web_fetch、web_search、activate_skill，以及运行时策略启用的 mcp_tool_search。{}\n\n## 技能\n{}\n\n重要：所有内部思考过程（thought）和工具调用理由（reasoning）必须使用中文输出。",
             self.config.name,
             self.config.description,
             runtime_context,
@@ -5851,8 +5832,7 @@ impl Agent {
                 uuid::Uuid::new_v4(),
                 communication::PlatformType::Custom,
                 format!(
-                    "You are {} ({}). Please remain friendly, professional, and helpful when \
-                     answering questions.",
+                    "你是 {} ({})。回答问题时请保持友好、专业、有帮助。所有内部思考过程和工具调用理由必须使用中文。",
                     self.config.name, self.config.description
                 ),
             ),
@@ -6314,8 +6294,7 @@ impl Agent {
                 if gateway_has_skill_prompt {
                     // Gateway 已注入完整 skill prompt，persona 只做轻量标识
                     format!(
-                        "You are {}. Please remain friendly, professional, and helpful when \
-                         answering questions.",
+                        "你是 {}。回答问题时请保持友好、专业、有帮助。所有内部思考过程和工具调用理由必须使用中文。",
                         name
                     )
                 } else {
@@ -6328,8 +6307,7 @@ impl Agent {
                     .and_then(|v| v.as_str())
                     .unwrap_or(&self.config.description);
                 format!(
-                    "You are {} ({}). Please remain friendly, professional, and helpful when \
-                     answering questions.",
+                    "你是 {} ({})。回答问题时请保持友好、专业、有帮助。所有内部思考过程和工具调用理由必须使用中文。",
                     name, desc
                 )
             }

@@ -187,7 +187,7 @@ pub fn to_dag_workflow(
         .description(&definition.description)
         .config(WorkflowConfig {
             max_concurrency: 5,
-            task_timeout_sec: definition.config.timeout_sec.unwrap_or(300),
+            task_timeout_sec: definition.config.timeout_sec.unwrap_or(500),
             workflow_timeout_sec: definition
                 .config
                 .timeout_sec
@@ -263,7 +263,7 @@ pub async fn poll_scheduler_workflow(
     let mut instance = WorkflowInstance::new(workflow_id.to_string(), trigger_context);
     instance.mark_running();
 
-    let workflow_timeout_sec = 300u64;
+    let workflow_timeout_sec = 500u64;
     let mut poll_interval_ms = 100u64;
     let max_poll_interval_ms = 2000u64;
     let deadline =

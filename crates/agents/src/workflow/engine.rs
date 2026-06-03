@@ -467,7 +467,7 @@ impl WorkflowEngine {
                         let _ = resolve_value_templates(&mut fallback_params, &fallback_ctx);
                         let (fallback_input, fallback_skill_params) =
                             Self::extract_input_and_params(&fallback_params);
-                        let timeout_sec = definition.config.timeout_sec.unwrap_or(300);
+                        let timeout_sec = definition.config.timeout_sec.unwrap_or(500);
 
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(timeout_sec),

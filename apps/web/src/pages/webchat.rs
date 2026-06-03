@@ -165,7 +165,7 @@ pub fn WebchatPage() -> impl IntoView {
                     } else {
                         // 没有会话时自动创建一个
                         let _ = web_sys::console::log_1(&"[webchat] creating session".into());
-                        match service.create_session("New Chat").await {
+                        match service.create_session("新会话").await {
                             Ok(session) => {
                                 let id = session.id.clone();
                                 chat_state.sessions.update(|s| s.push(session));
@@ -378,7 +378,7 @@ pub fn WebchatPage() -> impl IntoView {
                 let client = create_client();
                 client.set_auth_token(auth_state.get_token());
                 let service = create_webchat_service(client);
-                match service.create_session("New Chat").await {
+                match service.create_session("新会话").await {
                     Ok(session) => {
                         let id = session.id.clone();
                         chat_state.sessions.update(|s| s.push(session));
@@ -443,7 +443,7 @@ pub fn WebchatPage() -> impl IntoView {
                         />
                     }}
                     <MessageInput
-                        placeholder="Type a message... (use /btw for side question)".to_string()
+                        placeholder="输入消息... (使用 /btw 进行侧边提问)".to_string()
                         disabled=Signal::derive(|| false)
                         is_generating=Signal::derive({
                             let chat_state = chat_state.clone();

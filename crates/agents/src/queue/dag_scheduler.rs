@@ -90,7 +90,7 @@ impl Default for WorkflowConfig {
     fn default() -> Self {
         Self {
             max_concurrency: 5,
-            task_timeout_sec: 300,
+            task_timeout_sec: 500,
             workflow_timeout_sec: 3600,
             retry_policy: TaskRetryPolicy::default(),
             enable_replanning: true,
