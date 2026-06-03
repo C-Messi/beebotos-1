@@ -53,7 +53,9 @@ fn proxy_timeout_secs(path: &str, default_secs: u64) -> u64 {
         || path.contains("/ai-store-manager/graphic-image-edits")
     {
         default_secs.max(GRAPHIC_IMAGE_PROXY_TIMEOUT_SECS)
-    } else if path.contains("/ai-store-manager/video-tasks") {
+    } else if path.contains("/ai-store-manager/video-tasks")
+        || path.contains("/ai-store-manager/video-packages")
+    {
         default_secs.max(VIDEO_GENERATION_PROXY_TIMEOUT_SECS)
     } else {
         default_secs
@@ -237,6 +239,10 @@ mod tests {
         );
         assert_eq!(
             proxy_timeout_secs("/api/v1/ai-store-manager/video-tasks/task-1", 30),
+            300
+        );
+        assert_eq!(
+            proxy_timeout_secs("/api/v1/ai-store-manager/video-packages", 30),
             300
         );
     }

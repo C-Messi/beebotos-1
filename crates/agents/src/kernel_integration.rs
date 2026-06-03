@@ -524,8 +524,7 @@ impl AgentKernelTask {
                     let agent = agent_lock.read().await;
                     agent.execute_task(task_for_spawn).await
                 }));
-                let timeout =
-                    tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs));
+                let timeout = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs));
                 tokio::pin!(timeout);
 
                 tokio::select! {
@@ -565,8 +564,7 @@ impl AgentKernelTask {
                 let agent = agent_lock.read().await;
                 agent.execute_task(task_for_spawn).await
             }));
-            let timeout =
-                tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs));
+            let timeout = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs));
             tokio::pin!(timeout);
 
             tokio::select! {
