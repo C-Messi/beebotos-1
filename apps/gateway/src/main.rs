@@ -1132,6 +1132,13 @@ impl beebotos_agents::system_info::SystemInfoProvider for GatewaySystemInfoProvi
 /// 🆕 FIX: Detect and terminate stale beebotos-gateway processes that may
 /// hold SQLite file locks, preventing new instances from blocking 1-2 minutes.
 fn kill_stale_instances() {
+    let skip_stale_kill = std::env::var("BEEBOTOS_SKIP_STALE_KILL")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+    if skip_stale_kill {
+        return;
+    }
+
     let current_pid = std::process::id() as i32;
     let exe_name = std::env::current_exe()
         .ok()

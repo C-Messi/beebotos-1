@@ -3,10 +3,12 @@ use leptos::task::spawn_local;
 use leptos::view;
 use leptos_meta::Title;
 
-use crate::api::{
-    create_ai_store_manager_service, create_client, CreateVideoTaskRequest, VideoTaskResponse,
-};
+use crate::api::{create_ai_store_manager_service, CreateVideoTaskRequest, VideoTaskResponse};
+use crate::state::use_app_state;
 use crate::utils::event_target_value;
+
+const VIDEO_TASK_POLL_INTERVAL_MS: u32 = 5_000;
+const VIDEO_TASK_MAX_POLLS: usize = 96;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct VideoMarketingResult {
@@ -227,7 +229,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
     let (video_task, set_video_task) = signal::<Option<VideoTaskResponse>>(None);
     let (video_error, set_video_error) = signal::<Option<String>>(None);
     let (video_loading, set_video_loading) = signal(false);
-    let video_service = create_ai_store_manager_service(create_client());
+    let video_service = create_ai_store_manager_service(use_app_state().api_client());
     let video_service = StoredValue::new(video_service);
 
     let generate = move || {
@@ -261,22 +263,31 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
 
         spawn_local(async move {
             match service.create_video_task(&req).await {
-                Ok(created) => {
-                    if should_poll_video_task(&created) {
-                        match service.get_video_task(&created.id).await {
-                            Ok(status) => {
+                Ok(mut latest) => {
+                    set_task_status.set(video_task_status_label(&latest.status).to_string());
+                    set_video_task.set(Some(latest.clone()));
+
+                    for _ in 0..VIDEO_TASK_MAX_POLLS {
+                        if !should_poll_video_task(&latest) {
+                            break;
+                        }
+
+                        gloo_timers::future::TimeoutFuture::new(VIDEO_TASK_POLL_INTERVAL_MS)
+                            .await;
+
+                        match service.get_video_task(&latest.id).await {
+                            Ok(updated) => {
+                                latest = updated;
                                 set_task_status
-                                    .set(video_task_status_label(&status.status).to_string());
-                                set_video_task.set(Some(status));
+                                    .set(video_task_status_label(&latest.status).to_string());
+                                set_video_task.set(Some(latest.clone()));
                             }
                             Err(err) => {
                                 set_video_error.set(Some(err.to_string()));
                                 set_task_status.set("生成失败".to_string());
+                                break;
                             }
                         }
-                    } else {
-                        set_task_status.set(video_task_status_label(&created.status).to_string());
-                        set_video_task.set(Some(created));
                     }
                 }
                 Err(err) => {
@@ -420,7 +431,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                     } else {
                         view! {
                             <div class="ai-video-task-card">
-                                "点击生成视频后，会提交 Seedance 2.0 视频任务；未配置火山方舟密钥时会停在待配置状态。"
+                                "点击生成视频后，会提交 Seedance 视频任务；未配置火山方舟密钥时会停在待配置状态。"
                             </div>
                         }.into_any()
                     }

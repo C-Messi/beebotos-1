@@ -103,6 +103,8 @@ impl AiStoreManagerService {
 
     pub async fn get_video_task(&self, id: &str) -> Result<VideoTaskResponse, ApiError> {
         self.client
+            .invalidate_cache(&format!("GET:/ai-store-manager/video-tasks/{}", id));
+        self.client
             .get(&format!("/ai-store-manager/video-tasks/{}", id))
             .await
     }

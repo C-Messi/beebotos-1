@@ -100,7 +100,9 @@ generated/
 
 # Agent-local planning
 /.codex/
+/.agents/
 /openspec/
+/.understand-anything/
 
 # Terraform
 *.tfstate
