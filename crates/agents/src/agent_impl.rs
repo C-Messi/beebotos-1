@@ -4557,9 +4557,9 @@ impl Agent {
                         );
                         if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS {
                             let msg = format!(
-                                "工具连续失败 {} 次（最近失败: {}），任务已终止。建议：请简化需求、检查文件路径或参数格式。",
-                                MAX_CONSECUTIVE_TOOL_ERRORS,
-                                tool_call.function.name
+                                "工具连续失败 {} 次（最近失败: \
+                                 {}），任务已终止。建议：请简化需求、检查文件路径或参数格式。",
+                                MAX_CONSECUTIVE_TOOL_ERRORS, tool_call.function.name
                             );
                             return Ok((msg, vec![]));
                         }

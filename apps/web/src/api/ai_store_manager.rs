@@ -6,8 +6,8 @@ use crate::api::{ApiClient, ApiError};
 pub struct CreateVideoTaskRequest {
     pub product: String,
     pub platform: String,
-    pub version: String,
     pub prompt: String,
+    pub model: Option<String>,
     pub duration_seconds: u8,
     pub resolution: String,
     pub ratio: String,
@@ -23,6 +23,12 @@ pub struct VideoTaskResponse {
     pub status: String,
     pub message: String,
     pub preview_url: Option<String>,
+    pub resolution: Option<String>,
+    pub ratio: Option<String>,
+    pub duration_seconds: Option<u8>,
+    pub queue_position: Option<u32>,
+    pub submitted_at: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,6 +57,33 @@ pub struct GraphicPackageResponse {
     pub comment_guide: String,
     pub image_prompt: String,
     pub checks: Vec<GraphicMarketingCheck>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateVideoPackageRequest {
+    pub product: String,
+    pub selling_points: String,
+    pub audience: String,
+    pub goal: String,
+    pub platform: String,
+    pub style: String,
+    pub duration_seconds: Option<u8>,
+    pub ratio: Option<String>,
+    pub generate_audio: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VideoPackageResponse {
+    pub title: String,
+    pub hook: String,
+    pub oral_script: String,
+    pub storyboard: Vec<String>,
+    pub subtitles: Vec<String>,
+    pub shot_prompts: Vec<String>,
+    pub tags: Vec<String>,
+    pub video_prompt: String,
+    pub checks: Vec<GraphicMarketingCheck>,
+    pub agent_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -106,6 +139,21 @@ impl AiStoreManagerService {
             .invalidate_cache(&format!("GET:/ai-store-manager/video-tasks/{}", id));
         self.client
             .get(&format!("/ai-store-manager/video-tasks/{}", id))
+            .await
+    }
+
+    pub async fn list_video_tasks(&self) -> Result<Vec<VideoTaskResponse>, ApiError> {
+        self.client
+            .invalidate_cache("GET:/ai-store-manager/video-tasks");
+        self.client.get("/ai-store-manager/video-tasks").await
+    }
+
+    pub async fn create_video_package(
+        &self,
+        req: &CreateVideoPackageRequest,
+    ) -> Result<VideoPackageResponse, ApiError> {
+        self.client
+            .post("/ai-store-manager/video-packages", req)
             .await
     }
 

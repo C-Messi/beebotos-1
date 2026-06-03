@@ -71,6 +71,11 @@ reasoning_effort = "high"
 temperature = 0.7
 thinking = "enabled"
 
+[models.doubao]
+base_url = "https://ark.cn-beijing.volces.com/api/plan/v3"
+model = "doubao-seed-2.0-pro"
+temperature = 0.7
+
 [models.gpt4]
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
@@ -131,7 +136,18 @@ key_path = "data/certs/server.key"
 mutual_tls = false
 
 [image_generation]
-base_url = "https://ark.cn-beijing.volces.com/api/v3"
+base_url = "https://ark.cn-beijing.volces.com/api/plan/v3"
 api_key = ""
-model = "doubao-seedream-5-0-260128"
+model = "doubao-seedream-5.0-lite"
 timeout_seconds = 180
+
+[video_generation]
+base_url = "https://ark.cn-beijing.volces.com/api/plan/v3"
+api_key = ""
+model = "doubao-seedance-2.0"
+timeout_seconds = 300
+resolution = "720p"
+ratio = "9:16"
+duration_seconds = 8
+generate_audio = true
+watermark = false

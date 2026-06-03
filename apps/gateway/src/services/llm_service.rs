@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use beebotos_agents::communication::Message as ChannelMessage;
 use beebotos_agents::llm::{
-    Content, FailoverProvider, FailoverProviderBuilder, KimiConfig, KimiProvider, LLMProvider,
-    Message as LLMMessage, RequestConfig, Role,
+    Content, DoubaoConfig, DoubaoProvider, FailoverProvider, FailoverProviderBuilder, KimiConfig,
+    KimiProvider, LLMProvider, Message as LLMMessage, RequestConfig, Role,
 };
 use beebotos_agents::media::multimodal::{MultimodalContent, MultimodalProcessor};
 use tokio::sync::RwLock;
@@ -225,6 +225,7 @@ impl LlmService {
                 "openai",
                 "zhipu",
                 "deepseek",
+                "doubao",
                 "ollama",
                 "anthropic",
                 "claude",
@@ -431,6 +432,19 @@ impl LlmService {
                     .map_err(|e| format!("Failed to create DeepSeek provider: {}", e))?;
                 Ok(Arc::new(provider))
             }
+            "doubao" => {
+                let doubao_config = DoubaoConfig {
+                    base_url: Self::get_base_url(name, &provider_config),
+                    api_key: api_key.unwrap_or_default(),
+                    default_model: Self::get_model(name, &provider_config),
+                    timeout,
+                    retry_policy: beebotos_agents::llm::traits::RetryPolicy::default(),
+                };
+
+                let provider = DoubaoProvider::new(doubao_config)
+                    .map_err(|e| format!("Failed to create Doubao provider: {}", e))?;
+                Ok(Arc::new(provider))
+            }
             "ollama" => {
                 use beebotos_agents::llm::{OllamaConfig, OllamaProvider};
 
@@ -502,6 +516,7 @@ impl LlmService {
             "openai" => "https://api.openai.com/v1".to_string(),
             "zhipu" => "https://open.bigmodel.cn/api/paas/v4".to_string(),
             "deepseek" => "https://api.deepseek.com/v1".to_string(),
+            "doubao" => "https://ark.cn-beijing.volces.com/api/plan/v3".to_string(),
             "ollama" => "http://localhost:11434".to_string(),
             "anthropic" | "claude" => "https://api.anthropic.com/v1".to_string(),
             _ => "https://api.openai.com/v1".to_string(),
@@ -531,6 +546,7 @@ impl LlmService {
             "openai" => "gpt-4o-mini".to_string(),
             "zhipu" => "glm-4".to_string(),
             "deepseek" => "deepseek-v4-flash".to_string(),
+            "doubao" => beebotos_agents::llm::doubao_models::DOUBAO_PRO.to_string(),
             "ollama" => "llama2".to_string(),
             "anthropic" | "claude" => "claude-3-sonnet-20240229".to_string(),
             _ => "gpt-4o-mini".to_string(),
@@ -1249,6 +1265,10 @@ mod tests {
             LlmService::get_base_url("deepseek", &config),
             "https://api.deepseek.com/v1"
         );
+        assert_eq!(
+            LlmService::get_base_url("doubao", &config),
+            "https://ark.cn-beijing.volces.com/api/plan/v3"
+        );
     }
 
     #[test]
@@ -1258,6 +1278,16 @@ mod tests {
         assert_eq!(LlmService::get_model("kimi", &config), "moonshot-v1-8k");
         assert_eq!(LlmService::get_model("openai", &config), "gpt-4o-mini");
         assert_eq!(LlmService::get_model("zhipu", &config), "glm-4");
+        assert_eq!(LlmService::get_model("doubao", &config), "doubao-pro-128k");
+    }
+
+    #[tokio::test]
+    async fn test_create_doubao_provider_from_config() {
+        let config = create_test_config_with_provider("doubao");
+
+        let provider = LlmService::create_provider("doubao", &config).await;
+
+        assert!(provider.is_ok());
     }
 
     #[test]

@@ -565,11 +565,11 @@ fn default_voice_marketing_play_times() -> u8 {
 }
 
 fn default_image_generation_base_url() -> String {
-    "https://ark.cn-beijing.volces.com/api/v3".to_string()
+    "https://ark.cn-beijing.volces.com/api/plan/v3".to_string()
 }
 
 fn default_image_generation_model() -> String {
-    "doubao-seedream-5-0-260128".to_string()
+    "doubao-seedream-5.0-lite".to_string()
 }
 
 fn default_image_generation_timeout() -> u64 {
@@ -577,11 +577,11 @@ fn default_image_generation_timeout() -> u64 {
 }
 
 fn default_video_generation_base_url() -> String {
-    "https://ark.cn-beijing.volces.com/api/v3".to_string()
+    "https://ark.cn-beijing.volces.com/api/plan/v3".to_string()
 }
 
 fn default_video_generation_model() -> String {
-    "doubao-seedance-2-0-260128".to_string()
+    "doubao-seedance-2.0".to_string()
 }
 
 fn default_video_generation_timeout() -> u64 {
@@ -1262,9 +1262,12 @@ mod tests {
     fn default_image_generation_config_is_empty_and_safe() {
         let config = ImageGenerationConfig::default();
 
-        assert_eq!(config.base_url, "https://ark.cn-beijing.volces.com/api/v3");
+        assert_eq!(
+            config.base_url,
+            "https://ark.cn-beijing.volces.com/api/plan/v3"
+        );
         assert!(config.api_key.is_none());
-        assert_eq!(config.model, "doubao-seedream-5-0-260128");
+        assert_eq!(config.model, "doubao-seedream-5.0-lite");
         assert_eq!(config.timeout_seconds, 180);
     }
 
@@ -1272,9 +1275,12 @@ mod tests {
     fn default_video_generation_config_targets_volcengine_seedance() {
         let config = VideoGenerationConfig::default();
 
-        assert_eq!(config.base_url, "https://ark.cn-beijing.volces.com/api/v3");
+        assert_eq!(
+            config.base_url,
+            "https://ark.cn-beijing.volces.com/api/plan/v3"
+        );
         assert!(config.api_key.is_none());
-        assert_eq!(config.model, "doubao-seedance-2-0-260128");
+        assert_eq!(config.model, "doubao-seedance-2.0");
         assert_eq!(config.timeout_seconds, 300);
         assert_eq!(config.resolution, "720p");
         assert_eq!(config.ratio, "9:16");

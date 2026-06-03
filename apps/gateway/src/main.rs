@@ -3006,8 +3006,13 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
 
     let video_generation_routes = Router::new()
         .route(
+            "/api/v1/ai-store-manager/video-packages",
+            post(handlers::http::ai_store_manager::create_video_package_handler),
+        )
+        .route(
             "/api/v1/ai-store-manager/video-tasks",
-            post(handlers::http::ai_store_manager::create_video_task),
+            post(handlers::http::ai_store_manager::create_video_task)
+                .get(handlers::http::ai_store_manager::list_video_tasks),
         )
         .route(
             "/api/v1/ai-store-manager/video-tasks/:id",

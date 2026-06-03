@@ -1,14 +1,31 @@
+#[cfg(target_arch = "wasm32")]
+use gloo_storage::{LocalStorage, Storage};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::view;
 use leptos_meta::Title;
+use serde::{Deserialize, Serialize};
 
-use crate::api::{create_ai_store_manager_service, CreateVideoTaskRequest, VideoTaskResponse};
+use crate::api::{
+    create_ai_store_manager_service, CreateVideoPackageRequest, CreateVideoTaskRequest,
+    VideoPackageResponse, VideoTaskResponse,
+};
 use crate::state::use_app_state;
 use crate::utils::event_target_value;
 
 const VIDEO_TASK_POLL_INTERVAL_MS: u32 = 5_000;
 const VIDEO_TASK_MAX_POLLS: usize = 96;
+const VIDEO_TASK_QUEUE_LIMIT: usize = 20;
+#[cfg(target_arch = "wasm32")]
+const VIDEO_TASK_QUEUE_STORAGE_KEY: &str = "beebotos_ai_video_marketing_tasks";
+#[cfg(target_arch = "wasm32")]
+const VIDEO_MARKETING_DRAFT_STORAGE_KEY: &str = "beebotos_ai_video_marketing_draft";
+const VIDEO_MODEL_OPTIONS: [&str; 3] = [
+    "doubao-seedance-2.0",
+    "doubao-seedance-2.0-fast",
+    "doubao-seedance-1.5-pro",
+];
+const VIDEO_DURATION_OPTIONS: [&str; 4] = ["5", "8", "12", "15"];
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct VideoMarketingResult {
@@ -16,78 +33,31 @@ pub struct VideoMarketingResult {
     pub content: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct VideoMarketingVersion {
-    pub name: &'static str,
-    pub focus: &'static str,
-    pub hook: &'static str,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct VideoMarketingCheck {
-    pub label: &'static str,
-    pub status: &'static str,
-}
-
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoMarketingTask {
     pub product: String,
     pub selling_points: String,
     pub audience: String,
     pub goal: String,
     pub platform: String,
-    pub duration: String,
     pub style: String,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoGenerationOptions {
+    pub model: String,
     pub duration_seconds: u8,
-    pub resolution: &'static str,
-    pub ratio: &'static str,
+    pub resolution: String,
+    pub ratio: String,
     pub generate_audio: bool,
     pub watermark: bool,
 }
 
-const VIDEO_VERSIONS: [VideoMarketingVersion; 3] = [
-    VideoMarketingVersion {
-        name: "强转化版",
-        focus: "突出限时优惠和立即下单理由。",
-        hook: "今天下单，周末前把清甜送到家。",
-    },
-    VideoMarketingVersion {
-        name: "种草版",
-        focus: "突出真实开箱、试吃反馈和生活场景。",
-        hook: "这盒云柑，是办公室最容易被分完的水果。",
-    },
-    VideoMarketingVersion {
-        name: "直播引流版",
-        focus: "突出直播间福利和互动口令。",
-        hook: "今晚直播间拍，送礼盒包装和试吃装。",
-    },
-];
-
-const PRE_PUBLISH_CHECKS: [VideoMarketingCheck; 4] = [
-    VideoMarketingCheck {
-        label: "商品卖点完整",
-        status: "已覆盖",
-    },
-    VideoMarketingCheck {
-        label: "行动引导明确",
-        status: "已覆盖",
-    },
-    VideoMarketingCheck {
-        label: "平台风格匹配",
-        status: "已覆盖",
-    },
-    VideoMarketingCheck {
-        label: "人工审核",
-        status: "待确认",
-    },
-];
-
-pub fn video_marketing_versions() -> &'static [VideoMarketingVersion] {
-    &VIDEO_VERSIONS
+#[derive(Clone, Serialize, Deserialize)]
+struct VideoMarketingDraft {
+    task: VideoMarketingTask,
+    options: VideoGenerationOptions,
+    package: Option<VideoPackageResponse>,
 }
 
 pub fn default_video_marketing_task() -> VideoMarketingTask {
@@ -97,116 +67,213 @@ pub fn default_video_marketing_task() -> VideoMarketingTask {
         audience: "25-40 岁办公室人群".to_string(),
         goal: "新品种草".to_string(),
         platform: "抖音".to_string(),
-        duration: "30 秒".to_string(),
         style: "真实测评".to_string(),
     }
 }
 
-pub fn generate_video_marketing_package(
-    task: &VideoMarketingTask,
-    version: &str,
-) -> Vec<VideoMarketingResult> {
-    let (title, hook, angle) = match version {
-        "强转化版" => (
-            format!(
-                "{}限时福利，适合{}的下单理由来了。",
-                task.product, task.audience
-            ),
-            format!(
-                "今天下单，{}把{}直接送到家。",
-                task.product, task.selling_points
-            ),
-            "突出优惠、信任背书和立即行动",
-        ),
-        "直播引流版" => (
-            format!("{}直播间专属福利，今晚别错过。", task.product),
-            format!("进直播间看{}实拍，福利只留给在线的人。", task.product),
-            "突出直播间福利、互动口令和限时节奏",
-        ),
-        _ => (
-            format!("{}真实体验，{}也会愿意转发。", task.product, task.audience),
-            format!("别再只看参数了，先看{}真实开箱。", task.product),
-            "突出真实体验、使用场景和自然种草",
-        ),
-    };
-
-    vec![
-        VideoMarketingResult {
-            label: "爆款标题",
-            content: title,
-        },
-        VideoMarketingResult {
-            label: "3 秒钩子",
-            content: hook,
-        },
-        VideoMarketingResult {
-            label: "口播脚本",
-            content: format!(
-                "这次给{}做一条{}短视频，面向{}，主打{}。开头先给真实场景，再展示核心卖点，\
-                 最后明确引导用户行动。",
-                task.product, task.platform, task.audience, task.selling_points
-            ),
-        },
-        VideoMarketingResult {
-            label: "分镜脚本",
-            content: format!(
-                "场景痛点 -> {}开箱 -> 卖点特写 -> 使用反馈 -> {}行动引导。",
-                task.product, task.platform
-            ),
-        },
-        VideoMarketingResult {
-            label: "字幕文案",
-            content: format!(
-                "{} / {} / {} / {}",
-                task.product, task.selling_points, angle, task.duration
-            ),
-        },
-        VideoMarketingResult {
-            label: "话题标签",
-            content: format!(
-                "#{} #{} #{} #AI视频营销",
-                task.product, task.platform, task.goal
-            ),
-        },
-    ]
+fn default_video_marketing_draft() -> VideoMarketingDraft {
+    VideoMarketingDraft {
+        task: default_video_marketing_task(),
+        options: default_video_generation_options(),
+        package: None,
+    }
 }
 
-fn pre_publish_checks() -> &'static [VideoMarketingCheck] {
-    &PRE_PUBLISH_CHECKS
-}
-
-fn build_seedance_prompt(task: &VideoMarketingTask, results: &[VideoMarketingResult]) -> String {
-    let script = results
-        .iter()
-        .map(|result| format!("{}：{}", result.label, result.content))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    format!(
-        "为{}生成{}营销短视频，平台：{}，风格：{}，目标：{}。\n{}",
-        task.product, task.duration, task.platform, task.style, task.goal, script
-    )
-}
-
-fn video_generation_options(task: &VideoMarketingTask) -> VideoGenerationOptions {
-    let duration_seconds = match task.duration.as_str() {
-        "15 秒" => 5,
-        "30 秒" => 8,
-        "60 秒" => 12,
-        _ => 5,
-    };
-
+pub fn default_video_generation_options() -> VideoGenerationOptions {
     VideoGenerationOptions {
-        duration_seconds,
-        resolution: "720p",
-        ratio: "9:16",
+        model: "doubao-seedance-2.0".to_string(),
+        duration_seconds: 12,
+        resolution: "720p".to_string(),
+        ratio: "9:16".to_string(),
         generate_audio: true,
         watermark: false,
     }
 }
 
+fn package_results(package: &VideoPackageResponse) -> Vec<VideoMarketingResult> {
+    vec![
+        VideoMarketingResult {
+            label: "爆款标题",
+            content: package.title.clone(),
+        },
+        VideoMarketingResult {
+            label: "3 秒钩子",
+            content: package.hook.clone(),
+        },
+        VideoMarketingResult {
+            label: "口播脚本",
+            content: package.oral_script.clone(),
+        },
+        VideoMarketingResult {
+            label: "分镜脚本",
+            content: package.storyboard.join(" -> "),
+        },
+        VideoMarketingResult {
+            label: "字幕文案",
+            content: package.subtitles.join(" / "),
+        },
+        VideoMarketingResult {
+            label: "镜头提示",
+            content: package.shot_prompts.join("；"),
+        },
+        VideoMarketingResult {
+            label: "视频模型提示词",
+            content: package.video_prompt.clone(),
+        },
+        VideoMarketingResult {
+            label: "话题标签",
+            content: package.tags.join(" "),
+        },
+    ]
+}
+
+fn voiceover_char_limit(duration_seconds: u8) -> usize {
+    match duration_seconds {
+        0..=5 => 28,
+        6..=8 => 42,
+        9..=12 => 64,
+        _ => 80,
+    }
+}
+
+fn scene_limit(duration_seconds: u8) -> usize {
+    match duration_seconds {
+        0..=5 => 2,
+        6..=8 => 3,
+        _ => 4,
+    }
+}
+
+fn compact_text(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+
+    let mut compact = trimmed.chars().take(max_chars).collect::<String>();
+    compact.push('。');
+    compact
+}
+
+fn compact_join(items: &[String], limit: usize, separator: &str) -> String {
+    items
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .take(limit)
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn build_seedance_prompt_from_package(
+    package: &VideoPackageResponse,
+    options: &VideoGenerationOptions,
+) -> String {
+    let duration_seconds = options.duration_seconds;
+    let scene_limit = scene_limit(duration_seconds);
+    let voiceover_limit = voiceover_char_limit(duration_seconds);
+    let storyboard = compact_join(&package.storyboard, scene_limit, " -> ");
+    let subtitles = compact_join(&package.subtitles, scene_limit, " / ");
+    let shot_prompts = compact_join(&package.shot_prompts, scene_limit, "；");
+    let audio_line = if options.generate_audio {
+        format!(
+            "口播：{}。口播总字数不超过 {} 个中文字符，按画面节奏自然播报，不要扩写长稿。",
+            compact_text(&package.oral_script, voiceover_limit),
+            voiceover_limit
+        )
+    } else {
+        "音频：不要生成口播；只用字幕短句承接卖点。".to_string()
+    };
+
+    format!(
+        "生成 {duration} 秒 {ratio} {resolution} \
+         短视频。\n商品主题：{title}\n核心画面：{video_prompt}\n3 \
+         秒钩子：{hook}\n画面顺序：{storyboard}\n镜头要求：{shot_prompts}\n字幕短句：{subtitles}\\
+         n{audio_line}\n约束：画面必须围绕同一商品和卖点，人物、场景、字幕与口播保持一致，\
+         不要加入无关商品、价格或品牌。",
+        duration = duration_seconds,
+        ratio = options.ratio.trim(),
+        resolution = options.resolution.trim(),
+        title = package.title.trim(),
+        video_prompt = package.video_prompt.trim(),
+        hook = package.hook.trim(),
+        storyboard = storyboard,
+        shot_prompts = shot_prompts,
+        subtitles = subtitles,
+        audio_line = audio_line
+    )
+}
+
 fn should_poll_video_task(task: &VideoTaskResponse) -> bool {
     matches!(task.status.as_str(), "queued" | "running")
+}
+
+fn normalize_video_task_queue(tasks: Vec<VideoTaskResponse>) -> Vec<VideoTaskResponse> {
+    let mut queue = Vec::new();
+    for task in tasks {
+        if !task.id.trim().is_empty()
+            && !queue
+                .iter()
+                .any(|item: &VideoTaskResponse| item.id == task.id)
+        {
+            queue.push(task);
+            if queue.len() >= VIDEO_TASK_QUEUE_LIMIT {
+                break;
+            }
+        }
+    }
+    queue
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_video_task_queue() -> Vec<VideoTaskResponse> {
+    LocalStorage::get(VIDEO_TASK_QUEUE_STORAGE_KEY)
+        .map(normalize_video_task_queue)
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_video_task_queue() -> Vec<VideoTaskResponse> {
+    Vec::new()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn save_video_task_queue(queue: &[VideoTaskResponse]) {
+    let _ = LocalStorage::set(VIDEO_TASK_QUEUE_STORAGE_KEY, queue);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_video_task_queue(_queue: &[VideoTaskResponse]) {}
+
+#[cfg(target_arch = "wasm32")]
+fn load_video_marketing_draft() -> VideoMarketingDraft {
+    LocalStorage::get(VIDEO_MARKETING_DRAFT_STORAGE_KEY)
+        .unwrap_or_else(|_| default_video_marketing_draft())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_video_marketing_draft() -> VideoMarketingDraft {
+    default_video_marketing_draft()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn save_video_marketing_draft(draft: &VideoMarketingDraft) {
+    let _ = LocalStorage::set(VIDEO_MARKETING_DRAFT_STORAGE_KEY, draft);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_video_marketing_draft(_draft: &VideoMarketingDraft) {}
+
+fn persist_video_marketing_draft(
+    task: VideoMarketingTask,
+    options: VideoGenerationOptions,
+    package: Option<VideoPackageResponse>,
+) {
+    save_video_marketing_draft(&VideoMarketingDraft {
+        task,
+        options,
+        package,
+    });
 }
 
 fn video_task_status_label(status: &str) -> &'static str {
@@ -214,73 +281,213 @@ fn video_task_status_label(status: &str) -> &'static str {
         "blocked" => "待配置",
         "completed" => "视频已生成",
         "failed" | "expired" | "cancelled" => "生成失败",
-        "queued" | "running" => "视频生成中",
+        "queued" => "排队中",
+        "running" => "生成中",
         _ => "状态已更新",
     }
 }
 
+fn video_marketing_status_from_state(
+    package: &Option<VideoPackageResponse>,
+    video_tasks: &[VideoTaskResponse],
+) -> String {
+    video_tasks
+        .first()
+        .map(|task| video_task_status_label(&task.status).to_string())
+        .unwrap_or_else(|| {
+            if package.is_some() {
+                "脚本包待审核".to_string()
+            } else {
+                "待生成脚本包".to_string()
+            }
+        })
+}
+
+fn upsert_video_task(queue: &mut Vec<VideoTaskResponse>, task: VideoTaskResponse) {
+    queue.retain(|item| item.id != task.id);
+    queue.insert(0, task);
+    queue.truncate(VIDEO_TASK_QUEUE_LIMIT);
+    save_video_task_queue(queue);
+}
+
+fn merge_video_task_update(
+    mut updated: VideoTaskResponse,
+    previous: &VideoTaskResponse,
+) -> VideoTaskResponse {
+    if updated.resolution.is_none() {
+        updated.resolution = previous.resolution.clone();
+    }
+    if updated.ratio.is_none() {
+        updated.ratio = previous.ratio.clone();
+    }
+    if updated.duration_seconds.is_none() {
+        updated.duration_seconds = previous.duration_seconds;
+    }
+    if updated.queue_position.is_none() {
+        updated.queue_position = previous.queue_position;
+    }
+    if updated.submitted_at.is_none() {
+        updated.submitted_at = previous.submitted_at.clone();
+    }
+    updated
+}
+
 #[component]
 pub fn AiVideoMarketingPage() -> impl IntoView {
-    let (task, set_task) = signal(default_video_marketing_task());
-    let (selected_version, set_selected_version) = signal("种草版".to_string());
-    let (task_status, set_task_status) = signal("待生成".to_string());
-    let initial_results = generate_video_marketing_package(&task.get_untracked(), "种草版");
-    let (results, set_results) = signal(initial_results);
-    let (video_task, set_video_task) = signal::<Option<VideoTaskResponse>>(None);
+    let restored_draft = load_video_marketing_draft();
+    let restored_video_tasks = load_video_task_queue();
+    let restored_live_task = restored_video_tasks
+        .iter()
+        .find(|task| should_poll_video_task(task))
+        .cloned();
+    let initial_task_status =
+        video_marketing_status_from_state(&restored_draft.package, &restored_video_tasks);
+    let (task, set_task) = signal(restored_draft.task);
+    let (generation_options, set_generation_options) = signal(restored_draft.options);
+    let (task_status, set_task_status) = signal(initial_task_status);
+    let (package, set_package) = signal(restored_draft.package);
+    let (package_error, set_package_error) = signal::<Option<String>>(None);
+    let (package_loading, set_package_loading) = signal(false);
+    let (video_tasks, set_video_tasks) = signal::<Vec<VideoTaskResponse>>(restored_video_tasks);
     let (video_error, set_video_error) = signal::<Option<String>>(None);
-    let (video_loading, set_video_loading) = signal(false);
+    let (video_loading, set_video_loading) = signal(restored_live_task.is_some());
     let video_service = create_ai_store_manager_service(use_app_state().api_client());
     let video_service = StoredValue::new(video_service);
 
-    let generate = move || {
-        let package = generate_video_marketing_package(&task.get(), &selected_version.get());
-        set_results.set(package);
-        set_task_status.set("待审核".to_string());
+    {
+        let service = video_service.get_value();
+        spawn_local(async move {
+            if let Ok(tasks) = service.list_video_tasks().await {
+                if tasks.is_empty() {
+                    return;
+                }
+
+                let mut latest_status = None;
+                set_video_tasks.update(|queue| {
+                    for task in tasks.into_iter().rev() {
+                        upsert_video_task(queue, task);
+                    }
+                    latest_status = queue
+                        .first()
+                        .map(|task| video_task_status_label(&task.status).to_string());
+                });
+                if let Some(status) = latest_status {
+                    set_task_status.set(status);
+                }
+            }
+        });
+    }
+
+    if let Some(restored_task) = restored_live_task {
+        let service = video_service.get_value();
+        spawn_local(async move {
+            let mut latest = restored_task;
+            for _ in 0..VIDEO_TASK_MAX_POLLS {
+                if !should_poll_video_task(&latest) {
+                    break;
+                }
+
+                gloo_timers::future::TimeoutFuture::new(VIDEO_TASK_POLL_INTERVAL_MS).await;
+
+                match service.get_video_task(&latest.id).await {
+                    Ok(updated) => {
+                        latest = merge_video_task_update(updated, &latest);
+                        set_task_status.set(video_task_status_label(&latest.status).to_string());
+                        set_video_tasks.update(|queue| upsert_video_task(queue, latest.clone()));
+                    }
+                    Err(err) => {
+                        set_video_error.set(Some(err.to_string()));
+                        set_task_status.set("生成失败".to_string());
+                        break;
+                    }
+                }
+            }
+            set_video_loading.set(false);
+        });
+    }
+
+    let generate_package = move || {
+        let service = video_service.get_value();
+        let current_task = task.get();
+        let options = generation_options.get();
+        let req = CreateVideoPackageRequest {
+            product: current_task.product.clone(),
+            selling_points: current_task.selling_points.clone(),
+            audience: current_task.audience.clone(),
+            goal: current_task.goal.clone(),
+            platform: current_task.platform.clone(),
+            style: current_task.style.clone(),
+            duration_seconds: Some(options.duration_seconds),
+            ratio: Some(options.ratio.clone()),
+            generate_audio: Some(options.generate_audio),
+        };
+
+        set_package_loading.set(true);
+        set_package_error.set(None);
+        set_video_error.set(None);
+        set_task_status.set("AI 脚本包生成中".to_string());
+
+        spawn_local(async move {
+            match service.create_video_package(&req).await {
+                Ok(response) => {
+                    persist_video_marketing_draft(current_task, options, Some(response.clone()));
+                    set_package.set(Some(response));
+                    set_task_status.set("脚本包待审核".to_string());
+                }
+                Err(err) => {
+                    set_package_error.set(Some(err.to_string()));
+                    set_task_status.set("脚本包生成失败".to_string());
+                }
+            }
+            set_package_loading.set(false);
+        });
     };
 
     let create_video = move || {
+        let Some(current_package) = package.get() else {
+            set_video_error.set(Some("请先生成 AI 脚本包".to_string()));
+            return;
+        };
+
         let service = video_service.get_value();
         let current_task = task.get();
-        let current_results = results.get();
-        let version = selected_version.get();
-        let options = video_generation_options(&current_task);
+        let options = generation_options.get();
         let req = CreateVideoTaskRequest {
             product: current_task.product.clone(),
             platform: current_task.platform.clone(),
-            version,
-            prompt: build_seedance_prompt(&current_task, &current_results),
+            prompt: build_seedance_prompt_from_package(&current_package, &options),
+            model: Some(options.model.clone()),
             duration_seconds: options.duration_seconds,
-            resolution: options.resolution.to_string(),
-            ratio: options.ratio.to_string(),
+            resolution: options.resolution.clone(),
+            ratio: options.ratio.clone(),
             generate_audio: options.generate_audio,
             watermark: options.watermark,
         };
 
         set_video_loading.set(true);
         set_video_error.set(None);
-        set_video_task.set(None);
-        set_task_status.set("视频生成中".to_string());
+        set_task_status.set("视频任务提交中".to_string());
 
         spawn_local(async move {
             match service.create_video_task(&req).await {
                 Ok(mut latest) => {
                     set_task_status.set(video_task_status_label(&latest.status).to_string());
-                    set_video_task.set(Some(latest.clone()));
+                    set_video_tasks.update(|queue| upsert_video_task(queue, latest.clone()));
 
                     for _ in 0..VIDEO_TASK_MAX_POLLS {
                         if !should_poll_video_task(&latest) {
                             break;
                         }
 
-                        gloo_timers::future::TimeoutFuture::new(VIDEO_TASK_POLL_INTERVAL_MS)
-                            .await;
+                        gloo_timers::future::TimeoutFuture::new(VIDEO_TASK_POLL_INTERVAL_MS).await;
 
                         match service.get_video_task(&latest.id).await {
                             Ok(updated) => {
-                                latest = updated;
+                                latest = merge_video_task_update(updated, &latest);
                                 set_task_status
                                     .set(video_task_status_label(&latest.status).to_string());
-                                set_video_task.set(Some(latest.clone()));
+                                set_video_tasks
+                                    .update(|queue| upsert_video_task(queue, latest.clone()));
                             }
                             Err(err) => {
                                 set_video_error.set(Some(err.to_string()));
@@ -305,12 +512,12 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
             <div class="page-header ai-video-marketing-header">
                 <div>
                     <h2>"AI 视频营销"</h2>
-                    <p>"从商品卖点生成短视频脚本、分镜、口播、字幕和发布素材。"</p>
+                    <p>"用内部 agent 生成短视频脚本包，再提交视频模型生成成片。"</p>
                 </div>
                 <div class="ai-store-manager-actions">
                     <a class="btn btn-secondary" href="/ai-store-manager">"返回 AI 店长"</a>
-                    <button class="btn btn-primary" on:click=move |_| generate()>
-                        "生成视频文案包"
+                    <button class="btn btn-primary" disabled=move || package_loading.get() on:click=move |_| generate_package()>
+                        {move || if package_loading.get() { "生成中..." } else { "生成 AI 脚本包" }}
                     </button>
                     <button class="btn btn-secondary" disabled=move || video_loading.get() on:click=move |_| create_video()>
                         {move || if video_loading.get() { "生成中..." } else { "生成视频" }}
@@ -321,7 +528,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
             <section class="ai-video-marketing-workspace">
                 <div class="ai-video-marketing-panel">
                     <div class="section-title compact">
-                        <h2>"任务配置"</h2>
+                        <h2>"任务输入"</h2>
                     </div>
                     <div class="ai-video-status-row">
                         <span>"当前状态"</span>
@@ -330,15 +537,21 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                     <div class="ai-video-form-grid">
                         <TextField label="商品" value=Signal::derive(move || task.get().product) on_input=move |value| {
                             set_task.update(|task| task.product = value);
-                            set_task_status.set("待生成".to_string());
+                            set_package.set(None);
+                            set_task_status.set("待生成脚本包".to_string());
+                            persist_video_marketing_draft(task.get(), generation_options.get(), None);
                         } />
                         <TextField label="核心卖点" value=Signal::derive(move || task.get().selling_points) on_input=move |value| {
                             set_task.update(|task| task.selling_points = value);
-                            set_task_status.set("待生成".to_string());
+                            set_package.set(None);
+                            set_task_status.set("待生成脚本包".to_string());
+                            persist_video_marketing_draft(task.get(), generation_options.get(), None);
                         } />
                         <TextField label="目标人群" value=Signal::derive(move || task.get().audience) on_input=move |value| {
                             set_task.update(|task| task.audience = value);
-                            set_task_status.set("待生成".to_string());
+                            set_package.set(None);
+                            set_task_status.set("待生成脚本包".to_string());
+                            persist_video_marketing_draft(task.get(), generation_options.get(), None);
                         } />
                         <SelectField
                             label="营销目标"
@@ -346,7 +559,9 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                             options=vec!["新品种草", "促销转化", "老客复购", "直播预热"]
                             on_change=move |value| {
                                 set_task.update(|task| task.goal = value);
-                                set_task_status.set("待生成".to_string());
+                                set_package.set(None);
+                                set_task_status.set("待生成脚本包".to_string());
+                                persist_video_marketing_draft(task.get(), generation_options.get(), None);
                             }
                         />
                         <SelectField
@@ -355,16 +570,9 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                             options=vec!["抖音", "快手", "视频号", "小红书"]
                             on_change=move |value| {
                                 set_task.update(|task| task.platform = value);
-                                set_task_status.set("待生成".to_string());
-                            }
-                        />
-                        <SelectField
-                            label="视频时长"
-                            value=Signal::derive(move || task.get().duration)
-                            options=vec!["15 秒", "30 秒", "60 秒"]
-                            on_change=move |value| {
-                                set_task.update(|task| task.duration = value);
-                                set_task_status.set("待生成".to_string());
+                                set_package.set(None);
+                                set_task_status.set("待生成脚本包".to_string());
+                                persist_video_marketing_draft(task.get(), generation_options.get(), None);
                             }
                         />
                         <SelectField
@@ -373,7 +581,9 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                             options=vec!["真实测评", "情绪种草", "痛点解决", "价格促销"]
                             on_change=move |value| {
                                 set_task.update(|task| task.style = value);
-                                set_task_status.set("待生成".to_string());
+                                set_package.set(None);
+                                set_task_status.set("待生成脚本包".to_string());
+                                persist_video_marketing_draft(task.get(), generation_options.get(), None);
                             }
                         />
                     </div>
@@ -381,74 +591,125 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
 
                 <div class="ai-video-marketing-panel">
                     <div class="section-title compact">
-                        <h2>"AI 生成结果"</h2>
+                        <h2>"AI 脚本包"</h2>
                     </div>
-                    <div class="ai-video-result-list">
-                        {move || results
-                            .get()
-                            .into_iter()
-                            .map(|result| view! { <ResultItem result=result /> })
-                            .collect_view()}
-                    </div>
-                </div>
-            </section>
-
-            <section class="ai-video-marketing-section">
-                <div class="section-title compact">
-                    <h2>"素材版本"</h2>
-                </div>
-                <div class="ai-video-version-grid">
-                    {video_marketing_versions()
-                        .iter()
-                        .copied()
-                        .map(|version| {
+                    {move || {
+                        if let Some(error) = package_error.get() {
+                            view! { <div class="ai-video-task-card error">{error}</div> }.into_any()
+                        } else if let Some(package) = package.get() {
                             view! {
-                                <VersionCard
-                                    version=version
-                                    selected_version=selected_version
-                                    on_select=move |name| {
-                                        set_selected_version.set(name.to_string());
-                                        let package = generate_video_marketing_package(&task.get(), name);
-                                        set_results.set(package);
-                                        set_task_status.set("待审核".to_string());
-                                    }
-                                />
-                            }
-                        })
-                        .collect_view()}
+                                <div class="ai-video-result-list">
+                                    {package_results(&package)
+                                        .into_iter()
+                                        .map(|result| view! { <ResultItem result=result /> })
+                                        .collect_view()}
+                                </div>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <div class="ai-video-task-card">
+                                    "点击生成 AI 脚本包后，内部 agent 会返回可传给视频模型的结构化结果。"
+                                </div>
+                            }.into_any()
+                        }
+                    }}
                 </div>
             </section>
 
             <section class="ai-video-marketing-section">
                 <div class="section-title compact">
-                    <h2>"Seedance 任务"</h2>
+                    <h2>"视频参数"</h2>
+                </div>
+                <div class="ai-video-form-grid">
+                    <SelectField
+                        label="视频模型"
+                        value=Signal::derive(move || generation_options.get().model)
+                        options=VIDEO_MODEL_OPTIONS.to_vec()
+                        on_change=move |value| {
+                            set_generation_options.update(|options| options.model = value);
+                            persist_video_marketing_draft(task.get(), generation_options.get(), package.get());
+                        }
+                    />
+                    <SelectField
+                        label="分辨率"
+                        value=Signal::derive(move || generation_options.get().resolution)
+                        options=vec!["480p", "720p", "1080p"]
+                        on_change=move |value| {
+                            set_generation_options.update(|options| options.resolution = value);
+                            persist_video_marketing_draft(task.get(), generation_options.get(), package.get());
+                        }
+                    />
+                    <SelectField
+                        label="画幅比例"
+                        value=Signal::derive(move || generation_options.get().ratio)
+                        options=vec!["9:16", "16:9", "1:1", "3:4", "4:3", "21:9", "adaptive"]
+                        on_change=move |value| {
+                            set_generation_options.update(|options| options.ratio = value);
+                            set_package.set(None);
+                            set_task_status.set("待生成脚本包".to_string());
+                            persist_video_marketing_draft(task.get(), generation_options.get(), None);
+                        }
+                    />
+                    <SelectField
+                        label="时长"
+                        value=Signal::derive(move || generation_options.get().duration_seconds.to_string())
+                        options=VIDEO_DURATION_OPTIONS.to_vec()
+                        on_change=move |value| {
+                            if let Ok(duration) = value.parse::<u8>() {
+                                set_generation_options.update(|options| options.duration_seconds = duration);
+                                set_package.set(None);
+                                set_task_status.set("待生成脚本包".to_string());
+                                persist_video_marketing_draft(task.get(), generation_options.get(), None);
+                            }
+                        }
+                    />
+                </div>
+            </section>
+
+            <section class="ai-video-marketing-section">
+                <div class="section-title compact">
+                    <h2>"生成队列"</h2>
                 </div>
                 {move || {
-                    if let Some(task) = video_task.get() {
-                        view! { <VideoTaskCard task=task /> }.into_any()
-                    } else if let Some(error) = video_error.get() {
-                        view! { <div class="ai-video-task-card error">{error}</div> }.into_any()
-                    } else {
+                    let tasks = video_tasks.get();
+                    if tasks.is_empty() {
                         view! {
                             <div class="ai-video-task-card">
-                                "点击生成视频后，会提交 Seedance 视频任务；未配置火山方舟密钥时会停在待配置状态。"
+                                "生成视频后，任务会出现在这里并自动刷新状态。"
+                            </div>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <div class="ai-video-queue-list">
+                                {tasks.into_iter().map(|task| view! { <VideoTaskCard task=task /> }).collect_view()}
                             </div>
                         }.into_any()
                     }
                 }}
+                {move || video_error.get().map(|error| view! {
+                    <div class="ai-video-task-card error">{error}</div>
+                })}
             </section>
 
             <section class="ai-video-marketing-section">
                 <div class="section-title compact">
-                    <h2>"发布前检查"</h2>
+                    <h2>"视频预览"</h2>
                 </div>
-                <div class="ai-video-check-grid">
-                    {pre_publish_checks()
-                        .iter()
-                        .copied()
-                        .map(|check| view! { <CheckItem check=check /> })
-                        .collect_view()}
-                </div>
+                {move || {
+                    let completed = video_tasks
+                        .get()
+                        .into_iter()
+                        .find(|task| task.status == "completed" && task.preview_url.is_some());
+                    if let Some(task) = completed {
+                        view! { <VideoPreview task=task /> }.into_any()
+                    } else {
+                        view! {
+                            <div class="ai-video-task-card">
+                                "视频完成后会在这里直接播放。"
+                            </div>
+                        }.into_any()
+                    }
+                }}
             </section>
         </div>
     }
@@ -502,110 +763,143 @@ fn ResultItem(result: VideoMarketingResult) -> impl IntoView {
 }
 
 #[component]
-fn VersionCard(
-    version: VideoMarketingVersion,
-    selected_version: ReadSignal<String>,
-    on_select: impl Fn(&'static str) + Clone + 'static,
-) -> impl IntoView {
-    let class_name = move || {
-        if selected_version.get() == version.name {
-            "ai-video-version-card selected"
-        } else {
-            "ai-video-version-card"
-        }
-    };
-
-    view! {
-        <button class=class_name on:click=move |_| on_select(version.name)>
-            <h3>{version.name}</h3>
-            <p>{version.focus}</p>
-            <strong>{version.hook}</strong>
-        </button>
-    }
-}
-
-#[component]
 fn VideoTaskCard(task: VideoTaskResponse) -> impl IntoView {
+    let status_label = video_task_status_label(&task.status);
     view! {
         <article class="ai-video-task-card">
             <div>
                 <span>"任务 ID"</span>
-                <strong>{task.id}</strong>
-            </div>
-            <div>
-                <span>"Provider"</span>
-                <strong>{task.provider}</strong>
-            </div>
-            <div>
-                <span>"模型"</span>
-                <strong>{task.model}</strong>
+                <strong>{task.id.clone()}</strong>
             </div>
             <div>
                 <span>"状态"</span>
-                <strong>{task.status}</strong>
+                <strong>{status_label}</strong>
             </div>
-            <p>{task.message}</p>
-            {task.preview_url.map(|url| view! {
-                <a class="btn btn-secondary" href=url target="_blank" rel="noopener noreferrer">"查看预览"</a>
+            <div>
+                <span>"模型"</span>
+                <strong>{task.model.clone()}</strong>
+            </div>
+            <div>
+                <span>"参数"</span>
+                <strong>{format_video_options(&task)}</strong>
+            </div>
+            <p>{task.message.clone()}</p>
+            {task.updated_at.clone().map(|updated_at| view! {
+                <small>{format!("更新：{}", updated_at)}</small>
             })}
         </article>
     }
 }
 
 #[component]
-fn CheckItem(check: VideoMarketingCheck) -> impl IntoView {
+fn VideoPreview(task: VideoTaskResponse) -> impl IntoView {
+    let url = task.preview_url.clone().unwrap_or_default();
     view! {
-        <article class="ai-video-check-item">
-            <span>{check.label}</span>
-            <strong>{check.status}</strong>
+        <article class="ai-video-preview-card">
+            <video class="ai-video-player" controls src=url.clone()></video>
+            <div>
+                <strong>{task.model.clone()}</strong>
+                <span>{format_video_options(&task)}</span>
+                <a class="btn btn-secondary" href=url target="_blank" rel="noopener noreferrer">"查看原视频"</a>
+            </div>
         </article>
     }
+}
+
+fn format_video_options(task: &VideoTaskResponse) -> String {
+    let resolution = task.resolution.as_deref().unwrap_or("-");
+    let ratio = task.ratio.as_deref().unwrap_or("-");
+    let duration = task
+        .duration_seconds
+        .map(|duration| format!("{}s", duration))
+        .unwrap_or_else(|| "-".to_string());
+    format!("{} / {} / {}", resolution, ratio, duration)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{GraphicMarketingCheck, VideoPackageResponse};
 
     #[test]
-    fn video_marketing_versions_cover_core_use_cases() {
-        let versions: Vec<_> = video_marketing_versions()
-            .iter()
-            .map(|version| version.name)
-            .collect();
+    fn seedance_prompt_uses_agent_generated_package() {
+        let package = sample_video_package();
+        let options = default_video_generation_options();
 
-        assert_eq!(versions, vec!["强转化版", "种草版", "直播引流版"]);
-    }
-
-    #[test]
-    fn generated_package_changes_with_version() {
-        let task = default_video_marketing_task();
-
-        let conversion = generate_video_marketing_package(&task, "强转化版");
-        let live = generate_video_marketing_package(&task, "直播引流版");
-
-        assert_ne!(conversion[0].content, live[0].content);
-        assert!(live[1].content.contains("直播间"));
-    }
-
-    #[test]
-    fn seedance_prompt_includes_task_and_script() {
-        let task = default_video_marketing_task();
-        let results = generate_video_marketing_package(&task, "种草版");
-        let prompt = build_seedance_prompt(&task, &results);
+        let prompt = build_seedance_prompt_from_package(&package, &options);
 
         assert!(prompt.contains("云柑礼盒"));
-        assert!(prompt.contains("爆款标题"));
-        assert!(prompt.contains("抖音"));
+        assert!(prompt.contains("真实办公室场景"));
+        assert!(prompt.contains("果肉特写"));
+        assert!(prompt.contains("开箱"));
     }
 
     #[test]
-    fn video_generation_options_map_task_duration_and_platform() {
-        let mut task = default_video_marketing_task();
-        task.duration = "60 秒".to_string();
-        task.platform = "视频号".to_string();
+    fn seedance_prompt_compacts_package_for_short_video() {
+        let mut package = sample_video_package();
+        let mut options = default_video_generation_options();
+        options.duration_seconds = 5;
+        package.oral_script = "这盒云柑礼盒适合送礼和办公室分享，打开以后果香很明显，\
+                               冷链送到手还是新鲜饱满，送客户、送同事、下午茶都很体面，\
+                               这句不该进入五秒视频提示词。"
+            .to_string();
+        package.storyboard = vec![
+            "开箱".to_string(),
+            "果肉特写".to_string(),
+            "同事试吃".to_string(),
+            "礼盒收尾".to_string(),
+        ];
 
-        let options = video_generation_options(&task);
+        let prompt = build_seedance_prompt_from_package(&package, &options);
 
+        assert!(prompt.contains("5 秒"));
+        assert!(prompt.contains("口播总字数不超过 28"));
+        assert!(prompt.contains("开箱 -> 果肉特写"));
+        assert!(!prompt.contains("礼盒收尾"));
+        assert!(!prompt.contains("这句不该进入五秒视频提示词"));
+    }
+
+    #[test]
+    fn package_results_show_agent_video_prompt() {
+        let package = sample_video_package();
+
+        let results = package_results(&package);
+
+        assert!(results.iter().any(|result| {
+            result.label == "视频模型提示词" && result.content.contains("云柑礼盒开箱")
+        }));
+    }
+
+    #[test]
+    fn video_marketing_draft_round_trips_agent_package() {
+        let draft = VideoMarketingDraft {
+            task: default_video_marketing_task(),
+            options: default_video_generation_options(),
+            package: Some(sample_video_package()),
+        };
+
+        let encoded = serde_json::to_string(&draft).unwrap();
+        let restored: VideoMarketingDraft = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(
+            restored
+                .package
+                .as_ref()
+                .map(|package| package.title.as_str()),
+            Some("云柑礼盒真实开箱")
+        );
+        assert_eq!(
+            video_marketing_status_from_state(&restored.package, &[]),
+            "脚本包待审核"
+        );
+        assert_eq!(restored.options.duration_seconds, 12);
+    }
+
+    #[test]
+    fn default_video_generation_options_are_user_visible_settings() {
+        let options = default_video_generation_options();
+
+        assert_eq!(options.model, "doubao-seedance-2.0");
         assert_eq!(options.duration_seconds, 12);
         assert_eq!(options.resolution, "720p");
         assert_eq!(options.ratio, "9:16");
@@ -614,15 +908,71 @@ mod tests {
     }
 
     #[test]
+    fn video_model_options_match_agent_plan_models() {
+        assert_eq!(
+            VIDEO_MODEL_OPTIONS,
+            [
+                "doubao-seedance-2.0",
+                "doubao-seedance-2.0-fast",
+                "doubao-seedance-1.5-pro"
+            ]
+        );
+    }
+
+    #[test]
+    fn duration_options_include_longer_seedance_clip() {
+        assert_eq!(VIDEO_DURATION_OPTIONS, ["5", "8", "12", "15"]);
+    }
+
+    #[test]
+    fn video_task_queue_updates_existing_task_without_duplicates() {
+        let mut queue = vec![sample_video_task("task-1", "queued", None)];
+        upsert_video_task(
+            &mut queue,
+            sample_video_task("task-1", "completed", Some("https://cdn.example/video.mp4")),
+        );
+
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].status, "completed");
+        assert_eq!(
+            queue[0].preview_url.as_deref(),
+            Some("https://cdn.example/video.mp4")
+        );
+    }
+
+    #[test]
+    fn normalized_video_task_queue_keeps_latest_unique_tasks() {
+        let tasks = vec![
+            sample_video_task("task-1", "completed", Some("https://cdn.example/video.mp4")),
+            sample_video_task("task-2", "running", None),
+            sample_video_task("task-1", "queued", None),
+            sample_video_task("", "running", None),
+        ];
+
+        let queue = normalize_video_task_queue(tasks);
+
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].id, "task-1");
+        assert_eq!(queue[0].status, "completed");
+        assert_eq!(queue[1].id, "task-2");
+    }
+
+    #[test]
+    fn normalized_video_task_queue_keeps_twenty_recent_tasks() {
+        let tasks = (0..25)
+            .map(|index| sample_video_task(&format!("task-{}", index), "completed", None))
+            .collect::<Vec<_>>();
+
+        let queue = normalize_video_task_queue(tasks);
+
+        assert_eq!(queue.len(), 20);
+        assert_eq!(queue[0].id, "task-0");
+        assert_eq!(queue[19].id, "task-19");
+    }
+
+    #[test]
     fn should_poll_only_live_seedance_statuses() {
-        let mut response = VideoTaskResponse {
-            id: "task-1".to_string(),
-            provider: "volcengine-ark".to_string(),
-            model: "doubao-seedance-2-0-260128".to_string(),
-            status: "queued".to_string(),
-            message: "queued".to_string(),
-            preview_url: None,
-        };
+        let mut response = sample_video_task("task-1", "queued", None);
 
         assert!(should_poll_video_task(&response));
         response.status = "blocked".to_string();
@@ -630,5 +980,40 @@ mod tests {
         response.status = "completed".to_string();
         response.preview_url = Some("https://cdn.example/video.mp4".to_string());
         assert!(!should_poll_video_task(&response));
+    }
+
+    fn sample_video_package() -> VideoPackageResponse {
+        VideoPackageResponse {
+            title: "云柑礼盒真实开箱".to_string(),
+            hook: "办公室下午茶被它承包了".to_string(),
+            oral_script: "这盒云柑礼盒适合送礼和办公室分享。".to_string(),
+            storyboard: vec!["开箱".to_string(), "果肉特写".to_string()],
+            subtitles: vec!["当季鲜果".to_string(), "顺丰冷链".to_string()],
+            shot_prompts: vec!["真实办公室场景".to_string(), "自然光果肉特写".to_string()],
+            tags: vec!["#云柑礼盒".to_string()],
+            video_prompt: "真实办公室场景，云柑礼盒开箱，果肉特写。".to_string(),
+            checks: vec![GraphicMarketingCheck {
+                label: "人工审核".to_string(),
+                status: "待确认".to_string(),
+            }],
+            agent_id: Some("agent-1".to_string()),
+        }
+    }
+
+    fn sample_video_task(id: &str, status: &str, preview_url: Option<&str>) -> VideoTaskResponse {
+        VideoTaskResponse {
+            id: id.to_string(),
+            provider: "volcengine-ark".to_string(),
+            model: "doubao-seedance-2.0".to_string(),
+            status: status.to_string(),
+            message: status.to_string(),
+            preview_url: preview_url.map(str::to_string),
+            resolution: Some("720p".to_string()),
+            ratio: Some("9:16".to_string()),
+            duration_seconds: Some(8),
+            queue_position: Some(1),
+            submitted_at: Some("2026-06-03T00:00:00Z".to_string()),
+            updated_at: Some("2026-06-03T00:00:00Z".to_string()),
+        }
     }
 }
