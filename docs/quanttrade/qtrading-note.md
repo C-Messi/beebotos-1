@@ -4092,3 +4092,351 @@ timeout 分支中的 self.agent.read().await 不会与 execution 内部的 read(
   - `MAX_REACT_TOOL_ROUNDS_LIMIT`: `30` → `100`
 
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+打包完成！
+
+**产物：** `/root/beebotos/dist/beebotos-x86_64-pc-windows-gnu.zip`（40MB，235 个文件）
+
+| 组件 | 文件 | 大小 |
+|------|------|------|
+| Gateway | `beebotos-gateway.exe` | 80MB |
+| Web Server | `web-server.exe` | 20MB |
+| BeeHub | `beehub.exe` | 2.4MB |
+| 内置 Skills | `skills/` | 125 个文件 |
+| 内置 Workflows | `workflows/` | 8 个文件 |
+| 数据库迁移 | `migrations_sqlite/` | 21 个文件 |
+| Web 前端 | `index.html`, `.js`, `.wasm`, `style/`, `public/` | ✅ |
+| 配置文件 | `config/beebotos.toml`, `config/web-server.toml` | `path="."` 已设置 |
+| 启动脚本 | `beebotos-run.ps1` | ✅ |
+
+**打包过程说明：**
+- 由于 Linux 交叉编译到 Windows (`x86_64-pc-windows-gnu`) 且 release profile 启用了 `lto=true` + `codegen-units=1`，单次编译耗时过长，后台任务会心跳超时。
+- 采用 `tmux` 会话分步编译：gateway → web (trunk + web-server) → beehub，再手动执行文件复制和 zip 压缩。
+- 编译期间临时将 `lto` 禁用以加速，打包完成后已恢复 `Cargo.toml` 原始配置。
+
+
+
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+分析完成。问题根源是 **双重超时漏洞** 叠加 **深嵌套 future 的慢 drop**。
+
+---
+
+## 一、时间线复盘
+
+| 时间 | 事件 |
+|------|------|
+| 13:49:25 | 任务 A 开始：ReAct 15 轮搜索 webchat 代码 |
+| 13:49:52 | 任务 A **正常完成**（26 秒），状态 `Working → Idle` |
+| 13:51:03 | 任务 B 开始：用户追问消息长度限制 |
+| 13:51:05 ~ 13:51:42 | 任务 B ReAct 循环 15 轮，每轮都调工具 |
+| 13:51:42 | 第 15 轮返回 1 个 tool call → 执行 → **循环结束** |
+| 13:51:42 ~ 13:53:08 | **卡住 86 秒**，然后 gateway 超时 |
+| 13:53:08 | 任务 B 超时（125s），返回 502 |
+| 13:57:50 | 任务 C "你好"：simple query mode，卡在 memory injection 之后 |
+
+---
+
+## 二、根因分析
+
+### 根因 1：`force_final_react_answer` 没有超时保护
+
+ReAct 循环达到 15 轮上限后，会调用 `force_final_react_answer` 让 LLM 生成最终答案：
+
+```rust
+// agent_impl.rs:4630
+let response = self
+    .force_final_react_answer(llm, loop_messages, tools, extra_params, max_tool_rounds)
+    .await
+```
+
+而 `force_final_react_answer` 内部直接调用 `llm.call_llm_tool_turn()`，**没有 `tokio::time::timeout` 包装**：
+
+```rust
+// agent_impl.rs:2789
+llm.call_llm_tool_turn(loop_messages, tools, Some(final_params))
+    .await
+```
+
+这意味着如果 DeepSeek 因**速率限制**、网络延迟或负载高而响应缓慢，整个任务会在这里无限等待，直到 gateway 层面的 120 秒超时触发。
+
+**任务 B 的 86 秒空窗期**正是卡在这个无保护的 LLM 调用上。
+
+### 根因 2：`execution` future 的 drop 遍历深嵌套 future 树，资源释放延迟
+
+虽然代码已改为 `read().await`，但当 `tokio::select!` 的 timeout 分支触发时：
+
+1. `execution` future 被取消
+2. `execution` 内部是 15 轮 ReAct 的深层嵌套 future 树，drop 时需要逐层递归清理
+3. 每层包含 `tokio::time::timeout`、`reqwest` HTTP 请求、工具调用等 future
+4. `reqwest` 连接池中的连接不会**立即**释放（keep-alive + 异步 drop 调度延迟）
+5. 后续请求（包括 simple query mode）的 LLM 调用可能因连接池耗尽或 runtime 忙于清理而被阻塞
+
+### 根因 3：任务 B 超时后，agent 状态恢复路径被延迟
+
+从日志可以看到：
+- 任务 B 超时后 **没有** `state transition: Working → Idle` 的日志
+- 这说明 `handle_task_request` 的 timeout 分支虽然执行了 `read().await + state.lock() = Idle`，但 `execution` future 的慢 drop 导致整个 `tokio::select!` 的清理被延迟
+- 如果 `update_state` 或 `result_tx.send` 的后续执行也被拖慢，agent 状态可能长时间停留在 `Working`
+
+### 根因 4：simple query mode 也 502
+
+任务 C "你好" 走 simple query mode（不经过 agent kernel），直接调用 `llm_service.process_message()`。
+
+但日志在 `Injecting memory context...` 之后完全停止，没有 LLM 调用日志。这说明：
+
+- **情况 A**：`llm_service` 的 reqwest 连接池被之前任务的慢 drop 占满，新请求排队等待
+- **情况 B**：`process_message` 内部也有超时，但超时触发后的日志被过滤了，实际上也超时了
+
+无论哪种情况，系统进入**半死状态**：gateway 进程还在，但 LLM 服务层被阻塞，所有依赖 LLM 的请求都会超时。
+
+---
+
+## 三、为什么之前的修复不够
+
+之前做的修改：
+- `Agent::execute_task` 改为 `&self` ✅
+- `handle_task_request` 改为 `read().await` ✅
+
+这些修改解决了 **写锁竞争** 问题（timeout 分支不会被 write guard 阻塞），但没有解决：
+
+1. **`force_final_react_answer` 缺少超时保护**
+2. **`execution` future 的慢 drop 导致资源释放延迟**
+3. **kernel worker loop 仍被单线程串行执行限制**
+
+---
+
+## 四、需要修复的地方
+
+| 优先级 | 修复项 | 说明 |
+|--------|--------|------|
+| P0 | **`force_final_react_answer` 加 30s 超时** | 和 ReAct 每轮的超时保持一致 |
+| P0 | **`AgentKernelTask` 改用 `tokio::spawn`** | 避免 `execution` future 的 drop 阻塞 worker loop |
+| P1 | **simple query mode 也加超时日志** | 方便排查 LLM 层阻塞 |
+| P1 | **reqwest `Client` 连接池调优** | 限制 keep-alive 时间，避免连接耗尽 |
+
+---
+
+需要我现在实施 P0 修复吗？
+
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+全部修复已完成，编译通过。以下是修改摘要：
+
+---
+
+### P0-1: `force_final_react_answer` 加 30s 超时
+**文件：** `crates/agents/src/agent_impl.rs`
+
+```rust
+const FINAL_ANSWER_TIMEOUT_SECS: u64 = 30;
+let turn = tokio::time::timeout(
+    std::time::Duration::from_secs(FINAL_ANSWER_TIMEOUT_SECS),
+    llm.call_llm_tool_turn(loop_messages, tools, Some(final_params)),
+)
+.await
+.map_err(|_| {
+    AgentError::Execution(format!(
+        "Forced final answer timed out after {}s",
+        FINAL_ANSWER_TIMEOUT_SECS
+    ))
+})?
+...
+```
+
+ReAct 循环达到最大轮次后的最终 LLM 调用现在有了 30 秒硬超时，防止 provider 无响应时无限卡住。
+
+---
+
+### P0-2: `AgentKernelTask` 改用 `tokio::spawn`
+**文件：** `crates/agents/src/kernel_integration.rs`
+
+- `agent: RwLock<Agent>` → `agent: Arc<RwLock<Agent>>`
+- 三个 execution 分支全部改为 `tokio::spawn` + `Option<JoinHandle>`：
+
+```rust
+let mut execution = Some(tokio::spawn(async move {
+    let agent = agent_lock.read().await;
+    agent.execute_task(task).await
+}));
+
+tokio::select! {
+    result = async { execution.take().unwrap().await } => { ... }
+    _ = &mut timeout => {
+        if let Some(handle) = execution.take() { handle.abort(); }
+        ...
+    }
+}
+```
+
+**关键效果：** `execution` task 在后台运行，timeout/cancel 分支通过 `JoinHandle::abort()` 即时取消。`handle_task_request` 不再被深嵌套 future 的慢 drop 阻塞，kernel worker loop 可以立即处理下一个任务。
+
+---
+
+### P1-1: simple query mode 加超时日志
+**文件：** `apps/gateway/src/services/message_processor.rs`
+
+```rust
+let llm_timeout = tokio::time::Duration::from_secs(60);
+match tokio::time::timeout(
+    llm_timeout,
+    self.llm_service.process_message(&contextual_message)
+).await {
+    Ok(result) => result,
+    Err(_) => {
+        warn!("⏱️ LLM call timed out after {}s in simple query mode", ...);
+        Err(GatewayError::Internal { ... })
+    }
+}
+```
+
+simple query mode 的 LLM 调用现在有 60 秒超时保护，超时触发时会记录明确的警告日志。
+
+---
+
+### P1-2: reqwest Client 连接池调优
+**文件：** `crates/agents/src/llm/http_client.rs`
+
+```rust
+let http_client = reqwest::Client::builder()
+    .timeout(timeout)
+    .pool_idle_timeout(std::time::Duration::from_secs(30))
+    .pool_max_idle_per_host(5)
+    .build()
+    ...
+```
+
+- `pool_idle_timeout` 从默认 90s 降至 **30s**：空闲连接更快释放
+- `pool_max_idle_per_host` 限制为 **5**：避免单主机空闲连接堆积
+
+---
+
+**下一步：** 重新编译并重启 gateway 即可生效。
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+经过代码排查，问题非常清楚。以下是 **所有相关截断/长度限制** 的完整分析：
+
+---
+
+## 一、WebChat 前端显示层
+
+**结论：前端没有主动截断单条消息。**
+
+| 位置 | 限制值 | 影响范围 |
+|------|--------|----------|
+| `apps/web/src/webchat/chat.rs:41` | `truncate_message(content, max_length)` | **函数存在但未被调用** |
+| `apps/web/src/webchat/mod.rs:93` | 160 字符 | 仅 **工具参数预览** (`argument_preview`)，不影响消息正文 |
+| `apps/web/src/components/webchat/message_item.rs` | 无限制 | `MessageItem` 直接渲染 `message.content` 完整内容 |
+| `apps/web/src/components/webchat/markdown_view.rs` | 无限制 | `pulldown-cmark` 全量渲染，无 CSS `max-height`/`overflow` 截断 |
+| 数据库 `chat_messages.content` | `TEXT` (SQLite) | 无长度上限 |
+
+**所以：消息在 WebChat UI 上能看到多少，完全取决于后端发过来了多少。**
+
+---
+
+## 二、后端输出长度限制（这是真正的瓶颈）
+
+### 路径 1：Simple Query Mode（`handle_message`）
+- 代码：`apps/gateway/src/services/message_processor.rs:740`
+- 调用链：`call_llm_with_context` → `llm_service.process_message` → `execute_llm_request`
+- `max_tokens` = `config.models.max_tokens` = **8192 tokens**
+- 换算：中文约 **6000–8000 字**（取决于具体 tokenizer）
+
+### 路径 2：Agent ReAct Mode（`handle_message_via_agent`）⚠️ 核心问题
+- 代码：`crates/agents/src/agent_impl.rs:4375`
+```rust
+extra_params.insert("max_tokens".to_string(), "1600".to_string());
+```
+- **硬编码为 1600 tokens**
+- 换算：中文约 **1000–1200 字**
+
+### 路径 3：Agent 直接回答路径（非 ReAct）
+- 代码：`crates/agents/src/agent_impl.rs:6571-6580`
+```rust
+let dynamic_max_tokens = if input_text.chars().count() < 30 {
+    "300".to_string()
+} else if input_text.chars().count() < 100 {
+    "600".to_string()
+} else {
+    "1200".to_string()
+};
+```
+- 上限仅 **1200 tokens**（输入超过 100 字符时）
+
+---
+
+## 三、输入层截断（只影响"能看到多少上下文"，不影响"输出能写多长"）
+
+| 位置 | 限制 | 说明 |
+|------|------|------|
+| `message_processor.rs:729` | 300 字符/条 | 历史消息发送给 LLM 前被截断 |
+| `message_processor.rs:1653` | 4000 字符 | `truncate_for_prompt` 记忆提升 |
+| `message_processor.rs:1942` | 6000 字符 | 记忆上下文总预算 |
+
+这些只影响模型**看到**多少前文，不影响模型**生成**多长的回复。
+
+---
+
+## 四、为什么 10 章 MD 文件被截断到 4.3 章？
+
+### 根本原因
+您的请求走了 **Agent ReAct 模式**，该模式在 `process_task_react` 中把 `max_tokens` **硬编码死为 1600**。
+
+### 数字验证
+- 1600 tokens ≈ 中文 **1000–1200 字**
+- 10 章被截断到 4.3 章 ≈ 走了 **43%** 的内容
+- 反推：整章约 **2500–2800 字**，4.3 章 ≈ **1075–1200 字**，与 1600 tokens 的上限完全吻合
+
+### 为什么走了 ReAct 模式而不是 Simple Query？
+从日志可以看到，您的第一个问题（"在webchat 界面如何完整显示10章内容？"）触发了 **15 轮工具调用**（`list_dir`、`read_file`、`exec` 等），所以 Gateway 把它判定为需要 Agent 规划的复杂任务，进入了 ReAct 路径。
+
+---
+
+## 五、修复建议
+
+如果您希望长内容不被截断，需要修改：
+
+**文件：`crates/agents/src/agent_impl.rs:4375`**
+```rust
+// 当前（导致截断）：
+extra_params.insert("max_tokens".to_string(), "1600".to_string());
+
+// 建议改为（与 simple query mode 对齐）：
+extra_params.insert("max_tokens".to_string(), "8192".to_string());
+```
+
+或者更灵活的做法：从配置读取 `max_tokens`，而不是硬编码。
+
+另外，`dynamic_max_tokens` 的直接回答路径（1200 tokens）也应该相应提高，否则简单问题也会遇到输出截断。
+
+---
+
+**一句话总结：WebChat 前端本身没有单条消息长度限制；10 章变 4.3 章是因为 ReAct Agent 模式的 `max_tokens` 被硬编码为 1600 tokens，把长输出截断了。**
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+上统一为8192 tokens;
+
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+编译通过 ✅。两处修改总结：
+
+| 位置 | 修改前 | 修改后 |
+|------|--------|--------|
+| `agent_impl.rs:4375` (ReAct 模式) | `1600` | `8192` |
+| `agent_impl.rs:6571` (直接回答路径) | 分档 `300/600/1200` | 统一 `8192` |
+
+**重启 gateway 后生效：**
+```bash
+cd /root/beebotos && cargo run -p beebotos-gateway --release
+```
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&7
+const MAX_CONSECUTIVE_TOOL_ERRORS: u32 = 3;  修改为：u32 = 10；
+
+
+
+

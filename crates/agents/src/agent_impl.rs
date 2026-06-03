@@ -2786,10 +2786,20 @@ impl Agent {
 
         let mut final_params = extra_params;
         final_params.insert("tool_choice".to_string(), "none".to_string());
-        llm.call_llm_tool_turn(loop_messages, tools, Some(final_params))
-            .await
-            .map(|turn| Self::cleanup_thinking_process(&turn.content))
-            .map_err(|e| AgentError::Execution(format!("Forced final answer failed: {}", e)))
+        const FINAL_ANSWER_TIMEOUT_SECS: u64 = 30;
+        let turn = tokio::time::timeout(
+            std::time::Duration::from_secs(FINAL_ANSWER_TIMEOUT_SECS),
+            llm.call_llm_tool_turn(loop_messages, tools, Some(final_params)),
+        )
+        .await
+        .map_err(|_| {
+            AgentError::Execution(format!(
+                "Forced final answer timed out after {}s",
+                FINAL_ANSWER_TIMEOUT_SECS
+            ))
+        })?
+        .map_err(|e| AgentError::Execution(format!("Forced final answer failed: {}", e)))?;
+        Ok(Self::cleanup_thinking_process(&turn.content))
     }
 
     /// Extract user input text from a task.
@@ -4362,7 +4372,7 @@ impl Agent {
             )
             .await;
         extra_params.insert("tool_choice".to_string(), "auto".to_string());
-        extra_params.insert("max_tokens".to_string(), "1600".to_string());
+        extra_params.insert("max_tokens".to_string(), "8192".to_string());
         if let Ok(json) = serde_json::to_string(&tools) {
             extra_params.insert("tools_json".to_string(), json);
         }
@@ -4385,7 +4395,7 @@ impl Agent {
         )
         .await;
         // 🛡️ Circuit-breaker: abort if the same tool keeps failing.
-        const MAX_CONSECUTIVE_TOOL_ERRORS: u32 = 3;
+        const MAX_CONSECUTIVE_TOOL_ERRORS: u32 = 10;
         const LLM_TURN_TIMEOUT_SECS: u64 = 30;
         let mut consecutive_tool_errors: u32 = 0;
 
@@ -6560,13 +6570,7 @@ impl Agent {
 
         // 🟢 P2 FIX: Dynamic max_tokens based on message complexity
         // 🆕 SKILL MATCHING V2: Removed hardcoded generative skill exclusions.
-        let dynamic_max_tokens = if input_text.chars().count() < 30 {
-            "300".to_string()
-        } else if input_text.chars().count() < 100 {
-            "600".to_string()
-        } else {
-            "1200".to_string()
-        };
+        let dynamic_max_tokens = "8192".to_string();
         extra_params.insert("max_tokens".to_string(), dynamic_max_tokens);
 
         // 🆕 OPTIMIZATION PHASE 1: Intent-aware tool filtering with Toolsets

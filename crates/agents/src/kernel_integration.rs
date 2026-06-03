@@ -268,7 +268,7 @@ pub struct KernelTaskRequest {
 /// - Health monitoring
 pub struct AgentKernelTask {
     config: KernelAgentConfig,
-    agent: RwLock<Agent>,
+    agent: Arc<RwLock<Agent>>,
     task_rx: RwLock<mpsc::UnboundedReceiver<KernelTaskRequest>>,
     task_tx: mpsc::UnboundedSender<KernelTaskRequest>,
     state_manager: Option<crate::StateManagerHandle>,
@@ -285,7 +285,7 @@ impl AgentKernelTask {
 
         Self {
             config,
-            agent: RwLock::new(agent),
+            agent: Arc::new(RwLock::new(agent)),
             task_rx: RwLock::new(task_rx),
             task_tx,
             state_manager,
@@ -454,25 +454,34 @@ impl AgentKernelTask {
                     drop(agent);
                     Err(AgentError::Timeout(format!("Task {} interrupted", task_id)))
                 } else {
-                    let execution = async {
-                        let agent = self.agent.read().await;
+                    let agent_lock = Arc::clone(&self.agent);
+                    let mut execution = Some(tokio::spawn(async move {
+                        let agent = agent_lock.read().await;
                         agent.execute_task(task).await
-                    };
+                    }));
                     let timeout =
                         tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs));
                     tokio::pin!(timeout);
 
                     tokio::select! {
-                        result = execution => result,
+                        result = async { execution.take().unwrap().await } => {
+                            match result {
+                                Ok(r) => r,
+                                Err(e) => Err(AgentError::Execution(format!(
+                                    "Task execution panicked: {}", e
+                                ))),
+                            }
+                        }
                         _ = &mut timeout => {
                             warn!(
                                 "Agent {} task {} timed out after {}s",
                                 self.config.agent_id, task_id, timeout_secs
                             );
 
-                            // `Agent::execute_task` normally returns the in-memory
-                            // agent to Idle. If the future is cancelled by timeout,
-                            // do that cleanup here before accepting the next request.
+                            if let Some(handle) = execution.take() {
+                                handle.abort();
+                            }
+
                             let agent = self.agent.read().await;
                             *agent.state.lock().unwrap() = AgentState::Idle;
                             drop(agent);
@@ -496,6 +505,10 @@ impl AgentKernelTask {
                                 );
                             }
 
+                            if let Some(handle) = execution.take() {
+                                handle.abort();
+                            }
+
                             let agent = self.agent.read().await;
                             *agent.state.lock().unwrap() = AgentState::Idle;
                             drop(agent);
@@ -505,18 +518,34 @@ impl AgentKernelTask {
                     }
                 }
             } else {
-                match tokio::time::timeout(tokio::time::Duration::from_secs(timeout_secs), async {
-                    let agent = self.agent.read().await;
-                    agent.execute_task(task).await
-                })
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => {
+                let task_for_spawn = task.clone();
+                let agent_lock = Arc::clone(&self.agent);
+                let mut execution = Some(tokio::spawn(async move {
+                    let agent = agent_lock.read().await;
+                    agent.execute_task(task_for_spawn).await
+                }));
+                let timeout =
+                    tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs));
+                tokio::pin!(timeout);
+
+                tokio::select! {
+                    result = async { execution.take().unwrap().await } => {
+                        match result {
+                            Ok(r) => r,
+                            Err(e) => Err(AgentError::Execution(format!(
+                                "Task execution panicked: {}", e
+                            ))),
+                        }
+                    }
+                    _ = &mut timeout => {
                         warn!(
                             "Agent {} task {} timed out after {}s",
                             self.config.agent_id, task_id, timeout_secs
                         );
+
+                        if let Some(handle) = execution.take() {
+                            handle.abort();
+                        }
 
                         let agent = self.agent.read().await;
                         *agent.state.lock().unwrap() = AgentState::Idle;
@@ -530,18 +559,34 @@ impl AgentKernelTask {
                 }
             }
         } else {
-            match tokio::time::timeout(tokio::time::Duration::from_secs(timeout_secs), async {
-                let agent = self.agent.read().await;
-                agent.execute_task(task).await
-            })
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => {
+            let task_for_spawn = task.clone();
+            let agent_lock = Arc::clone(&self.agent);
+            let mut execution = Some(tokio::spawn(async move {
+                let agent = agent_lock.read().await;
+                agent.execute_task(task_for_spawn).await
+            }));
+            let timeout =
+                tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs));
+            tokio::pin!(timeout);
+
+            tokio::select! {
+                result = async { execution.take().unwrap().await } => {
+                    match result {
+                        Ok(r) => r,
+                        Err(e) => Err(AgentError::Execution(format!(
+                            "Task execution panicked: {}", e
+                        ))),
+                    }
+                }
+                _ = &mut timeout => {
                     warn!(
                         "Agent {} task {} timed out after {}s",
                         self.config.agent_id, task_id, timeout_secs
                     );
+
+                    if let Some(handle) = execution.take() {
+                        handle.abort();
+                    }
 
                     let agent = self.agent.read().await;
                     *agent.state.lock().unwrap() = AgentState::Idle;

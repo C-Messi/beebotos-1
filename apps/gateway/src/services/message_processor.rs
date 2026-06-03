@@ -3218,7 +3218,27 @@ Rules:
         // P1 FIX: 实际使用构建的 context，而非忽略它
         let mut contextual_message = message.clone();
         contextual_message.content = context;
-        self.llm_service.process_message(&contextual_message).await
+
+        // 🆕 FIX: 为 simple query mode 的 LLM 调用增加超时保护，防止
+        // provider 层无响应时卡住整个消息处理器。
+        let llm_timeout = tokio::time::Duration::from_secs(60);
+        match tokio::time::timeout(llm_timeout, self.llm_service.process_message(&contextual_message)).await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                warn!(
+                    "⏱️ LLM call timed out after {}s in simple query mode",
+                    llm_timeout.as_secs()
+                );
+                Err(GatewayError::Internal {
+                    message: format!(
+                        "LLM 响应超时 ({}s)，请稍后重试",
+                        llm_timeout.as_secs()
+                    ),
+                    correlation_id: uuid::Uuid::new_v4().to_string(),
+                })
+            }
+        }
     }
 
     /// 发送回复
