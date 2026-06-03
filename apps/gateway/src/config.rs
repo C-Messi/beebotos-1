@@ -903,8 +903,9 @@ impl BeeBotOSConfig {
             self.image_generation.base_url = base_url;
         }
 
-        if let Some(api_key) =
-            env_string("IMAGE_GENERATION_API_KEY").or_else(|| env_string("ARK_API_KEY"))
+        if let Some(api_key) = env_string("IMAGE_GENERATION_API_KEY")
+            .or_else(|| env_string("ARK_API_KEY"))
+            .or_else(|| env_string("VIDEO_GENERATION_API_KEY"))
         {
             self.image_generation.api_key = Some(api_key);
         }
@@ -1333,10 +1334,15 @@ mod tests {
     #[test]
     fn image_generation_config_uses_ark_api_key_fallback() {
         let _lock = IMAGE_GENERATION_ENV_LOCK.lock().unwrap();
-        let _env = EnvVarGuard::new(&["IMAGE_GENERATION_API_KEY", "ARK_API_KEY"]);
+        let _env = EnvVarGuard::new(&[
+            "IMAGE_GENERATION_API_KEY",
+            "ARK_API_KEY",
+            "VIDEO_GENERATION_API_KEY",
+        ]);
 
         std::env::remove_var("IMAGE_GENERATION_API_KEY");
         std::env::set_var("ARK_API_KEY", "ark-test-key");
+        std::env::set_var("VIDEO_GENERATION_API_KEY", "video-test-key");
 
         let mut config = BeeBotOSConfig::default();
         config.apply_image_generation_env();
@@ -1344,6 +1350,28 @@ mod tests {
         assert_eq!(
             config.image_generation.api_key.as_deref(),
             Some("ark-test-key")
+        );
+    }
+
+    #[test]
+    fn image_generation_config_uses_video_api_key_fallback() {
+        let _lock = IMAGE_GENERATION_ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::new(&[
+            "IMAGE_GENERATION_API_KEY",
+            "ARK_API_KEY",
+            "VIDEO_GENERATION_API_KEY",
+        ]);
+
+        std::env::remove_var("IMAGE_GENERATION_API_KEY");
+        std::env::remove_var("ARK_API_KEY");
+        std::env::set_var("VIDEO_GENERATION_API_KEY", "video-test-key");
+
+        let mut config = BeeBotOSConfig::default();
+        config.apply_image_generation_env();
+
+        assert_eq!(
+            config.image_generation.api_key.as_deref(),
+            Some("video-test-key")
         );
     }
 
