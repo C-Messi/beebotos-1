@@ -565,11 +565,11 @@ fn default_voice_marketing_play_times() -> u8 {
 }
 
 fn default_image_generation_base_url() -> String {
-    "https://api.openai.com/v1".to_string()
+    "https://ark.cn-beijing.volces.com/api/v3".to_string()
 }
 
 fn default_image_generation_model() -> String {
-    "gpt-image-2".to_string()
+    "doubao-seedream-5-0-260128".to_string()
 }
 
 fn default_image_generation_timeout() -> u64 {
@@ -903,7 +903,9 @@ impl BeeBotOSConfig {
             self.image_generation.base_url = base_url;
         }
 
-        if let Some(api_key) = env_string("IMAGE_GENERATION_API_KEY") {
+        if let Some(api_key) =
+            env_string("IMAGE_GENERATION_API_KEY").or_else(|| env_string("ARK_API_KEY"))
+        {
             self.image_generation.api_key = Some(api_key);
         }
 
@@ -1259,9 +1261,9 @@ mod tests {
     fn default_image_generation_config_is_empty_and_safe() {
         let config = ImageGenerationConfig::default();
 
-        assert_eq!(config.base_url, "https://api.openai.com/v1");
+        assert_eq!(config.base_url, "https://ark.cn-beijing.volces.com/api/v3");
         assert!(config.api_key.is_none());
-        assert_eq!(config.model, "gpt-image-2");
+        assert_eq!(config.model, "doubao-seedream-5-0-260128");
         assert_eq!(config.timeout_seconds, 180);
     }
 
@@ -1291,7 +1293,7 @@ mod tests {
 
         std::env::set_var("IMAGE_GENERATION_BASE_URL", "https://relay.example/v1");
         std::env::set_var("IMAGE_GENERATION_API_KEY", "img-test-key");
-        std::env::set_var("IMAGE_GENERATION_MODEL", "gpt-image-2");
+        std::env::set_var("IMAGE_GENERATION_MODEL", "doubao-seedream-5.0-lite");
 
         let mut config = BeeBotOSConfig::default();
         config.apply_image_generation_env();
@@ -1301,7 +1303,7 @@ mod tests {
             config.image_generation.api_key.as_deref(),
             Some("img-test-key")
         );
-        assert_eq!(config.image_generation.model, "gpt-image-2");
+        assert_eq!(config.image_generation.model, "doubao-seedream-5.0-lite");
     }
 
     #[test]
@@ -1315,7 +1317,7 @@ mod tests {
 
         std::env::set_var("IMAGE_GENERATION_BASE_URL", " https://relay.example/v1 ");
         std::env::set_var("IMAGE_GENERATION_API_KEY", " img-test-key ");
-        std::env::set_var("IMAGE_GENERATION_MODEL", " gpt-image-2 ");
+        std::env::set_var("IMAGE_GENERATION_MODEL", " doubao-seedream-5.0-lite ");
 
         let mut config = BeeBotOSConfig::default();
         config.apply_image_generation_env();
@@ -1325,7 +1327,24 @@ mod tests {
             config.image_generation.api_key.as_deref(),
             Some("img-test-key")
         );
-        assert_eq!(config.image_generation.model, "gpt-image-2");
+        assert_eq!(config.image_generation.model, "doubao-seedream-5.0-lite");
+    }
+
+    #[test]
+    fn image_generation_config_uses_ark_api_key_fallback() {
+        let _lock = IMAGE_GENERATION_ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::new(&["IMAGE_GENERATION_API_KEY", "ARK_API_KEY"]);
+
+        std::env::remove_var("IMAGE_GENERATION_API_KEY");
+        std::env::set_var("ARK_API_KEY", "ark-test-key");
+
+        let mut config = BeeBotOSConfig::default();
+        config.apply_image_generation_env();
+
+        assert_eq!(
+            config.image_generation.api_key.as_deref(),
+            Some("ark-test-key")
+        );
     }
 
     #[test]

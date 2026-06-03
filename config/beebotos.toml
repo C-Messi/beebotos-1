@@ -131,7 +131,7 @@ key_path = "data/certs/server.key"
 mutual_tls = false
 
 [image_generation]
-base_url = "https://api.openai.com/v1"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
 api_key = ""
-model = "gpt-image-2"
+model = "doubao-seedream-5-0-260128"
 timeout_seconds = 180

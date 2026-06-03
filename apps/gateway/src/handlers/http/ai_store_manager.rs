@@ -99,6 +99,17 @@ struct VolcengineVideoTaskError {
     message: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct VolcengineApiErrorEnvelope {
+    error: Option<VolcengineApiError>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct VolcengineApiError {
+    code: Option<String>,
+    message: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CreateGraphicPackageRequest {
     pub product: String,
@@ -190,7 +201,7 @@ fn video_generation_config_required_response(model: &str) -> VideoTaskResponse {
         provider: "volcengine-ark".to_string(),
         model: model.to_string(),
         status: "blocked".to_string(),
-        message: "火山方舟视频生成未配置 VIDEO_GENERATION_API_KEY；开通 Seedance 2.0 \
+        message: "火山方舟视频生成未配置 VIDEO_GENERATION_API_KEY；开通 Seedance \
                   并配置后即可提交真实任务。"
             .to_string(),
         preview_url: None,
@@ -200,20 +211,51 @@ fn video_generation_config_required_response(model: &str) -> VideoTaskResponse {
 fn video_upstream_unavailable_response(
     model: &str,
     status: reqwest::StatusCode,
+    error: Option<&VolcengineApiError>,
 ) -> VideoTaskResponse {
     let blocked =
         matches!(status.as_u16(), 401 | 402 | 403) || status == reqwest::StatusCode::NOT_FOUND;
+    let message = video_upstream_error_message(model, status, blocked, error);
     VideoTaskResponse {
         id: "seedance2-upstream-unavailable".to_string(),
         provider: "volcengine-ark".to_string(),
         model: model.to_string(),
         status: if blocked { "blocked" } else { "failed" }.to_string(),
-        message: if blocked {
-            format!("火山方舟鉴权、余额或模型订阅未就绪: HTTP {}", status)
-        } else {
-            format!("火山方舟视频任务提交失败: HTTP {}", status)
-        },
+        message,
         preview_url: None,
+    }
+}
+
+fn video_upstream_error_message(
+    model: &str,
+    status: reqwest::StatusCode,
+    blocked: bool,
+    error: Option<&VolcengineApiError>,
+) -> String {
+    let code = error.and_then(|error| error.code.as_deref()).unwrap_or("");
+    if code == "ModelNotOpen" {
+        return format!(
+            "火山方舟模型未开通: {}。请在 Ark 控制台开通该模型服务后重试。",
+            model
+        );
+    }
+
+    if let Some(message) = error
+        .and_then(|error| error.message.as_deref())
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+    {
+        return if code.is_empty() {
+            format!("火山方舟返回错误: {}", message)
+        } else {
+            format!("火山方舟返回错误 {}: {}", code, message)
+        };
+    }
+
+    if blocked {
+        format!("火山方舟鉴权、余额或模型订阅未就绪: HTTP {}", status)
+    } else {
+        format!("火山方舟视频任务提交失败: HTTP {}", status)
     }
 }
 
@@ -226,7 +268,7 @@ fn video_create_to_response(
         provider: "volcengine-ark".to_string(),
         model: model.to_string(),
         status: "queued".to_string(),
-        message: "Seedance 2.0 视频任务已提交，正在排队生成。".to_string(),
+        message: "Seedance 视频任务已提交，正在排队生成。".to_string(),
         preview_url: None,
     }
 }
@@ -245,13 +287,13 @@ fn video_status_to_response(
         .error
         .and_then(|error| error.message)
         .unwrap_or_else(|| match status {
-            "completed" => "Seedance 2.0 视频已生成。".to_string(),
-            "queued" => "Seedance 2.0 视频任务排队中。".to_string(),
-            "running" => "Seedance 2.0 视频生成中。".to_string(),
-            "expired" => "Seedance 2.0 视频任务已超时。".to_string(),
-            "cancelled" => "Seedance 2.0 视频任务已取消。".to_string(),
-            "failed" => "Seedance 2.0 视频任务失败。".to_string(),
-            _ => "Seedance 2.0 视频任务状态已更新。".to_string(),
+            "completed" => "Seedance 视频已生成。".to_string(),
+            "queued" => "Seedance 视频任务排队中。".to_string(),
+            "running" => "Seedance 视频生成中。".to_string(),
+            "expired" => "Seedance 视频任务已超时。".to_string(),
+            "cancelled" => "Seedance 视频任务已取消。".to_string(),
+            "failed" => "Seedance 视频任务失败。".to_string(),
+            _ => "Seedance 视频任务状态已更新。".to_string(),
         });
 
     VideoTaskResponse {
@@ -469,21 +511,24 @@ pub struct GraphicImageResponse {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct OpenAIImageRequest {
+struct SeedreamImageRequest {
     model: String,
     prompt: String,
     size: String,
-    quality: String,
-    n: u8,
+    output_format: String,
+    watermark: bool,
+    sequential_image_generation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-struct OpenAIImageResponse {
-    data: Vec<OpenAIImageData>,
+struct SeedreamImageResponse {
+    data: Vec<SeedreamImageData>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-struct OpenAIImageData {
+struct SeedreamImageData {
     b64_json: Option<String>,
     url: Option<String>,
 }
@@ -491,14 +536,56 @@ struct OpenAIImageData {
 fn build_image_generation_payload(
     model: &str,
     req: &CreateGraphicImageRequest,
-) -> OpenAIImageRequest {
-    OpenAIImageRequest {
+) -> SeedreamImageRequest {
+    build_image_generation_payload_with_image(model, req, None, None)
+}
+
+fn build_image_generation_payload_with_image(
+    model: &str,
+    req: &CreateGraphicImageRequest,
+    image_mime_type: Option<&str>,
+    image_b64: Option<&str>,
+) -> SeedreamImageRequest {
+    let image = image_mime_type
+        .zip(image_b64)
+        .map(|(mime_type, b64)| vec![graphic_image_data_uri(mime_type, b64)]);
+
+    SeedreamImageRequest {
         model: model.to_string(),
-        prompt: req.prompt.trim().to_string(),
-        size: req.size.trim().to_string(),
-        quality: req.quality.trim().to_string(),
-        n: 1,
+        prompt: seedream_prompt(req),
+        size: seedream_quality(&req.quality).to_string(),
+        output_format: "png".to_string(),
+        watermark: false,
+        sequential_image_generation: "disabled".to_string(),
+        image,
     }
+}
+
+fn seedream_prompt(req: &CreateGraphicImageRequest) -> String {
+    format!(
+        "{}\n画幅比例：{}。",
+        req.prompt.trim(),
+        seedream_aspect_ratio(&req.size)
+    )
+}
+
+fn seedream_aspect_ratio(size: &str) -> &'static str {
+    match size.trim() {
+        "1024x1536" => "3:4",
+        "1536x1024" => "3:2",
+        _ => "1:1",
+    }
+}
+
+fn seedream_quality(quality: &str) -> &'static str {
+    match quality.trim() {
+        "high" => "4K",
+        _ => "2K",
+    }
+}
+
+fn graphic_image_data_uri(mime_type: &str, b64: &str) -> String {
+    format!("data:{};base64,{}", mime_type.trim(), b64.trim())
 }
 
 fn validate_graphic_image_request(req: &CreateGraphicImageRequest) -> Result<(), GatewayError> {
@@ -562,7 +649,7 @@ fn validate_graphic_image_edit_request(
 fn image_response_to_graphic_result(
     product: &str,
     platform: &str,
-    response: OpenAIImageResponse,
+    response: SeedreamImageResponse,
 ) -> Result<GraphicImageResponse, GatewayError> {
     let first = response
         .data
@@ -586,10 +673,6 @@ fn image_response_to_graphic_result(
 
 fn image_generation_url(base_url: &str) -> String {
     format!("{}/images/generations", base_url.trim_end_matches('/'))
-}
-
-fn image_edit_url(base_url: &str) -> String {
-    format!("{}/images/edits", base_url.trim_end_matches('/'))
 }
 
 fn image_model_unavailable_message(status: reqwest::StatusCode) -> String {
@@ -634,7 +717,16 @@ pub async fn create_video_task(
 
     let status = response.status();
     if !status.is_success() {
-        return Ok(Json(video_upstream_unavailable_response(&model, status)));
+        let upstream_error = response
+            .json::<VolcengineApiErrorEnvelope>()
+            .await
+            .ok()
+            .and_then(|envelope| envelope.error);
+        return Ok(Json(video_upstream_unavailable_response(
+            &model,
+            status,
+            upstream_error.as_ref(),
+        )));
     }
 
     let created = response
@@ -713,7 +805,7 @@ pub async fn create_graphic_image(
     }
 
     let image_response = response
-        .json::<OpenAIImageResponse>()
+        .json::<SeedreamImageResponse>()
         .await
         .map_err(|err| GatewayError::internal(format!("图片生成响应解析失败: {}", err)))?;
     let result = image_response_to_graphic_result(&req.product, &req.platform, image_response)?;
@@ -728,7 +820,7 @@ pub async fn create_graphic_image_edit(
     require_any_role(&user, &["user", "admin"])?;
 
     validate_graphic_image_edit_request(&req)?;
-    let image_bytes = decode_graphic_image_upload(&req)?;
+    let _ = decode_graphic_image_upload(&req)?;
 
     let config = BeeBotOSConfig::load()
         .map_err(|err| GatewayError::internal(format!("加载图片生成配置失败: {}", err)))?;
@@ -739,17 +831,18 @@ pub async fn create_graphic_image_edit(
         .filter(|key| !key.trim().is_empty())
         .ok_or_else(|| GatewayError::bad_request("图片生成未配置"))?;
 
-    let image_part = reqwest::multipart::Part::bytes(image_bytes)
-        .file_name(req.image_filename.clone())
-        .mime_str(&req.image_mime_type)
-        .map_err(|err| GatewayError::bad_request(format!("产品图格式错误: {}", err)))?;
-    let form = reqwest::multipart::Form::new()
-        .text("model", config.image_generation.model.clone())
-        .text("prompt", req.prompt.trim().to_string())
-        .text("size", req.size.trim().to_string())
-        .text("quality", req.quality.trim().to_string())
-        .text("n", "1")
-        .part("image", image_part);
+    let payload = build_image_generation_payload_with_image(
+        &config.image_generation.model,
+        &CreateGraphicImageRequest {
+            product: req.product.clone(),
+            platform: req.platform.clone(),
+            prompt: req.prompt.clone(),
+            size: req.size.clone(),
+            quality: req.quality.clone(),
+        },
+        Some(&req.image_mime_type),
+        Some(&req.image_b64),
+    );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
             config.image_generation.timeout_seconds,
@@ -758,9 +851,9 @@ pub async fn create_graphic_image_edit(
         .map_err(|err| GatewayError::internal(format!("图片编辑客户端创建失败: {}", err)))?;
 
     let response = client
-        .post(image_edit_url(&config.image_generation.base_url))
+        .post(image_generation_url(&config.image_generation.base_url))
         .bearer_auth(api_key)
-        .multipart(form)
+        .json(&payload)
         .send()
         .await
         .map_err(|err| GatewayError::internal(format!("图片编辑请求失败: {}", err)))?;
@@ -776,7 +869,7 @@ pub async fn create_graphic_image_edit(
     }
 
     let image_response = response
-        .json::<OpenAIImageResponse>()
+        .json::<SeedreamImageResponse>()
         .await
         .map_err(|err| GatewayError::internal(format!("图片编辑响应解析失败: {}", err)))?;
     let result = image_response_to_graphic_result(&req.product, &req.platform, image_response)?;
@@ -825,7 +918,13 @@ pub async fn get_video_task(
 
     let status = response.status();
     if !status.is_success() {
-        let mut fallback = video_upstream_unavailable_response(&model, status);
+        let upstream_error = response
+            .json::<VolcengineApiErrorEnvelope>()
+            .await
+            .ok()
+            .and_then(|envelope| envelope.error);
+        let mut fallback =
+            video_upstream_unavailable_response(&model, status, upstream_error.as_ref());
         fallback.id = id;
         return Ok(Json(fallback));
     }
@@ -916,6 +1015,24 @@ mod tests {
         assert_eq!(response.status, "blocked");
         assert!(response.message.contains("VIDEO_GENERATION_API_KEY"));
         assert!(response.preview_url.is_none());
+    }
+
+    #[test]
+    fn seedance_model_not_open_response_is_actionable() {
+        let error = VolcengineApiError {
+            code: Some("ModelNotOpen".to_string()),
+            message: Some("account has not activated the model".to_string()),
+        };
+
+        let response = video_upstream_unavailable_response(
+            "doubao-seedance-2-0-260128",
+            reqwest::StatusCode::NOT_FOUND,
+            Some(&error),
+        );
+
+        assert_eq!(response.status, "blocked");
+        assert!(response.message.contains("模型未开通"));
+        assert!(response.message.contains("doubao-seedance-2-0-260128"));
     }
 
     #[test]
@@ -1035,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn image_payload_uses_configured_model_and_prompt() {
+    fn image_payload_targets_volcengine_seedream_options() {
         let req = CreateGraphicImageRequest {
             product: "云柑礼盒".to_string(),
             platform: "小红书".to_string(),
@@ -1044,20 +1161,47 @@ mod tests {
             quality: "medium".to_string(),
         };
 
-        let payload = build_image_generation_payload("gpt-image-1", &req);
+        let payload = build_image_generation_payload("doubao-seedream-5-0-260128", &req);
 
-        assert_eq!(payload.model, "gpt-image-1");
-        assert_eq!(payload.prompt, "生成海报");
-        assert_eq!(payload.size, "1024x1536");
-        assert_eq!(payload.quality, "medium");
-        assert_eq!(payload.n, 1);
+        assert_eq!(payload.model, "doubao-seedream-5-0-260128");
+        assert!(payload.prompt.contains("生成海报"));
+        assert!(payload.prompt.contains("3:4"));
+        assert_eq!(payload.size, "2K");
+        assert_eq!(payload.output_format, "png");
+        assert!(!payload.watermark);
+        assert_eq!(payload.sequential_image_generation, "disabled");
+        assert!(payload.image.is_none());
     }
 
     #[test]
-    fn image_edit_url_uses_edits_endpoint() {
+    fn image_payload_can_embed_reference_image_as_data_uri() {
+        let req = CreateGraphicImageRequest {
+            product: "云柑礼盒".to_string(),
+            platform: "小红书".to_string(),
+            prompt: "生成营销图".to_string(),
+            size: "1024x1024".to_string(),
+            quality: "high".to_string(),
+        };
+
+        let payload = build_image_generation_payload_with_image(
+            "doubao-seedream-5-0-260128",
+            &req,
+            Some("image/png"),
+            Some("abc123"),
+        );
+
+        assert_eq!(payload.size, "4K");
         assert_eq!(
-            image_edit_url("https://image.example/"),
-            "https://image.example/images/edits"
+            payload.image.as_deref(),
+            Some(&["data:image/png;base64,abc123".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn image_generation_url_uses_generations_endpoint() {
+        assert_eq!(
+            image_generation_url("https://image.example/"),
+            "https://image.example/images/generations"
         );
     }
 
@@ -1082,8 +1226,8 @@ mod tests {
 
     #[test]
     fn image_result_normalizes_base64_response() {
-        let response = OpenAIImageResponse {
-            data: vec![OpenAIImageData {
+        let response = SeedreamImageResponse {
+            data: vec![SeedreamImageData {
                 b64_json: Some("abc123".to_string()),
                 url: None,
             }],
@@ -1099,7 +1243,7 @@ mod tests {
 
     #[test]
     fn image_result_rejects_empty_response() {
-        let response = OpenAIImageResponse { data: vec![] };
+        let response = SeedreamImageResponse { data: vec![] };
 
         let result = image_response_to_graphic_result("云柑礼盒", "小红书", response);
 
