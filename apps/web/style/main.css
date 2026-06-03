@@ -1208,7 +1208,8 @@ body {
 }
 
 .ai-video-result-list,
-.ai-video-queue-list {
+.ai-video-queue-list,
+.ai-video-preview-list {
     display: grid;
     gap: 10px;
 }

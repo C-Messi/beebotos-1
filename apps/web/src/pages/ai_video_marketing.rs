@@ -304,6 +304,11 @@ fn video_marketing_status_from_state(
 }
 
 fn upsert_video_task(queue: &mut Vec<VideoTaskResponse>, task: VideoTaskResponse) {
+    let task = queue
+        .iter()
+        .find(|item| item.id == task.id)
+        .map(|previous| merge_video_task_update(task.clone(), previous))
+        .unwrap_or(task);
     queue.retain(|item| item.id != task.id);
     queue.insert(0, task);
     queue.truncate(VIDEO_TASK_QUEUE_LIMIT);
@@ -330,6 +335,14 @@ fn merge_video_task_update(
         updated.submitted_at = previous.submitted_at.clone();
     }
     updated
+}
+
+fn completed_video_previews(tasks: &[VideoTaskResponse]) -> Vec<VideoTaskResponse> {
+    tasks
+        .iter()
+        .filter(|task| task.status == "completed" && task.preview_url.is_some())
+        .cloned()
+        .collect()
 }
 
 #[component]
@@ -679,9 +692,12 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                             </div>
                         }.into_any()
                     } else {
+                        let options = generation_options.get();
                         view! {
                             <div class="ai-video-queue-list">
-                                {tasks.into_iter().map(|task| view! { <VideoTaskCard task=task /> }).collect_view()}
+                                {tasks.into_iter().map(|task| {
+                                    view! { <VideoTaskCard task=task options=options.clone() /> }
+                                }).collect_view()}
                             </div>
                         }.into_any()
                     }
@@ -696,16 +712,20 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                     <h2>"视频预览"</h2>
                 </div>
                 {move || {
-                    let completed = video_tasks
-                        .get()
-                        .into_iter()
-                        .find(|task| task.status == "completed" && task.preview_url.is_some());
-                    if let Some(task) = completed {
-                        view! { <VideoPreview task=task /> }.into_any()
-                    } else {
+                    let completed = completed_video_previews(&video_tasks.get());
+                    if completed.is_empty() {
                         view! {
                             <div class="ai-video-task-card">
                                 "视频完成后会在这里直接播放。"
+                            </div>
+                        }.into_any()
+                    } else {
+                        let options = generation_options.get();
+                        view! {
+                            <div class="ai-video-preview-list">
+                                {completed.into_iter().map(|task| {
+                                    view! { <VideoPreview task=task options=options.clone() /> }
+                                }).collect_view()}
                             </div>
                         }.into_any()
                     }
@@ -763,7 +783,7 @@ fn ResultItem(result: VideoMarketingResult) -> impl IntoView {
 }
 
 #[component]
-fn VideoTaskCard(task: VideoTaskResponse) -> impl IntoView {
+fn VideoTaskCard(task: VideoTaskResponse, options: VideoGenerationOptions) -> impl IntoView {
     let status_label = video_task_status_label(&task.status);
     view! {
         <article class="ai-video-task-card">
@@ -781,7 +801,7 @@ fn VideoTaskCard(task: VideoTaskResponse) -> impl IntoView {
             </div>
             <div>
                 <span>"参数"</span>
-                <strong>{format_video_options(&task)}</strong>
+                <strong>{format_video_options_with_defaults(&task, &options)}</strong>
             </div>
             <p>{task.message.clone()}</p>
             {task.updated_at.clone().map(|updated_at| view! {
@@ -792,28 +812,28 @@ fn VideoTaskCard(task: VideoTaskResponse) -> impl IntoView {
 }
 
 #[component]
-fn VideoPreview(task: VideoTaskResponse) -> impl IntoView {
+fn VideoPreview(task: VideoTaskResponse, options: VideoGenerationOptions) -> impl IntoView {
     let url = task.preview_url.clone().unwrap_or_default();
     view! {
         <article class="ai-video-preview-card">
             <video class="ai-video-player" controls src=url.clone()></video>
             <div>
                 <strong>{task.model.clone()}</strong>
-                <span>{format_video_options(&task)}</span>
+                <span>{format_video_options_with_defaults(&task, &options)}</span>
                 <a class="btn btn-secondary" href=url target="_blank" rel="noopener noreferrer">"查看原视频"</a>
             </div>
         </article>
     }
 }
 
-fn format_video_options(task: &VideoTaskResponse) -> String {
-    let resolution = task.resolution.as_deref().unwrap_or("-");
-    let ratio = task.ratio.as_deref().unwrap_or("-");
-    let duration = task
-        .duration_seconds
-        .map(|duration| format!("{}s", duration))
-        .unwrap_or_else(|| "-".to_string());
-    format!("{} / {} / {}", resolution, ratio, duration)
+fn format_video_options_with_defaults(
+    task: &VideoTaskResponse,
+    options: &VideoGenerationOptions,
+) -> String {
+    let resolution = task.resolution.as_deref().unwrap_or(&options.resolution);
+    let ratio = task.ratio.as_deref().unwrap_or(&options.ratio);
+    let duration = task.duration_seconds.unwrap_or(options.duration_seconds);
+    format!("{} / {} / {}s", resolution, ratio, duration)
 }
 
 #[cfg(test)]
@@ -938,6 +958,51 @@ mod tests {
             queue[0].preview_url.as_deref(),
             Some("https://cdn.example/video.mp4")
         );
+    }
+
+    #[test]
+    fn video_task_queue_preserves_existing_options_when_history_lacks_them() {
+        let mut queue = vec![sample_video_task("task-1", "queued", None)];
+        let mut history_task =
+            sample_video_task("task-1", "completed", Some("https://cdn.example/video.mp4"));
+        history_task.resolution = None;
+        history_task.ratio = None;
+        history_task.duration_seconds = None;
+
+        upsert_video_task(&mut queue, history_task);
+
+        assert_eq!(queue[0].resolution.as_deref(), Some("720p"));
+        assert_eq!(queue[0].ratio.as_deref(), Some("9:16"));
+        assert_eq!(queue[0].duration_seconds, Some(8));
+    }
+
+    #[test]
+    fn video_options_display_uses_current_options_when_task_lacks_params() {
+        let mut task = sample_video_task("task-1", "completed", Some("https://cdn.example/a.mp4"));
+        task.resolution = None;
+        task.ratio = None;
+        task.duration_seconds = None;
+        let options = default_video_generation_options();
+
+        assert_eq!(
+            format_video_options_with_defaults(&task, &options),
+            "720p / 9:16 / 12s"
+        );
+    }
+
+    #[test]
+    fn completed_video_previews_include_all_completed_videos() {
+        let tasks = vec![
+            sample_video_task("task-1", "completed", Some("https://cdn.example/a.mp4")),
+            sample_video_task("task-2", "running", None),
+            sample_video_task("task-3", "completed", Some("https://cdn.example/b.mp4")),
+        ];
+
+        let previews = completed_video_previews(&tasks);
+
+        assert_eq!(previews.len(), 2);
+        assert_eq!(previews[0].id, "task-1");
+        assert_eq!(previews[1].id, "task-3");
     }
 
     #[test]
