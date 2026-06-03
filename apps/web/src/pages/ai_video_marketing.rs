@@ -16,6 +16,7 @@ use crate::utils::event_target_value;
 const VIDEO_TASK_POLL_INTERVAL_MS: u32 = 5_000;
 const VIDEO_TASK_MAX_POLLS: usize = 96;
 const VIDEO_TASK_QUEUE_LIMIT: usize = 20;
+const DEFAULT_VIDEO_PLATFORM: &str = "抖音";
 #[cfg(target_arch = "wasm32")]
 const VIDEO_TASK_QUEUE_STORAGE_KEY: &str = "beebotos_ai_video_marketing_tasks";
 #[cfg(target_arch = "wasm32")]
@@ -66,7 +67,7 @@ pub fn default_video_marketing_task() -> VideoMarketingTask {
         selling_points: "当季鲜果、顺丰冷链、送礼体面".to_string(),
         audience: "25-40 岁办公室人群".to_string(),
         goal: "新品种草".to_string(),
-        platform: "抖音".to_string(),
+        platform: DEFAULT_VIDEO_PLATFORM.to_string(),
         style: "真实测评".to_string(),
     }
 }
@@ -248,6 +249,7 @@ fn save_video_task_queue(_queue: &[VideoTaskResponse]) {}
 #[cfg(target_arch = "wasm32")]
 fn load_video_marketing_draft() -> VideoMarketingDraft {
     LocalStorage::get(VIDEO_MARKETING_DRAFT_STORAGE_KEY)
+        .map(normalize_video_marketing_draft)
         .unwrap_or_else(|_| default_video_marketing_draft())
 }
 
@@ -269,11 +271,16 @@ fn persist_video_marketing_draft(
     options: VideoGenerationOptions,
     package: Option<VideoPackageResponse>,
 ) {
-    save_video_marketing_draft(&VideoMarketingDraft {
+    save_video_marketing_draft(&normalize_video_marketing_draft(VideoMarketingDraft {
         task,
         options,
         package,
-    });
+    }));
+}
+
+fn normalize_video_marketing_draft(mut draft: VideoMarketingDraft) -> VideoMarketingDraft {
+    draft.task.platform = DEFAULT_VIDEO_PLATFORM.to_string();
+    draft
 }
 
 fn video_task_status_label(status: &str) -> &'static str {
@@ -572,17 +579,6 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                             options=vec!["新品种草", "促销转化", "老客复购", "直播预热"]
                             on_change=move |value| {
                                 set_task.update(|task| task.goal = value);
-                                set_package.set(None);
-                                set_task_status.set("待生成脚本包".to_string());
-                                persist_video_marketing_draft(task.get(), generation_options.get(), None);
-                            }
-                        />
-                        <SelectField
-                            label="发布平台"
-                            value=Signal::derive(move || task.get().platform)
-                            options=vec!["抖音", "快手", "视频号", "小红书"]
-                            on_change=move |value| {
-                                set_task.update(|task| task.platform = value);
                                 set_package.set(None);
                                 set_task_status.set("待生成脚本包".to_string());
                                 persist_video_marketing_draft(task.get(), generation_options.get(), None);
@@ -913,6 +909,20 @@ mod tests {
             "脚本包待审核"
         );
         assert_eq!(restored.options.duration_seconds, 12);
+    }
+
+    #[test]
+    fn video_marketing_draft_hides_platform_as_internal_default() {
+        let mut draft = VideoMarketingDraft {
+            task: default_video_marketing_task(),
+            options: default_video_generation_options(),
+            package: None,
+        };
+        draft.task.platform = "小红书".to_string();
+
+        let normalized = normalize_video_marketing_draft(draft);
+
+        assert_eq!(normalized.task.platform, DEFAULT_VIDEO_PLATFORM);
     }
 
     #[test]
