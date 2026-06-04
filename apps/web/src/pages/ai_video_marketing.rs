@@ -16,6 +16,7 @@ use crate::utils::event_target_value;
 const VIDEO_TASK_POLL_INTERVAL_MS: u32 = 5_000;
 const VIDEO_TASK_MAX_POLLS: usize = 96;
 const VIDEO_TASK_QUEUE_LIMIT: usize = 20;
+const DEFAULT_VIDEO_PLATFORM: &str = "抖音";
 #[cfg(target_arch = "wasm32")]
 const VIDEO_TASK_QUEUE_STORAGE_KEY: &str = "beebotos_ai_video_marketing_tasks";
 #[cfg(target_arch = "wasm32")]
@@ -66,7 +67,7 @@ pub fn default_video_marketing_task() -> VideoMarketingTask {
         selling_points: "当季鲜果、顺丰冷链、送礼体面".to_string(),
         audience: "25-40 岁办公室人群".to_string(),
         goal: "新品种草".to_string(),
-        platform: "抖音".to_string(),
+        platform: DEFAULT_VIDEO_PLATFORM.to_string(),
         style: "真实测评".to_string(),
     }
 }
@@ -248,6 +249,7 @@ fn save_video_task_queue(_queue: &[VideoTaskResponse]) {}
 #[cfg(target_arch = "wasm32")]
 fn load_video_marketing_draft() -> VideoMarketingDraft {
     LocalStorage::get(VIDEO_MARKETING_DRAFT_STORAGE_KEY)
+        .map(normalize_video_marketing_draft)
         .unwrap_or_else(|_| default_video_marketing_draft())
 }
 
@@ -269,11 +271,16 @@ fn persist_video_marketing_draft(
     options: VideoGenerationOptions,
     package: Option<VideoPackageResponse>,
 ) {
-    save_video_marketing_draft(&VideoMarketingDraft {
+    save_video_marketing_draft(&normalize_video_marketing_draft(VideoMarketingDraft {
         task,
         options,
         package,
-    });
+    }));
+}
+
+fn normalize_video_marketing_draft(mut draft: VideoMarketingDraft) -> VideoMarketingDraft {
+    draft.task.platform = DEFAULT_VIDEO_PLATFORM.to_string();
+    draft
 }
 
 fn video_task_status_label(status: &str) -> &'static str {
@@ -304,6 +311,11 @@ fn video_marketing_status_from_state(
 }
 
 fn upsert_video_task(queue: &mut Vec<VideoTaskResponse>, task: VideoTaskResponse) {
+    let task = queue
+        .iter()
+        .find(|item| item.id == task.id)
+        .map(|previous| merge_video_task_update(task.clone(), previous))
+        .unwrap_or(task);
     queue.retain(|item| item.id != task.id);
     queue.insert(0, task);
     queue.truncate(VIDEO_TASK_QUEUE_LIMIT);
@@ -330,6 +342,14 @@ fn merge_video_task_update(
         updated.submitted_at = previous.submitted_at.clone();
     }
     updated
+}
+
+fn completed_video_previews(tasks: &[VideoTaskResponse]) -> Vec<VideoTaskResponse> {
+    tasks
+        .iter()
+        .filter(|task| task.status == "completed" && task.preview_url.is_some())
+        .cloned()
+        .collect()
 }
 
 #[component]
@@ -565,17 +585,6 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                             }
                         />
                         <SelectField
-                            label="发布平台"
-                            value=Signal::derive(move || task.get().platform)
-                            options=vec!["抖音", "快手", "视频号", "小红书"]
-                            on_change=move |value| {
-                                set_task.update(|task| task.platform = value);
-                                set_package.set(None);
-                                set_task_status.set("待生成脚本包".to_string());
-                                persist_video_marketing_draft(task.get(), generation_options.get(), None);
-                            }
-                        />
-                        <SelectField
                             label="内容风格"
                             value=Signal::derive(move || task.get().style)
                             options=vec!["真实测评", "情绪种草", "痛点解决", "价格促销"]
@@ -679,9 +688,12 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                             </div>
                         }.into_any()
                     } else {
+                        let options = generation_options.get();
                         view! {
                             <div class="ai-video-queue-list">
-                                {tasks.into_iter().map(|task| view! { <VideoTaskCard task=task /> }).collect_view()}
+                                {tasks.into_iter().map(|task| {
+                                    view! { <VideoTaskCard task=task options=options.clone() /> }
+                                }).collect_view()}
                             </div>
                         }.into_any()
                     }
@@ -696,16 +708,20 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                     <h2>"视频预览"</h2>
                 </div>
                 {move || {
-                    let completed = video_tasks
-                        .get()
-                        .into_iter()
-                        .find(|task| task.status == "completed" && task.preview_url.is_some());
-                    if let Some(task) = completed {
-                        view! { <VideoPreview task=task /> }.into_any()
-                    } else {
+                    let completed = completed_video_previews(&video_tasks.get());
+                    if completed.is_empty() {
                         view! {
                             <div class="ai-video-task-card">
                                 "视频完成后会在这里直接播放。"
+                            </div>
+                        }.into_any()
+                    } else {
+                        let options = generation_options.get();
+                        view! {
+                            <div class="ai-video-preview-list">
+                                {completed.into_iter().map(|task| {
+                                    view! { <VideoPreview task=task options=options.clone() /> }
+                                }).collect_view()}
                             </div>
                         }.into_any()
                     }
@@ -763,7 +779,7 @@ fn ResultItem(result: VideoMarketingResult) -> impl IntoView {
 }
 
 #[component]
-fn VideoTaskCard(task: VideoTaskResponse) -> impl IntoView {
+fn VideoTaskCard(task: VideoTaskResponse, options: VideoGenerationOptions) -> impl IntoView {
     let status_label = video_task_status_label(&task.status);
     view! {
         <article class="ai-video-task-card">
@@ -781,7 +797,7 @@ fn VideoTaskCard(task: VideoTaskResponse) -> impl IntoView {
             </div>
             <div>
                 <span>"参数"</span>
-                <strong>{format_video_options(&task)}</strong>
+                <strong>{format_video_options_with_defaults(&task, &options)}</strong>
             </div>
             <p>{task.message.clone()}</p>
             {task.updated_at.clone().map(|updated_at| view! {
@@ -792,28 +808,28 @@ fn VideoTaskCard(task: VideoTaskResponse) -> impl IntoView {
 }
 
 #[component]
-fn VideoPreview(task: VideoTaskResponse) -> impl IntoView {
+fn VideoPreview(task: VideoTaskResponse, options: VideoGenerationOptions) -> impl IntoView {
     let url = task.preview_url.clone().unwrap_or_default();
     view! {
         <article class="ai-video-preview-card">
             <video class="ai-video-player" controls src=url.clone()></video>
             <div>
                 <strong>{task.model.clone()}</strong>
-                <span>{format_video_options(&task)}</span>
+                <span>{format_video_options_with_defaults(&task, &options)}</span>
                 <a class="btn btn-secondary" href=url target="_blank" rel="noopener noreferrer">"查看原视频"</a>
             </div>
         </article>
     }
 }
 
-fn format_video_options(task: &VideoTaskResponse) -> String {
-    let resolution = task.resolution.as_deref().unwrap_or("-");
-    let ratio = task.ratio.as_deref().unwrap_or("-");
-    let duration = task
-        .duration_seconds
-        .map(|duration| format!("{}s", duration))
-        .unwrap_or_else(|| "-".to_string());
-    format!("{} / {} / {}", resolution, ratio, duration)
+fn format_video_options_with_defaults(
+    task: &VideoTaskResponse,
+    options: &VideoGenerationOptions,
+) -> String {
+    let resolution = task.resolution.as_deref().unwrap_or(&options.resolution);
+    let ratio = task.ratio.as_deref().unwrap_or(&options.ratio);
+    let duration = task.duration_seconds.unwrap_or(options.duration_seconds);
+    format!("{} / {} / {}s", resolution, ratio, duration)
 }
 
 #[cfg(test)]
@@ -896,6 +912,20 @@ mod tests {
     }
 
     #[test]
+    fn video_marketing_draft_hides_platform_as_internal_default() {
+        let mut draft = VideoMarketingDraft {
+            task: default_video_marketing_task(),
+            options: default_video_generation_options(),
+            package: None,
+        };
+        draft.task.platform = "小红书".to_string();
+
+        let normalized = normalize_video_marketing_draft(draft);
+
+        assert_eq!(normalized.task.platform, DEFAULT_VIDEO_PLATFORM);
+    }
+
+    #[test]
     fn default_video_generation_options_are_user_visible_settings() {
         let options = default_video_generation_options();
 
@@ -938,6 +968,51 @@ mod tests {
             queue[0].preview_url.as_deref(),
             Some("https://cdn.example/video.mp4")
         );
+    }
+
+    #[test]
+    fn video_task_queue_preserves_existing_options_when_history_lacks_them() {
+        let mut queue = vec![sample_video_task("task-1", "queued", None)];
+        let mut history_task =
+            sample_video_task("task-1", "completed", Some("https://cdn.example/video.mp4"));
+        history_task.resolution = None;
+        history_task.ratio = None;
+        history_task.duration_seconds = None;
+
+        upsert_video_task(&mut queue, history_task);
+
+        assert_eq!(queue[0].resolution.as_deref(), Some("720p"));
+        assert_eq!(queue[0].ratio.as_deref(), Some("9:16"));
+        assert_eq!(queue[0].duration_seconds, Some(8));
+    }
+
+    #[test]
+    fn video_options_display_uses_current_options_when_task_lacks_params() {
+        let mut task = sample_video_task("task-1", "completed", Some("https://cdn.example/a.mp4"));
+        task.resolution = None;
+        task.ratio = None;
+        task.duration_seconds = None;
+        let options = default_video_generation_options();
+
+        assert_eq!(
+            format_video_options_with_defaults(&task, &options),
+            "720p / 9:16 / 12s"
+        );
+    }
+
+    #[test]
+    fn completed_video_previews_include_all_completed_videos() {
+        let tasks = vec![
+            sample_video_task("task-1", "completed", Some("https://cdn.example/a.mp4")),
+            sample_video_task("task-2", "running", None),
+            sample_video_task("task-3", "completed", Some("https://cdn.example/b.mp4")),
+        ];
+
+        let previews = completed_video_previews(&tasks);
+
+        assert_eq!(previews.len(), 2);
+        assert_eq!(previews[0].id, "task-1");
+        assert_eq!(previews[1].id, "task-3");
     }
 
     #[test]

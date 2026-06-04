@@ -274,7 +274,9 @@ impl UnifiedReActExecutor {
                         uuid::Uuid::new_v4(),
                         PlatformType::Custom,
                         format!(
-                            "[System] 输出格式无效：{}。请返回严格 JSON 格式，包含 thought、action，以及 tool_name/arguments 或 content。重要：thought 和 reasoning 必须使用中文。",
+                            "[System] 输出格式无效：{}。请返回严格 JSON 格式，包含 \
+                             thought、action，以及 tool_name/arguments 或 content。重要：thought \
+                             和 reasoning 必须使用中文。",
                             e
                         ),
                     ));
@@ -556,7 +558,8 @@ impl UnifiedReActExecutor {
             uuid::Uuid::new_v4(),
             PlatformType::Custom,
             format!(
-                "[System] 已达到最大轮数 ({})。基于已收集的观察结果，立即返回 final_answer。不要再调用更多工具。重要：thought 和 reasoning 必须使用中文。",
+                "[System] 已达到最大轮数 ({})。基于已收集的观察结果，立即返回 \
+                 final_answer。不要再调用更多工具。重要：thought 和 reasoning 必须使用中文。",
                 self.config.max_rounds
             )
             .to_string(),
@@ -662,7 +665,17 @@ impl UnifiedReActExecutor {
     fn build_round_prompt(&self, rounds: &[ReActRound], user_request: &str) -> String {
         if rounds.is_empty() {
             return format!(
-                "用户请求: {}\n\n请返回严格 JSON 格式。\n- 如果请求需要当前、外部、账户、市场、天气、本地文件系统、命令、环境或其他可验证状态，请使用 action=call_tool 并指定真实的 tool_name。\n- 仅当没有工具可用或观察结果已充分时，才使用 final_answer。\n- 常用工具选择：process_exec/bash_shell 用于执行命令，file_read/file_list/file_glob/text_grep 用于工作区文件，web_search/web_fetch 用于在线信息，skill_call 用于 BeeBotOS 技能，mcp_tool_search 用于 MCP 工具。\n- final_answer.content 必须仅包含面向用户的答案；不要包含 thought/action/tool JSON、命令或内部处理笔记。\n- 重要：所有思考过程（thought）和工具调用理由（reasoning）必须使用中文输出。",
+                "用户请求: {}\n\n请返回严格 JSON 格式。\n- \
+                 如果请求需要当前、外部、账户、市场、天气、本地文件系统、命令、\
+                 环境或其他可验证状态，请使用 action=call_tool 并指定真实的 tool_name。\n- \
+                 仅当没有工具可用或观察结果已充分时，才使用 final_answer。\n- \
+                 常用工具选择：process_exec/bash_shell \
+                 用于执行命令，file_read/file_list/file_glob/text_grep \
+                 用于工作区文件，web_search/web_fetch 用于在线信息，skill_call 用于 BeeBotOS \
+                 技能，mcp_tool_search 用于 MCP 工具。\n- final_answer.content \
+                 必须仅包含面向用户的答案；不要包含 thought/action/tool \
+                 JSON、命令或内部处理笔记。\n- \
+                 重要：所有思考过程（thought）和工具调用理由（reasoning）必须使用中文输出。",
                 user_request
             );
         }
@@ -709,8 +722,9 @@ impl UnifiedReActExecutor {
         history.push_str("- 信息已充分：返回 final_answer。\n");
         history.push_str("- 已达到最大轮数：返回 final_answer。\n\n");
         history.push_str(
-            "仅返回 JSON。final_answer.content 必须只包含面向用户的答案；不要泄露 thought、命令或内部分析。\n\
-             重要：所有思考过程（thought）和工具调用理由（reasoning）必须使用中文输出。",
+            "仅返回 JSON。final_answer.content 必须只包含面向用户的答案；不要泄露 \
+             thought、命令或内部分析。\n重要：\
+             所有思考过程（thought）和工具调用理由（reasoning）必须使用中文输出。",
         );
 
         history
@@ -1215,8 +1229,8 @@ More text"#;
         let prompt = executor.build_round_prompt(&[], "当前日期是什么？");
 
         assert!(prompt.contains("process_exec"));
-        assert!(prompt.contains("current"));
-        assert!(prompt.contains("verifiable state"));
-        assert!(prompt.contains("Use final_answer only when no tool is useful"));
+        assert!(prompt.contains("当前"));
+        assert!(prompt.contains("可验证状态"));
+        assert!(prompt.contains("仅当没有工具可用或观察结果已充分时，才使用 final_answer"));
     }
 }
