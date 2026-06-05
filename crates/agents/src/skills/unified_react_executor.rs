@@ -58,8 +58,8 @@ impl Default for UnifiedReActConfig {
     fn default() -> Self {
         Self {
             max_rounds: 100,
-            round_timeout_sec: 120,
-            tool_timeout_sec: 120,
+            round_timeout_sec: 300,
+            tool_timeout_sec: 300,
             max_parse_failures: 3,
             max_duplicate_tool_calls: 2,
             max_consecutive_tool_errors: 3,

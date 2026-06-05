@@ -33,11 +33,11 @@ steps:
           --fred-series "DTWEXO,DGS10,FEDFUNDS,T10YIE,PCEPILFE" \
           --wgc \
           --geopolitical \
-          --save-json /root/beebotos/data/reports/xauusd/latest_macro.json \
+          --save-json data/reports/xauusd/latest_macro.json \
           --output summary
 
         只需要返回命令输出摘要和保存路径；完整 JSON 必须保存在：
-        /root/beebotos/data/reports/xauusd/latest_macro.json
+        data/reports/xauusd/latest_macro.json
     timeout_sec: 120
     retries: 2
 
@@ -51,11 +51,11 @@ steps:
         根据已保存的宏观 JSON 生成完整中文 Markdown 报告。
         必须直接执行：
         python3 {SKILL_DIR}/scripts/generate_report.py \
-          --macro-json /root/beebotos/data/reports/xauusd/latest_macro.json \
-          --output-dir /root/beebotos/data/reports/xauusd
+          --macro-json data/reports/xauusd/latest_macro.json \
+          --output-dir data/reports/xauusd
 
         要求：
-        - 保存 /root/beebotos/data/reports/xauusd/latest_report.md；
+        - 保存 data/reports/xauusd/latest_report.md；
         - 保存带时间戳的报告文件；
         - stdout 返回 REPORT_PATH、LATEST_REPORT_PATH 和完整 Markdown 正文；
         - 不要只输出摘要。
@@ -70,20 +70,20 @@ steps:
     params:
       input: |
         执行完整的 XAUUSD hourly 量化交易任务：
-        1. 数据搜集：从 /root/beebotos/data/reports/xauusd/latest_macro.json 读取 yfinance/fred/wgc/geopolitical 四层数据；
+        1. 数据搜集：从 data/reports/xauusd/latest_macro.json 读取 yfinance/fred/wgc/geopolitical 四层数据；
            XAUUSD 价格与 24h 涨跌直接通过 MT5 MCP 获取。
            严禁 web_search/web_fetch，缺失数据标 N/A。
         2. 分析决策：基于地缘风险、VIX、DXY、股指、国债收益率、核心PCE、央行购金综合判断。
         3. 交易执行：在 MT5 模拟盘严格按决策分支执行市价单。
         4. 最终汇报：输出持仓、均价、盈亏、权益。
         5. 报告输出：
-           - 读取 /root/beebotos/data/reports/xauusd/latest_report.md 的完整内容；
+           - 读取 data/reports/xauusd/latest_report.md 的完整内容；
            - 将交易执行记录和最终状态汇报追加到报告末尾；
-           - 写回 /root/beebotos/data/reports/xauusd/latest_report.md；
+           - 写回 data/reports/xauusd/latest_report.md；
            - 如果 generate_report 输出里包含 REPORT_PATH，也同步写回本次时间戳报告；
            - stdout 返回完整 Markdown 报告正文和报告文件路径，不要只返回短摘要。
-      macro_json_path: "/root/beebotos/data/reports/xauusd/latest_macro.json"
-      report_file: "/root/beebotos/data/reports/xauusd/latest_report.md"
+      macro_json_path: "data/reports/xauusd/latest_macro.json"
+      report_file: "data/reports/xauusd/latest_report.md"
     timeout_sec: 180
     retries: 1
 
@@ -96,19 +96,19 @@ steps:
       input: |
         最终整理 XAUUSD hourly 量化交易报告。
         参数 `quant_output` 中包含 quant_run 的输出。必须先把 quant_output 的完整内容写入：
-        /root/beebotos/data/reports/xauusd/latest_quant_output.txt
+        data/reports/xauusd/latest_quant_output.txt
 
         然后直接执行：
         python3 {SKILL_DIR}/scripts/finalize_report.py \
-          --report-file /root/beebotos/data/reports/xauusd/latest_report.md \
-          --quant-output-file /root/beebotos/data/reports/xauusd/latest_quant_output.txt
+          --report-file data/reports/xauusd/latest_report.md \
+          --quant-output-file data/reports/xauusd/latest_quant_output.txt
 
         要求：
         - 将 quant_run 的交易执行输出追加到 Markdown；
-        - 写回 /root/beebotos/data/reports/xauusd/latest_report.md；
+        - 写回 data/reports/xauusd/latest_report.md；
         - stdout 返回完整最终 Markdown 报告正文和 FINAL_REPORT_PATH；
         - 不要只输出摘要。
-      report_file: "/root/beebotos/data/reports/xauusd/latest_report.md"
+      report_file: "data/reports/xauusd/latest_report.md"
       quant_output: "{{steps.quant_run.output}}"
     timeout_sec: 60
     retries: 1

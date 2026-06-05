@@ -4601,5 +4601,37 @@ const MAX_CONSECUTIVE_TOOL_ERRORS: u32 = 3;  修改为：u32 = 10；
 - `web-server.exe`：19:03（最新编译）
 - `index.html` / `.wasm`：18:57（包含前端中文文本修改）
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+| 层级 | 配置项 | 默认值 | 说明 |
+|------|--------|--------|------|
+| **ReAct 单轮 LLM** | `round_timeout_sec` | **300 秒** | 每轮调用 LLM 的最大等待时间 |
+| **ReAct 单工具** | `tool_timeout_sec` | **300 秒** | 每个工具执行的最大等待时间 |
+
+已完成配置修改，`beebotos` 项目中涉及 ReAct 超时的 4 个文件均已更新为 **300 秒**：
+
+| 文件 | 修改项 | 原值 | 新值 |
+|------|--------|------|------|
+| `crates/agents/src/skills/unified_react_executor.rs` | `round_timeout_sec` | 120 | **300** |
+| `crates/agents/src/skills/unified_react_executor.rs` | `tool_timeout_sec` | 120 | **300** |
+| `crates/agents/src/skills/code_executor.rs` | `round_timeout_sec` / `tool_timeout_sec` | 30 / 60 | **300 / 300** |
+| `crates/agents/src/skills/knowledge_executor.rs` | `round_timeout_sec` / `tool_timeout_sec` | 30 / 60 | **300 / 300** |
+| `crates/agents/src/agent_impl.rs` | `round_timeout_sec` / `tool_timeout_sec` | 30 / 60 | **300 / 300** |
+
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&7
+
+打包任务已完成！✅
+
+**结果摘要：**
+- **状态**：成功（Exit code: 0）
+- **耗时**：22 秒（增量编译，比首次快很多）
+- **产物路径**：`/root/beebotos/dist/beebotos-x86_64-pc-windows-gnu.zip`
+
+**更新后的 workflow 已包含在包内：**
+- `workflows/xauusd_hourly.yaml` 中的 `/root/beebotos/data/reports/xauusd/` 绝对路径已全部改为 `data/reports/xauusd/` 相对路径
+- 在 Windows 上运行时，Gateway 会从安装目录正确解析该相对路径
+
+zip 包内容确认完整，包含三个 `.exe`、前端资源、config、migrations、skills、workflows 等所有必要文件。可以直接用于分发或 Inno Setup 制作安装包。
 
 
