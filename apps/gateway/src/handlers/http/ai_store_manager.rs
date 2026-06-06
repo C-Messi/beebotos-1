@@ -1,6 +1,9 @@
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
+use axum::http::header;
+use axum::response::IntoResponse;
 use axum::Json;
 use base64::engine::general_purpose;
 use base64::Engine as _;
@@ -19,6 +22,8 @@ use crate::AppState;
 
 const VIDEO_TASK_LIST_LIMIT: usize = 6;
 const VIDEO_TASK_HISTORY_LIMIT: i64 = 20;
+const VIDEO_ASSET_DIR: &str = "data/ai-video-marketing/videos";
+const VIDEO_ASSET_ROUTE: &str = "/api/v1/ai-store-manager/video-assets";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CreateVideoTaskRequest {
@@ -518,6 +523,215 @@ async fn list_video_task_history(
             updated_at: row.get("updated_at"),
         })
         .collect())
+}
+
+fn merge_video_task_history_refresh(
+    mut refreshed: VideoTaskResponse,
+    previous: &VideoTaskResponse,
+) -> VideoTaskResponse {
+    if refreshed.preview_url.is_none() {
+        refreshed.preview_url = previous.preview_url.clone();
+    }
+    if refreshed.resolution.is_none() {
+        refreshed.resolution = previous.resolution.clone();
+    }
+    if refreshed.ratio.is_none() {
+        refreshed.ratio = previous.ratio.clone();
+    }
+    if refreshed.duration_seconds.is_none() {
+        refreshed.duration_seconds = previous.duration_seconds;
+    }
+    if refreshed.queue_position.is_none() {
+        refreshed.queue_position = previous.queue_position;
+    }
+    if refreshed.submitted_at.is_none() {
+        refreshed.submitted_at = previous.submitted_at.clone();
+    }
+    refreshed
+}
+
+fn video_asset_file_name(task_id: &str) -> String {
+    let safe_id = task_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("{}.mp4", safe_id)
+}
+
+fn video_asset_url(task_id: &str) -> String {
+    format!("{}/{}", VIDEO_ASSET_ROUTE, video_asset_file_name(task_id))
+}
+
+fn video_asset_path(root: &FsPath, task_id: &str) -> PathBuf {
+    root.join(video_asset_file_name(task_id))
+}
+
+fn default_video_asset_root() -> PathBuf {
+    PathBuf::from(VIDEO_ASSET_DIR)
+}
+
+fn clear_uncached_remote_video_preview(mut task: VideoTaskResponse) -> VideoTaskResponse {
+    if task
+        .preview_url
+        .as_deref()
+        .is_some_and(|url| url.starts_with("http"))
+    {
+        task.preview_url = None;
+    }
+    task
+}
+
+async fn cache_video_task_preview(
+    root: &FsPath,
+    client: &reqwest::Client,
+    mut task: VideoTaskResponse,
+) -> VideoTaskResponse {
+    if task.status != "completed" {
+        return task;
+    }
+
+    let local_url = video_asset_url(&task.id);
+    if task.preview_url.as_deref() == Some(local_url.as_str()) {
+        return task;
+    }
+
+    let path = video_asset_path(root, &task.id);
+    if path.exists() {
+        task.preview_url = Some(local_url);
+        return task;
+    }
+
+    let Some(remote_url) = task
+        .preview_url
+        .clone()
+        .filter(|url| url.starts_with("http"))
+    else {
+        return task;
+    };
+
+    let response = match client.get(&remote_url).send().await {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            warn!(
+                task_id = task.id,
+                status = %response.status(),
+                "video asset cache skipped"
+            );
+            return clear_uncached_remote_video_preview(task);
+        }
+        Err(err) => {
+            warn!(
+                task_id = task.id,
+                error = %err,
+                "video asset cache failed"
+            );
+            return clear_uncached_remote_video_preview(task);
+        }
+    };
+
+    let bytes = match response.bytes().await {
+        Ok(bytes) if !bytes.is_empty() => bytes,
+        Ok(_) => return clear_uncached_remote_video_preview(task),
+        Err(err) => {
+            warn!(
+                task_id = task.id,
+                error = %err,
+                "video asset cache read failed"
+            );
+            return clear_uncached_remote_video_preview(task);
+        }
+    };
+
+    if let Err(err) = tokio::fs::create_dir_all(root).await {
+        warn!(
+            task_id = task.id,
+            error = %err,
+            "video asset cache directory creation failed"
+        );
+        return clear_uncached_remote_video_preview(task);
+    }
+    if let Err(err) = tokio::fs::write(&path, bytes).await {
+        warn!(
+            task_id = task.id,
+            error = %err,
+            "video asset cache write failed"
+        );
+        return clear_uncached_remote_video_preview(task);
+    }
+
+    task.preview_url = Some(local_url);
+    task
+}
+
+async fn refresh_video_task_history(
+    db: &SqlitePool,
+    user_id: &str,
+    history: Vec<VideoTaskResponse>,
+    client: &reqwest::Client,
+    config: &BeeBotOSConfig,
+    api_key: &str,
+) -> Result<Vec<VideoTaskResponse>, GatewayError> {
+    let model = config.video_generation.model.clone();
+    let mut refreshed_history = Vec::with_capacity(history.len());
+
+    for previous in history {
+        let response = match client
+            .get(video_task_status_url(
+                &config.video_generation.base_url,
+                &previous.id,
+            ))
+            .bearer_auth(api_key)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                warn!(
+                    task_id = previous.id,
+                    status = %response.status(),
+                    "video task history refresh skipped"
+                );
+                refreshed_history.push(previous);
+                continue;
+            }
+            Err(err) => {
+                warn!(
+                    task_id = previous.id,
+                    error = %err,
+                    "video task history refresh failed"
+                );
+                refreshed_history.push(previous);
+                continue;
+            }
+        };
+
+        let upstream = match response.json::<VolcengineVideoTaskStatusResponse>().await {
+            Ok(upstream) => upstream,
+            Err(err) => {
+                warn!(
+                    task_id = previous.id,
+                    error = %err,
+                    "video task history refresh response parse failed"
+                );
+                refreshed_history.push(previous);
+                continue;
+            }
+        };
+
+        let task =
+            merge_video_task_history_refresh(video_status_to_response(upstream, &model), &previous);
+        let task = cache_video_task_preview(&default_video_asset_root(), client, task).await;
+        update_video_task_history(db, user_id, &task).await?;
+        refreshed_history.push(task);
+    }
+
+    Ok(refreshed_history)
 }
 
 fn video_task_url(base_url: &str) -> String {
@@ -1360,6 +1574,22 @@ pub async fn create_video_task(
     Ok(Json(task))
 }
 
+pub async fn get_video_asset(Path(file): Path<String>) -> Result<impl IntoResponse, GatewayError> {
+    let Some(task_id) = file.strip_suffix(".mp4") else {
+        return Err(GatewayError::not_found("video asset", file));
+    };
+    if file != video_asset_file_name(task_id) {
+        return Err(GatewayError::not_found("video asset", file));
+    }
+
+    let path = default_video_asset_root().join(&file);
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| GatewayError::not_found("video asset", file))?;
+
+    Ok(([(header::CONTENT_TYPE, "video/mp4")], bytes))
+}
+
 pub async fn create_video_package_handler(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1519,6 +1749,43 @@ pub async fn list_video_tasks(
     let history =
         list_video_task_history(&state.db, &user.user_id, VIDEO_TASK_HISTORY_LIMIT).await?;
     if !history.is_empty() {
+        let config = match BeeBotOSConfig::load() {
+            Ok(config) => config,
+            Err(err) => {
+                warn!(error = %err, "video task history returned without refresh");
+                return Ok(Json(history));
+            }
+        };
+        let api_key = match config
+            .video_generation
+            .api_key
+            .clone()
+            .filter(|key| !key.trim().is_empty())
+        {
+            Some(api_key) => api_key,
+            None => return Ok(Json(history)),
+        };
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(
+                config.video_generation.timeout_seconds,
+            ))
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                warn!(error = %err, "video task history returned without refresh client");
+                return Ok(Json(history));
+            }
+        };
+        let history = refresh_video_task_history(
+            &state.db,
+            &user.user_id,
+            history,
+            &client,
+            &config,
+            &api_key,
+        )
+        .await?;
         return Ok(Json(history));
     }
 
@@ -1588,6 +1855,8 @@ pub async fn list_video_tasks(
         if let Some(detail) = detail {
             if let Ok(upstream) = detail.json::<VolcengineVideoTaskStatusResponse>().await {
                 let task = video_status_to_response(upstream, &model);
+                let task =
+                    cache_video_task_preview(&default_video_asset_root(), &client, task).await;
                 update_video_task_history(&state.db, &user.user_id, &task).await?;
                 tasks.push(task);
                 continue;
@@ -1595,6 +1864,7 @@ pub async fn list_video_tasks(
         }
 
         let task = video_list_item_to_response(item, &model);
+        let task = cache_video_task_preview(&default_video_asset_root(), &client, task).await;
         update_video_task_history(&state.db, &user.user_id, &task).await?;
         tasks.push(task);
     }
@@ -1661,6 +1931,7 @@ pub async fn get_video_task(
         .await
         .map_err(|err| GatewayError::internal(format!("视频任务响应解析失败: {}", err)))?;
     let task = video_status_to_response(upstream, &model);
+    let task = cache_video_task_preview(&default_video_asset_root(), &client, task).await;
     update_video_task_history(&state.db, &user.user_id, &task).await?;
 
     Ok(Json(task))
@@ -1909,6 +2180,54 @@ mod tests {
             tasks[0].preview_url.as_deref(),
             Some("https://cdn.example/upstream.mp4")
         );
+    }
+
+    #[test]
+    fn refreshed_video_task_history_keeps_parameters_and_updates_preview_url() {
+        let mut previous = sample_video_task_response("task-1", "completed");
+        previous.preview_url = Some("https://cdn.example/expired.mp4".to_string());
+        previous.resolution = Some("720p".to_string());
+        previous.ratio = Some("9:16".to_string());
+        previous.duration_seconds = Some(12);
+        previous.submitted_at = Some("2026-06-03T08:00:00Z".to_string());
+
+        let mut refreshed = sample_video_task_response("task-1", "completed");
+        refreshed.preview_url = Some("https://cdn.example/fresh.mp4".to_string());
+        refreshed.resolution = None;
+        refreshed.ratio = None;
+        refreshed.duration_seconds = None;
+        refreshed.submitted_at = None;
+        refreshed.updated_at = Some("2026-06-04T09:10:00Z".to_string());
+
+        let merged = merge_video_task_history_refresh(refreshed, &previous);
+
+        assert_eq!(
+            merged.preview_url.as_deref(),
+            Some("https://cdn.example/fresh.mp4")
+        );
+        assert_eq!(merged.resolution.as_deref(), Some("720p"));
+        assert_eq!(merged.ratio.as_deref(), Some("9:16"));
+        assert_eq!(merged.duration_seconds, Some(12));
+        assert_eq!(merged.submitted_at.as_deref(), Some("2026-06-03T08:00:00Z"));
+    }
+
+    #[test]
+    fn video_asset_url_uses_sanitized_mp4_file_name() {
+        assert_eq!(video_asset_file_name("task/../one"), "task____one.mp4");
+        assert_eq!(
+            video_asset_url("task/../one"),
+            "/api/v1/ai-store-manager/video-assets/task____one.mp4"
+        );
+    }
+
+    #[test]
+    fn uncached_remote_video_preview_is_not_returned_as_playable() {
+        let mut task = sample_video_task_response("task-1", "completed");
+        task.preview_url = Some("https://cdn.example/expired.mp4".to_string());
+
+        let task = clear_uncached_remote_video_preview(task);
+
+        assert!(task.preview_url.is_none());
     }
 
     #[test]

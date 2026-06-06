@@ -2306,6 +2306,10 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
             "/api/v1/auth/refresh",
             post(handlers::http::auth::refresh_token),
         )
+        .route(
+            "/api/v1/ai-store-manager/video-assets/:file",
+            get(handlers::http::ai_store_manager::get_video_asset),
+        )
         // WebSocket status endpoint (public for health checks)
         .route("/ws/status", get(handlers::websocket::ws_status_handler))
         // Webhook routes
