@@ -1056,7 +1056,7 @@ async fn generate_video_package_with_agent(
             "user_id": user.user_id,
             "session_id": format!("ai-video-marketing-{}", uuid::Uuid::new_v4()),
         }),
-        timeout_secs: 120,
+        timeout_secs: 1200,
         priority: 6,
         stream_tx: None,
     };

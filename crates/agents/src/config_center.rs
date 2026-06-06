@@ -153,7 +153,7 @@ impl Default for AgentConfigCenter {
             queue: QueueConfig {
                 max_workers: 10,
                 queue_size: 1000,
-                task_timeout_secs: 500,
+                task_timeout_secs: 1200,
                 retry_attempts: 3,
                 retry_delay_secs: 5,
             },

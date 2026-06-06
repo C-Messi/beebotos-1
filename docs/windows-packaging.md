@@ -177,20 +177,49 @@ workflows -> data/workflows -> data/workflows/local
 
 ## Inno Setup 使用方式
 
-Inno Setup 脚本中的 `SourceRoot` 应设置为打包后的发布目录，例如：
+项目已提供完整的 Inno Setup 脚本：`tools/scripts/setup/beebotos-setup.iss`。
+
+### 快速开始
+
+1. 打包发布目录：
+   ```powershell
+   .\beebotos-dev.ps1 pack all
+   ```
+2. 将 `dist\beebotos` 复制到 Windows 上的 staging 目录，例如：
+   ```
+   C:\Users\you\Desktop\beebotos_installer\beebotos
+   ```
+3. 编辑 `tools/scripts/setup/beebotos-setup.iss`，修改 `SourceRoot`：
+   ```iss
+   #define SourceRoot "C:\Users\you\Desktop\beebotos_installer\beebotos"
+   ```
+4. 用 Inno Setup Compiler (`iscmplr.exe`) 编译脚本，生成安装程序。
+
+### 脚本特性
+
+- **自动创建数据目录**：安装时自动创建 `{app}\data`、`{app}\data\run`、`{app}\data\logs`、`{app}\data\skills`、`{app}\data\workspace`。
+- **启动菜单项**：包含启动、停止、查看状态、打开 Web 四个快捷方式。
+- **卸载前自动停止服务**：通过 `beebotos-run.ps1 stop all` 确保进程被正确终止。
+- **🛡️ 卸载保留用户数据库**：详见下方「卸载时保留数据库」章节。
+
+### 手动编写脚本参考
+
+如果你需要自定义脚本，以下是核心段落的参考：
+
+`SourceRoot` 指向打包后的发布目录：
 
 ```iss
 #define SourceRoot "C:\Users\you\Desktop\beebotos_installer\beebotos"
 ```
 
-文件复制规则应递归复制完整发布目录：
+文件复制规则递归复制完整发布目录：
 
 ```iss
 [Files]
 Source: "{#SourceRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ```
 
-建议安装时创建运行数据目录：
+安装时创建运行数据目录：
 
 ```iss
 [Dirs]
@@ -201,7 +230,7 @@ Name: "{app}\data\skills"
 Name: "{app}\data\workspace"
 ```
 
-启动菜单项可以调用：
+启动菜单项：
 
 ```iss
 [Icons]
@@ -211,12 +240,45 @@ Name: "{autoprograms}\BeeBotOS\查看状态"; Filename: "{sys}\WindowsPowerShell
 Name: "{autoprograms}\BeeBotOS\BeeBotOS Web"; Filename: "http://localhost:8090"
 ```
 
-卸载时可先停止服务：
+卸载时先停止服务：
 
 ```iss
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\beebotos-run.ps1"" stop all"; WorkingDir: "{app}"; Flags: runhidden
 ```
+
+## 卸载时保留数据库
+
+BeeBotOS 的运行时数据库文件位于安装目录的 `data\` 子目录下：
+
+| 文件 | 说明 |
+|------|------|
+| `data\beebotos.db` | 主数据库（聊天记录、Agent、会话、配置等） |
+| `data\beebotos.db-wal` | SQLite WAL（Write-Ahead Log） |
+| `data\beebotos.db-shm` | SQLite SHM（共享内存） |
+| `data\memory_search.db` | 记忆搜索索引数据库 |
+| `data\memory_search.db-wal` | SQLite WAL |
+| `data\memory_search.db-shm` | SQLite SHM |
+
+**这些文件必须在卸载时保留**，否则用户会丢失全部聊天记录、Agent 配置和记忆数据。
+
+### 实现原理
+
+`tools/scripts/setup/beebotos-setup.iss` 使用 Inno Setup 的 `[Code]` 段实现数据库保护：
+
+1. **卸载开始前** (`InitializeUninstall`)：
+   - 将 `data\` 下的 6 个数据库文件复制到 `%TEMP%\BeeBotOS_DB_Backup_<时间戳>\`
+2. **标准卸载流程**：
+   - Inno Setup 正常删除所有安装文件
+3. **卸载完成后** (`CurUninstallStepChanged` → `usPostUninstall`)：
+   - 从备份目录将数据库文件恢复回 `{app}\data\`
+   - 清理临时备份目录
+
+### 注意事项
+
+- 此机制依赖 `beebotos-run.ps1 stop all` 在卸载前正确停止 Gateway 进程，确保数据库文件未被占用。
+- 如果用户手动删除安装目录（不通过 `unins000.exe`），数据库文件会一并丢失——这是预期行为，因为数据文件当前与程序安装在同一目录。
+- 后续如需将数据库迁移到独立的用户数据目录（如 `%LOCALAPPDATA%\BeeBotOS`），可进一步改进。
 
 ## 打包后校验
 

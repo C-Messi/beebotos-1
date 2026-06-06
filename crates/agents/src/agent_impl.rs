@@ -5363,8 +5363,8 @@ impl Agent {
             crate::skills::UnifiedReActConfig {
                 max_rounds: crate::react_trace::clamp_react_max_tool_rounds(self.max_rounds)
                     as usize,
-                round_timeout_sec: 300,
-                tool_timeout_sec: 300,
+                round_timeout_sec: 1200,
+                tool_timeout_sec: 1200,
                 max_parse_failures: 3,
                 max_duplicate_tool_calls: 2,
                 max_consecutive_tool_errors: 3,

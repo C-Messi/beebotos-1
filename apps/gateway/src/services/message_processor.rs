@@ -1199,7 +1199,7 @@ impl MessageProcessor {
         let task = gateway::TaskConfig {
             task_type: "llm_chat".to_string(),
             input: task_input,
-            timeout_secs: 500,
+            timeout_secs: 1200,
             priority: 5,
             stream_tx,
         };

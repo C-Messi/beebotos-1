@@ -1172,7 +1172,7 @@ impl AgentRuntime for GatewayAgentRuntime {
         };
 
         // 🛡️ Guard against excessively long timeouts that make the system appear dead.
-        const MAX_TASK_TIMEOUT_SECS: u64 = 120;
+        const MAX_TASK_TIMEOUT_SECS: u64 = 1200;
         let timeout_secs = task.timeout_secs.min(MAX_TASK_TIMEOUT_SECS);
 
         // Create oneshot channel for result

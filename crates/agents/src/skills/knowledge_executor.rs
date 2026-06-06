@@ -139,8 +139,8 @@ impl KnowledgeSkillExecutor {
         let executor = crate::skills::UnifiedReActExecutor::new(self.llm.clone()).with_config(
             crate::skills::UnifiedReActConfig {
                 max_rounds: 6,
-                round_timeout_sec: 300,
-                tool_timeout_sec: 300,
+                round_timeout_sec: 1200,
+                tool_timeout_sec: 1200,
                 max_parse_failures: 3,
                 max_duplicate_tool_calls: 2,
                 max_consecutive_tool_errors: 3,
