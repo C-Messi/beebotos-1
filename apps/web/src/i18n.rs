@@ -326,14 +326,6 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("ai-commerce-coming-soon", "即将接入");
     zh.insert("ai-commerce-status-pending", "待接入");
     zh.insert("ai-store-manager-title", "AI 店长");
-    zh.insert(
-        "ai-store-manager-subtitle",
-        "用 AI 批量生成视频、图文和电话营销任务。",
-    );
-    zh.insert("ai-store-manager-import-products", "导入商品");
-    zh.insert("ai-store-manager-create-task", "创建营销任务");
-    zh.insert("ai-store-manager-marketing-entries", "营销入口");
-    zh.insert("ai-store-manager-todo", "营销待办");
     zh.insert("ai-store-manager-video-marketing", "AI 视频营销");
     zh.insert(
         "ai-store-manager-video-desc",
@@ -707,16 +699,6 @@ pub fn init_i18n() -> I18nContext {
     zh.insert("settings-save-error", "保存设置失败");
     zh.insert("settings-saving", "保存中...");
     zh.insert("settings-save-changes", "保存更改");
-    zh.insert("ai-store-manager-metric-reach", "今日触达");
-    zh.insert("ai-store-manager-metric-reach-trend", "覆盖 3 个渠道");
-    zh.insert("ai-store-manager-metric-assets", "生成素材");
-    zh.insert("ai-store-manager-metric-assets-trend", "12 条待审核");
-    zh.insert("ai-store-manager-metric-leads", "转化线索");
-    zh.insert("ai-store-manager-metric-leads-trend", "23 位高意向");
-    zh.insert("ai-store-manager-metric-revenue", "预计成交");
-    zh.insert("ai-store-manager-metric-revenue-trend", "ROI 3.4");
-    zh.insert("priority-high", "高");
-    zh.insert("priority-medium", "中");
     zh.insert("workflows-stop-success", "工作流已停止");
     zh.insert("workflows-error-recent", "加载最近实例失败");
     zh.insert("workflows-error-definitions", "加载工作流定义失败");
@@ -1185,14 +1167,6 @@ pub fn init_i18n() -> I18nContext {
     en.insert("ai-commerce-coming-soon", "Coming Soon");
     en.insert("ai-commerce-status-pending", "Pending");
     en.insert("ai-store-manager-title", "AI Store Manager");
-    en.insert(
-        "ai-store-manager-subtitle",
-        "Use AI to batch-generate video, graphic, and phone marketing tasks.",
-    );
-    en.insert("ai-store-manager-import-products", "Import Products");
-    en.insert("ai-store-manager-create-task", "Create Marketing Task");
-    en.insert("ai-store-manager-marketing-entries", "Marketing Entries");
-    en.insert("ai-store-manager-todo", "Marketing To-Do");
     en.insert("ai-store-manager-video-marketing", "AI Video Marketing");
     en.insert(
         "ai-store-manager-video-desc",
@@ -1631,16 +1605,6 @@ pub fn init_i18n() -> I18nContext {
     en.insert("settings-save-error", "Failed to save settings");
     en.insert("settings-saving", "Saving...");
     en.insert("settings-save-changes", "Save Changes");
-    en.insert("ai-store-manager-metric-reach", "Today's Reach");
-    en.insert("ai-store-manager-metric-reach-trend", "Covering 3 channels");
-    en.insert("ai-store-manager-metric-assets", "Generated Assets");
-    en.insert("ai-store-manager-metric-assets-trend", "12 pending review");
-    en.insert("ai-store-manager-metric-leads", "Converted Leads");
-    en.insert("ai-store-manager-metric-leads-trend", "23 high-intent");
-    en.insert("ai-store-manager-metric-revenue", "Estimated Revenue");
-    en.insert("ai-store-manager-metric-revenue-trend", "ROI 3.4");
-    en.insert("priority-high", "High");
-    en.insert("priority-medium", "Medium");
     en.insert("workflows-stop-success", "Workflow Stopped");
     en.insert("workflows-error-recent", "Failed to load recent instances");
     en.insert(

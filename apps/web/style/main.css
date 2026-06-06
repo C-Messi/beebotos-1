@@ -978,82 +978,29 @@ body {
     gap: 24px;
 }
 
-.ai-store-manager-header {
-    align-items: flex-start;
-    gap: 16px;
-}
-
 .ai-store-manager-actions {
     display: flex;
     gap: 10px;
     flex-wrap: wrap;
 }
 
-.ai-store-manager-metrics {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 14px;
-}
-
-.ai-store-manager-metric,
-.ai-store-manager-module,
-.ai-store-manager-side {
+.ai-store-manager-module {
     background: var(--bg-card);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
 }
 
-.ai-store-manager-metric {
-    min-height: 126px;
-    padding: 18px;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-}
-
-.ai-store-manager-metric span,
-.ai-store-manager-metric small {
-    color: var(--text-secondary);
-}
-
-.ai-store-manager-metric strong {
-    color: var(--text-primary);
-    font-size: 26px;
-    line-height: 1.2;
-}
-
-.ai-store-manager-metric.tone-success {
-    border-color: rgba(34, 197, 94, 0.35);
-}
-
-.ai-store-manager-metric.tone-warning {
-    border-color: rgba(245, 158, 11, 0.35);
-}
-
-.ai-store-manager-metric.tone-danger {
-    border-color: rgba(239, 68, 68, 0.35);
-}
-
-.ai-store-manager-metric.tone-info {
-    border-color: rgba(6, 182, 212, 0.35);
-}
-
 .ai-store-manager-layout {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 340px;
+    grid-template-columns: minmax(0, 1fr);
     gap: 20px;
     align-items: start;
 }
 
-.ai-store-manager-main,
-.ai-store-manager-side {
+.ai-store-manager-main {
     display: flex;
     flex-direction: column;
     gap: 14px;
-}
-
-.ai-store-manager-side {
-    padding: 18px;
 }
 
 .section-title.compact {
@@ -1097,15 +1044,13 @@ body {
     font-size: 22px;
 }
 
-.ai-store-manager-module h3,
-.ai-store-manager-task h3 {
+.ai-store-manager-module h3 {
     color: var(--text-primary);
     font-size: 16px;
     font-weight: 600;
 }
 
-.ai-store-manager-module p,
-.ai-store-manager-task p {
+.ai-store-manager-module p {
     color: var(--text-secondary);
     font-size: 13px;
     line-height: 1.6;
@@ -1114,52 +1059,6 @@ body {
 .ai-store-manager-module p {
     flex: 1;
     margin: 8px 0 18px;
-}
-
-.ai-store-manager-task-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-
-.ai-store-manager-task {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 14px;
-    background: var(--bg-glass);
-    border: 1px solid var(--border-light);
-    border-radius: var(--radius-sm);
-}
-
-.priority {
-    flex: 0 0 auto;
-    height: 24px;
-    min-width: 32px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    font-size: 12px;
-    text-align: center;
-}
-
-.priority.high {
-    color: var(--danger);
-    background: rgba(239, 68, 68, 0.12);
-}
-
-.priority.medium {
-    color: var(--warning);
-    background: rgba(245, 158, 11, 0.12);
-}
-
-@media (max-width: 1180px) {
-    .ai-store-manager-metrics {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .ai-store-manager-layout {
-        grid-template-columns: 1fr;
-    }
 }
 
 @media (max-width: 980px) {
@@ -1174,7 +1073,6 @@ body {
         width: 100%;
     }
 
-    .ai-store-manager-metrics,
     .ai-store-manager-module-grid {
         grid-template-columns: 1fr;
     }
