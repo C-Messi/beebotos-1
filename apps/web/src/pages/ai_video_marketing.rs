@@ -1,14 +1,22 @@
 #[cfg(target_arch = "wasm32")]
+use base64::{engine::general_purpose, Engine as _};
+#[cfg(target_arch = "wasm32")]
 use gloo_storage::{LocalStorage, Storage};
+#[cfg(target_arch = "wasm32")]
+use js_sys::Uint8Array;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos::view;
 use leptos_meta::Title;
 use serde::{Deserialize, Serialize};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::JsFuture;
 
 use crate::api::{
     create_ai_store_manager_service, CreateVideoPackageRequest, CreateVideoTaskRequest,
-    VideoPackageResponse, VideoTaskResponse,
+    ReferenceImageRequest, VideoPackageResponse, VideoTaskResponse,
 };
 use crate::state::use_app_state;
 use crate::utils::event_target_value;
@@ -27,6 +35,8 @@ const VIDEO_MODEL_OPTIONS: [&str; 3] = [
     "doubao-seedance-1.5-pro",
 ];
 const VIDEO_DURATION_OPTIONS: [&str; 4] = ["5", "8", "12", "15"];
+#[cfg(target_arch = "wasm32")]
+const VIDEO_REFERENCE_IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct VideoMarketingResult {
@@ -59,6 +69,8 @@ struct VideoMarketingDraft {
     task: VideoMarketingTask,
     options: VideoGenerationOptions,
     package: Option<VideoPackageResponse>,
+    #[serde(default)]
+    reference_image: Option<ReferenceImageRequest>,
 }
 
 pub fn default_video_marketing_task() -> VideoMarketingTask {
@@ -77,6 +89,7 @@ fn default_video_marketing_draft() -> VideoMarketingDraft {
         task: default_video_marketing_task(),
         options: default_video_generation_options(),
         package: None,
+        reference_image: None,
     }
 }
 
@@ -164,6 +177,77 @@ fn compact_join(items: &[String], limit: usize, separator: &str) -> String {
         .take(limit)
         .collect::<Vec<_>>()
         .join(separator)
+}
+
+fn reference_images_for_request(
+    reference_image: &Option<ReferenceImageRequest>,
+) -> Vec<ReferenceImageRequest> {
+    reference_image.iter().cloned().collect()
+}
+
+fn reference_image_display_name(image: &ReferenceImageRequest) -> String {
+    image
+        .file_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("参考图片")
+        .to_string()
+}
+
+fn reference_image_count_label(count: Option<u8>) -> &'static str {
+    match count.unwrap_or(0) {
+        0 => "无参考图",
+        _ => "1 张参考图",
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn normalize_video_reference_image_mime(filename: &str, mime_type: &str) -> Option<String> {
+    let mime = mime_type.trim();
+    if matches!(mime, "image/png" | "image/jpeg" | "image/webp") {
+        return Some(mime.to_string());
+    }
+
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        Some("image/png".to_string())
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        Some("image/jpeg".to_string())
+    } else if lower.ends_with(".webp") {
+        Some("image/webp".to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn video_reference_image_from_file(
+    file: web_sys::File,
+) -> Result<ReferenceImageRequest, String> {
+    let file_name = file.name();
+    let mime_type = normalize_video_reference_image_mime(&file_name, &file.type_())
+        .ok_or_else(|| "参考图片仅支持 PNG、JPG、WebP。".to_string())?;
+    let array_buffer = JsFuture::from(file.array_buffer())
+        .await
+        .map_err(|_| "参考图片读取失败。".to_string())?;
+    let bytes = Uint8Array::new(&array_buffer).to_vec();
+    if bytes.is_empty() {
+        return Err("参考图片不能为空。".to_string());
+    }
+    if bytes.len() > VIDEO_REFERENCE_IMAGE_MAX_BYTES {
+        return Err("参考图片不能超过 8MB。".to_string());
+    }
+
+    Ok(ReferenceImageRequest {
+        mime_type: mime_type.clone(),
+        data_url: format!(
+            "data:{};base64,{}",
+            mime_type,
+            general_purpose::STANDARD.encode(bytes)
+        ),
+        file_name: Some(file_name),
+    })
 }
 
 fn build_seedance_prompt_from_package(
@@ -270,11 +354,13 @@ fn persist_video_marketing_draft(
     task: VideoMarketingTask,
     options: VideoGenerationOptions,
     package: Option<VideoPackageResponse>,
+    reference_image: Option<ReferenceImageRequest>,
 ) {
     save_video_marketing_draft(&normalize_video_marketing_draft(VideoMarketingDraft {
         task,
         options,
         package,
+        reference_image,
     }));
 }
 
@@ -338,6 +424,9 @@ fn merge_video_task_update(
     if updated.queue_position.is_none() {
         updated.queue_position = previous.queue_position;
     }
+    if updated.reference_image_count.is_none() {
+        updated.reference_image_count = previous.reference_image_count;
+    }
     if updated.submitted_at.is_none() {
         updated.submitted_at = previous.submitted_at.clone();
     }
@@ -366,6 +455,10 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
     let (generation_options, set_generation_options) = signal(restored_draft.options);
     let (task_status, set_task_status) = signal(initial_task_status);
     let (package, set_package) = signal(restored_draft.package);
+    let (reference_image, set_reference_image) = signal(restored_draft.reference_image);
+    let (reference_image_error, set_reference_image_error) = signal::<Option<String>>(None);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = set_reference_image_error;
     let (package_error, set_package_error) = signal::<Option<String>>(None);
     let (package_loading, set_package_loading) = signal(false);
     let (video_tasks, set_video_tasks) = signal::<Vec<VideoTaskResponse>>(restored_video_tasks);
@@ -430,6 +523,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
         let service = video_service.get_value();
         let current_task = task.get();
         let options = generation_options.get();
+        let current_reference_image = reference_image.get();
         let req = CreateVideoPackageRequest {
             product: current_task.product.clone(),
             selling_points: current_task.selling_points.clone(),
@@ -440,6 +534,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
             duration_seconds: Some(options.duration_seconds),
             ratio: Some(options.ratio.clone()),
             generate_audio: Some(options.generate_audio),
+            reference_images: reference_images_for_request(&current_reference_image),
         };
 
         set_package_loading.set(true);
@@ -450,7 +545,12 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
         spawn_local(async move {
             match service.create_video_package(&req).await {
                 Ok(response) => {
-                    persist_video_marketing_draft(current_task, options, Some(response.clone()));
+                    persist_video_marketing_draft(
+                        current_task,
+                        options,
+                        Some(response.clone()),
+                        current_reference_image,
+                    );
                     set_package.set(Some(response));
                     set_task_status.set("脚本包待审核".to_string());
                 }
@@ -472,6 +572,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
         let service = video_service.get_value();
         let current_task = task.get();
         let options = generation_options.get();
+        let current_reference_image = reference_image.get();
         let req = CreateVideoTaskRequest {
             product: current_task.product.clone(),
             platform: current_task.platform.clone(),
@@ -482,6 +583,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
             ratio: options.ratio.clone(),
             generate_audio: options.generate_audio,
             watermark: options.watermark,
+            reference_images: reference_images_for_request(&current_reference_image),
         };
 
         set_video_loading.set(true);
@@ -559,19 +661,19 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                             set_task.update(|task| task.product = value);
                             set_package.set(None);
                             set_task_status.set("待生成脚本包".to_string());
-                            persist_video_marketing_draft(task.get(), generation_options.get(), None);
+                            persist_video_marketing_draft(task.get(), generation_options.get(), None, reference_image.get());
                         } />
                         <TextField label="核心卖点" value=Signal::derive(move || task.get().selling_points) on_input=move |value| {
                             set_task.update(|task| task.selling_points = value);
                             set_package.set(None);
                             set_task_status.set("待生成脚本包".to_string());
-                            persist_video_marketing_draft(task.get(), generation_options.get(), None);
+                            persist_video_marketing_draft(task.get(), generation_options.get(), None, reference_image.get());
                         } />
                         <TextField label="目标人群" value=Signal::derive(move || task.get().audience) on_input=move |value| {
                             set_task.update(|task| task.audience = value);
                             set_package.set(None);
                             set_task_status.set("待生成脚本包".to_string());
-                            persist_video_marketing_draft(task.get(), generation_options.get(), None);
+                            persist_video_marketing_draft(task.get(), generation_options.get(), None, reference_image.get());
                         } />
                         <SelectField
                             label="营销目标"
@@ -581,7 +683,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                                 set_task.update(|task| task.goal = value);
                                 set_package.set(None);
                                 set_task_status.set("待生成脚本包".to_string());
-                                persist_video_marketing_draft(task.get(), generation_options.get(), None);
+                                persist_video_marketing_draft(task.get(), generation_options.get(), None, reference_image.get());
                             }
                         />
                         <SelectField
@@ -592,9 +694,75 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                                 set_task.update(|task| task.style = value);
                                 set_package.set(None);
                                 set_task_status.set("待生成脚本包".to_string());
-                                persist_video_marketing_draft(task.get(), generation_options.get(), None);
+                                persist_video_marketing_draft(task.get(), generation_options.get(), None, reference_image.get());
                             }
                         />
+                        <div class="ai-video-field ai-video-upload-field">
+                            <span>"参考图片"</span>
+                            <input
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                on:change=move |event| {
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        let input = event
+                                            .target()
+                                            .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok());
+                                        let file = input
+                                            .and_then(|input| input.files())
+                                            .and_then(|files| files.get(0));
+                                        if let Some(file) = file {
+                                            set_reference_image_error.set(None);
+                                            spawn_local(async move {
+                                                match video_reference_image_from_file(file).await {
+                                                    Ok(image) => {
+                                                        set_reference_image.set(Some(image.clone()));
+                                                        set_package.set(None);
+                                                        set_task_status.set("待生成脚本包".to_string());
+                                                        persist_video_marketing_draft(
+                                                            task.get_untracked(),
+                                                            generation_options.get_untracked(),
+                                                            None,
+                                                            Some(image),
+                                                        );
+                                                    }
+                                                    Err(err) => set_reference_image_error.set(Some(err)),
+                                                }
+                                            });
+                                        }
+                                    }
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        let _ = event;
+                                    }
+                                }
+                            />
+                            {move || reference_image.get().map(|image| {
+                                let name = reference_image_display_name(&image);
+                                view! {
+                                    <div class="ai-video-reference-image">
+                                        <img src=image.data_url.clone() alt=name.clone() />
+                                        <div>
+                                            <strong>{name}</strong>
+                                            <button class="btn btn-secondary" type="button" on:click=move |_| {
+                                                set_reference_image.set(None);
+                                                set_package.set(None);
+                                                set_task_status.set("待生成脚本包".to_string());
+                                                persist_video_marketing_draft(
+                                                    task.get_untracked(),
+                                                    generation_options.get_untracked(),
+                                                    None,
+                                                    None,
+                                                );
+                                            }>"移除"</button>
+                                        </div>
+                                    </div>
+                                }
+                            })}
+                            {move || reference_image_error.get().map(|error| view! {
+                                <p class="ai-video-upload-error">{error}</p>
+                            })}
+                        </div>
                     </div>
                 </div>
 
@@ -636,7 +804,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                         options=VIDEO_MODEL_OPTIONS.to_vec()
                         on_change=move |value| {
                             set_generation_options.update(|options| options.model = value);
-                            persist_video_marketing_draft(task.get(), generation_options.get(), package.get());
+                            persist_video_marketing_draft(task.get(), generation_options.get(), package.get(), reference_image.get());
                         }
                     />
                     <SelectField
@@ -645,7 +813,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                         options=vec!["480p", "720p", "1080p"]
                         on_change=move |value| {
                             set_generation_options.update(|options| options.resolution = value);
-                            persist_video_marketing_draft(task.get(), generation_options.get(), package.get());
+                            persist_video_marketing_draft(task.get(), generation_options.get(), package.get(), reference_image.get());
                         }
                     />
                     <SelectField
@@ -656,7 +824,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                             set_generation_options.update(|options| options.ratio = value);
                             set_package.set(None);
                             set_task_status.set("待生成脚本包".to_string());
-                            persist_video_marketing_draft(task.get(), generation_options.get(), None);
+                            persist_video_marketing_draft(task.get(), generation_options.get(), None, reference_image.get());
                         }
                     />
                     <SelectField
@@ -668,7 +836,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                                 set_generation_options.update(|options| options.duration_seconds = duration);
                                 set_package.set(None);
                                 set_task_status.set("待生成脚本包".to_string());
-                                persist_video_marketing_draft(task.get(), generation_options.get(), None);
+                                persist_video_marketing_draft(task.get(), generation_options.get(), None, reference_image.get());
                             }
                         }
                     />
@@ -799,6 +967,10 @@ fn VideoTaskCard(task: VideoTaskResponse, options: VideoGenerationOptions) -> im
                 <span>"参数"</span>
                 <strong>{format_video_options_with_defaults(&task, &options)}</strong>
             </div>
+            <div>
+                <span>"参考图"</span>
+                <strong>{reference_image_count_label(task.reference_image_count)}</strong>
+            </div>
             <p>{task.message.clone()}</p>
             {task.updated_at.clone().map(|updated_at| view! {
                 <small>{format!("更新：{}", updated_at)}</small>
@@ -816,6 +988,7 @@ fn VideoPreview(task: VideoTaskResponse, options: VideoGenerationOptions) -> imp
             <div>
                 <strong>{task.model.clone()}</strong>
                 <span>{format_video_options_with_defaults(&task, &options)}</span>
+                <span>{reference_image_count_label(task.reference_image_count)}</span>
                 <a class="btn btn-secondary" href=url target="_blank" rel="noopener noreferrer">"查看原视频"</a>
             </div>
         </article>
@@ -835,7 +1008,7 @@ fn format_video_options_with_defaults(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{GraphicMarketingCheck, VideoPackageResponse};
+    use crate::api::{GraphicMarketingCheck, ReferenceImageRequest, VideoPackageResponse};
 
     #[test]
     fn seedance_prompt_uses_agent_generated_package() {
@@ -892,6 +1065,7 @@ mod tests {
             task: default_video_marketing_task(),
             options: default_video_generation_options(),
             package: Some(sample_video_package()),
+            reference_image: None,
         };
 
         let encoded = serde_json::to_string(&draft).unwrap();
@@ -912,11 +1086,37 @@ mod tests {
     }
 
     #[test]
+    fn video_marketing_draft_round_trips_reference_image() {
+        let draft = VideoMarketingDraft {
+            task: default_video_marketing_task(),
+            options: default_video_generation_options(),
+            package: None,
+            reference_image: Some(sample_reference_image()),
+        };
+
+        let encoded = serde_json::to_string(&draft).unwrap();
+        let restored: VideoMarketingDraft = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(
+            restored
+                .reference_image
+                .as_ref()
+                .and_then(|image| image.file_name.as_deref()),
+            Some("product.png")
+        );
+        assert_eq!(
+            reference_images_for_request(&restored.reference_image).len(),
+            1
+        );
+    }
+
+    #[test]
     fn video_marketing_draft_hides_platform_as_internal_default() {
         let mut draft = VideoMarketingDraft {
             task: default_video_marketing_task(),
             options: default_video_generation_options(),
             package: None,
+            reference_image: None,
         };
         draft.task.platform = "小红书".to_string();
 
@@ -984,6 +1184,19 @@ mod tests {
         assert_eq!(queue[0].resolution.as_deref(), Some("720p"));
         assert_eq!(queue[0].ratio.as_deref(), Some("9:16"));
         assert_eq!(queue[0].duration_seconds, Some(8));
+    }
+
+    #[test]
+    fn video_task_queue_preserves_reference_image_count_when_history_lacks_it() {
+        let mut queue = vec![sample_video_task("task-1", "queued", None)];
+        queue[0].reference_image_count = Some(1);
+        let mut history_task =
+            sample_video_task("task-1", "completed", Some("https://cdn.example/video.mp4"));
+        history_task.reference_image_count = None;
+
+        upsert_video_task(&mut queue, history_task);
+
+        assert_eq!(queue[0].reference_image_count, Some(1));
     }
 
     #[test]
@@ -1089,6 +1302,15 @@ mod tests {
             queue_position: Some(1),
             submitted_at: Some("2026-06-03T00:00:00Z".to_string()),
             updated_at: Some("2026-06-03T00:00:00Z".to_string()),
+            reference_image_count: Some(0),
+        }
+    }
+
+    fn sample_reference_image() -> ReferenceImageRequest {
+        ReferenceImageRequest {
+            mime_type: "image/png".to_string(),
+            data_url: "data:image/png;base64,aGVsbG8=".to_string(),
+            file_name: Some("product.png".to_string()),
         }
     }
 }

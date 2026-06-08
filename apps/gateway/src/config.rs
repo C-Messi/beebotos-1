@@ -32,6 +32,8 @@ pub struct BeeBotOSConfig {
     #[serde(default)]
     pub image_generation: ImageGenerationConfig,
     #[serde(default)]
+    pub image_understanding: ImageUnderstandingConfig,
+    #[serde(default)]
     pub video_generation: VideoGenerationConfig,
     #[serde(default)]
     pub voice_marketing: VoiceMarketingConfig,
@@ -144,6 +146,7 @@ impl Default for BeeBotOSConfig {
             tls: None,
             models: ModelsConfig::default(),
             image_generation: ImageGenerationConfig::default(),
+            image_understanding: ImageUnderstandingConfig::default(),
             video_generation: VideoGenerationConfig::default(),
             voice_marketing: VoiceMarketingConfig::default(),
             channels: ChannelsConfig::default(),
@@ -452,6 +455,22 @@ pub struct ImageGenerationConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImageUnderstandingConfig {
+    #[serde(default = "default_image_understanding_base_url")]
+    pub base_url: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_empty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub api_key: Option<String>,
+    #[serde(default = "default_image_understanding_model")]
+    pub model: String,
+    #[serde(default = "default_image_understanding_timeout")]
+    pub timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VideoGenerationConfig {
     #[serde(default = "default_video_generation_base_url")]
     pub base_url: String,
@@ -532,6 +551,17 @@ impl Default for ImageGenerationConfig {
     }
 }
 
+impl Default for ImageUnderstandingConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_image_understanding_base_url(),
+            api_key: None,
+            model: default_image_understanding_model(),
+            timeout_seconds: default_image_understanding_timeout(),
+        }
+    }
+}
+
 impl Default for VideoGenerationConfig {
     fn default() -> Self {
         Self {
@@ -574,6 +604,18 @@ fn default_image_generation_model() -> String {
 
 fn default_image_generation_timeout() -> u64 {
     180
+}
+
+fn default_image_understanding_base_url() -> String {
+    "https://ark.cn-beijing.volces.com/api/plan/v3".to_string()
+}
+
+fn default_image_understanding_model() -> String {
+    "doubao-seed-2.0-lite".to_string()
+}
+
+fn default_image_understanding_timeout() -> u64 {
+    90
 }
 
 fn default_video_generation_base_url() -> String {
@@ -626,6 +668,10 @@ where
     T: std::str::FromStr,
 {
     env_string(key).and_then(|value| value.parse::<T>().ok())
+}
+
+fn is_agent_plan_base_url(base_url: &str) -> bool {
+    base_url.trim().trim_end_matches('/').contains("/api/plan/")
 }
 
 /// Channels configuration - flattened structure like beebot
@@ -843,6 +889,7 @@ impl BeeBotOSConfig {
         let mut cfg: Self = config.try_deserialize()?;
         cfg.apply_image_generation_env();
         cfg.apply_video_generation_env();
+        cfg.apply_image_understanding_env();
         cfg.apply_voice_marketing_env();
 
         // 数据库路径归一化：如果是相对路径，则转换为基于配置文件目录的绝对路径
@@ -912,6 +959,35 @@ impl BeeBotOSConfig {
 
         if let Some(model) = env_string("IMAGE_GENERATION_MODEL") {
             self.image_generation.model = model;
+        }
+    }
+
+    fn apply_image_understanding_env(&mut self) {
+        if let Some(base_url) = env_string("IMAGE_UNDERSTANDING_BASE_URL") {
+            self.image_understanding.base_url = base_url;
+        }
+
+        if let Some(api_key) =
+            env_string("IMAGE_UNDERSTANDING_API_KEY").or_else(|| env_string("ARK_API_KEY"))
+        {
+            self.image_understanding.api_key = Some(api_key);
+        }
+
+        if self.image_understanding.api_key.is_none()
+            && is_agent_plan_base_url(&self.image_understanding.base_url)
+        {
+            self.image_understanding.api_key = env_string("VIDEO_GENERATION_API_KEY")
+                .or_else(|| env_string("IMAGE_GENERATION_API_KEY"))
+                .or_else(|| self.video_generation.api_key.clone())
+                .or_else(|| self.image_generation.api_key.clone());
+        }
+
+        if let Some(model) = env_string("IMAGE_UNDERSTANDING_MODEL") {
+            self.image_understanding.model = model;
+        }
+
+        if let Some(timeout) = env_parsed("IMAGE_UNDERSTANDING_TIMEOUT_SECONDS") {
+            self.image_understanding.timeout_seconds = timeout;
         }
     }
 
@@ -1272,6 +1348,95 @@ mod tests {
     }
 
     #[test]
+    fn default_image_understanding_config_targets_agent_plan_multimodal() {
+        let config = ImageUnderstandingConfig::default();
+
+        assert_eq!(
+            config.base_url,
+            "https://ark.cn-beijing.volces.com/api/plan/v3"
+        );
+        assert!(config.api_key.is_none());
+        assert_eq!(config.model, "doubao-seed-2.0-lite");
+        assert_eq!(config.timeout_seconds, 90);
+    }
+
+    #[test]
+    fn image_understanding_config_uses_ark_api_key_fallback() {
+        let _lock = IMAGE_GENERATION_ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::new(&[
+            "IMAGE_UNDERSTANDING_API_KEY",
+            "ARK_API_KEY",
+            "VIDEO_GENERATION_API_KEY",
+            "IMAGE_GENERATION_API_KEY",
+        ]);
+
+        std::env::remove_var("IMAGE_UNDERSTANDING_API_KEY");
+        std::env::set_var("ARK_API_KEY", "ark-test-key");
+        std::env::set_var("VIDEO_GENERATION_API_KEY", "video-test-key");
+        std::env::set_var("IMAGE_GENERATION_API_KEY", "image-test-key");
+
+        let mut config = BeeBotOSConfig::default();
+        config.apply_image_understanding_env();
+
+        assert_eq!(
+            config.image_understanding.api_key.as_deref(),
+            Some("ark-test-key")
+        );
+    }
+
+    #[test]
+    fn image_understanding_config_reuses_plan_video_key_for_agent_plan_multimodal() {
+        let _lock = IMAGE_GENERATION_ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::new(&[
+            "IMAGE_UNDERSTANDING_BASE_URL",
+            "IMAGE_UNDERSTANDING_API_KEY",
+            "ARK_API_KEY",
+            "VIDEO_GENERATION_API_KEY",
+            "IMAGE_GENERATION_API_KEY",
+        ]);
+
+        std::env::remove_var("IMAGE_UNDERSTANDING_BASE_URL");
+        std::env::remove_var("IMAGE_UNDERSTANDING_API_KEY");
+        std::env::remove_var("ARK_API_KEY");
+        std::env::set_var("VIDEO_GENERATION_API_KEY", "video-test-key");
+        std::env::set_var("IMAGE_GENERATION_API_KEY", "image-test-key");
+
+        let mut config = BeeBotOSConfig::default();
+        config.apply_image_understanding_env();
+
+        assert_eq!(
+            config.image_understanding.api_key.as_deref(),
+            Some("video-test-key")
+        );
+    }
+
+    #[test]
+    fn image_understanding_config_does_not_reuse_plan_key_for_standard_ark() {
+        let _lock = IMAGE_GENERATION_ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::new(&[
+            "IMAGE_UNDERSTANDING_BASE_URL",
+            "IMAGE_UNDERSTANDING_API_KEY",
+            "ARK_API_KEY",
+            "VIDEO_GENERATION_API_KEY",
+            "IMAGE_GENERATION_API_KEY",
+        ]);
+
+        std::env::set_var(
+            "IMAGE_UNDERSTANDING_BASE_URL",
+            "https://ark.cn-beijing.volces.com/api/v3",
+        );
+        std::env::remove_var("IMAGE_UNDERSTANDING_API_KEY");
+        std::env::remove_var("ARK_API_KEY");
+        std::env::set_var("VIDEO_GENERATION_API_KEY", "video-test-key");
+        std::env::set_var("IMAGE_GENERATION_API_KEY", "image-test-key");
+
+        let mut config = BeeBotOSConfig::default();
+        config.apply_image_understanding_env();
+
+        assert!(config.image_understanding.api_key.is_none());
+    }
+
+    #[test]
     fn default_video_generation_config_targets_volcengine_seedance() {
         let config = VideoGenerationConfig::default();
 
@@ -1543,6 +1708,7 @@ api_key = ""
                 },
             },
             image_generation: ImageGenerationConfig::default(),
+            image_understanding: ImageUnderstandingConfig::default(),
             video_generation: VideoGenerationConfig::default(),
             voice_marketing: VoiceMarketingConfig::default(),
             channels: ChannelsConfig {

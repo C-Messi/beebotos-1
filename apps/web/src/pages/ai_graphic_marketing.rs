@@ -17,7 +17,7 @@ use wasm_bindgen_futures::JsFuture;
 use crate::api::{
     create_ai_store_manager_service, CreateGraphicImageEditRequest, CreateGraphicImageRequest,
     CreateGraphicPackageRequest, GraphicImageResponse, GraphicMarketingCheck,
-    GraphicPackageResponse,
+    GraphicMarketingHistoryItem, GraphicPackageResponse,
 };
 use crate::state::use_app_state;
 use crate::utils::event_target_value;
@@ -93,6 +93,7 @@ fn default_graphic_marketing_draft() -> GraphicMarketingDraft {
 
 pub fn fallback_graphic_package(task: &GraphicMarketingTask) -> GraphicPackageResponse {
     GraphicPackageResponse {
+        history_id: None,
         title_options: vec![
             format!("{}真实体验，{}也会想收藏", task.product, task.audience),
             format!("{}｜{}入手前先看这篇", task.product, task.selling_points),
@@ -270,6 +271,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
     let (image_error, set_image_error) = signal::<Option<String>>(None);
     let (image_loading, set_image_loading) = signal(false);
     let (image_preview_src, set_image_preview_src) = signal::<Option<String>>(None);
+    let (history, set_history) = signal::<Vec<GraphicMarketingHistoryItem>>(Vec::new());
     let service = create_ai_store_manager_service(use_app_state().api_client());
     let service = StoredValue::new(service);
     let busy = Signal::derive(move || package_loading.get() || image_loading.get());
@@ -291,6 +293,15 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
             product_image: product_image.get(),
         });
     });
+
+    {
+        let service = service.get_value();
+        spawn_local(async move {
+            if let Ok(items) = service.list_graphic_history().await {
+                set_history.set(items);
+            }
+        });
+    }
 
     let generate_package = move || {
         if busy.get_untracked() {
@@ -331,6 +342,9 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                     set_package.set(created);
                     set_package_ready.set(true);
                     set_task_status.set("待审核".to_string());
+                    if let Ok(items) = service.list_graphic_history().await {
+                        set_history.set(items);
+                    }
                 }
                 Err(err) => {
                     set_package_error.set(Some(err.to_string()));
@@ -362,6 +376,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
             prompt: image_prompt,
             size: current_task.size.clone(),
             quality: current_task.quality.clone(),
+            package_id: current_package.history_id.clone(),
         };
 
         set_image_loading.set(true);
@@ -382,6 +397,7 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                         image_b64: product_image.b64_json,
                         image_mime_type: product_image.mime_type,
                         image_filename: product_image.filename,
+                        package_id: req.package_id.clone(),
                     })
                     .await
             } else {
@@ -401,6 +417,9 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                 Ok(created) => {
                     set_image_result.set(Some(created));
                     set_task_status.set("图片已生成".to_string());
+                    if let Ok(items) = service.list_graphic_history().await {
+                        set_history.set(items);
+                    }
                 }
                 Err(err) => {
                     set_image_error.set(Some(err.to_string()));
@@ -652,6 +671,13 @@ pub fn AiGraphicMarketingPage() -> impl IntoView {
                             view! { <></> }.into_any()
                         }
                     }}
+                    <div class="section-title compact">
+                        <h2>"历史记录"</h2>
+                    </div>
+                    <GraphicHistoryList
+                        history=Signal::derive(move || history.get())
+                        on_preview=move |src| set_image_preview_src.set(Some(src))
+                    />
                 </section>
             </section>
 
@@ -778,6 +804,86 @@ fn GraphicImageCard(
                 {download_href.map(|href| view! {
                     <a class="btn btn-secondary" href=href download=download_filename>"下载图片"</a>
                 })}
+            </div>
+        </article>
+    }
+}
+
+#[component]
+fn GraphicHistoryList(
+    history: Signal<Vec<GraphicMarketingHistoryItem>>,
+    on_preview: impl Fn(String) + Clone + Send + 'static,
+) -> impl IntoView {
+    view! {
+        {move || {
+            let items = history.get();
+            if items.is_empty() {
+                view! { <div class="ai-video-task-card">"暂无历史记录"</div> }.into_any()
+            } else {
+                view! {
+                    <div class="ai-video-result-list">
+                        {items.into_iter().map(|item| view! {
+                            <GraphicHistoryCard item=item on_preview=on_preview.clone() />
+                        }).collect_view()}
+                    </div>
+                }.into_any()
+            }
+        }}
+    }
+}
+
+#[component]
+fn GraphicHistoryCard(
+    item: GraphicMarketingHistoryItem,
+    on_preview: impl Fn(String) + Clone + Send + 'static,
+) -> impl IntoView {
+    let image = item.image.clone();
+    let image_src = image.as_ref().and_then(graphic_image_src);
+    let title = item
+        .package
+        .as_ref()
+        .and_then(|package| package.title_options.first().cloned())
+        .unwrap_or_else(|| item.product.clone());
+    let image_prompt = item.image_prompt.clone().or_else(|| {
+        item.package
+            .as_ref()
+            .map(|package| package.image_prompt.clone())
+    });
+    let meta = format!(
+        "{} · {}{}",
+        item.platform,
+        item.updated_at,
+        item.size
+            .as_ref()
+            .map(|size| format!(" · {}", size))
+            .unwrap_or_default()
+    );
+
+    view! {
+        <article class="ai-video-task-card">
+            <strong>{title}</strong>
+            <p>{meta}</p>
+            {image_src.clone().map(|src| {
+                let preview_src = src.clone();
+                let on_preview = on_preview.clone();
+                view! {
+                    <button
+                        type="button"
+                        class="ai-graphic-image-open"
+                        on:click=move |_| on_preview(preview_src.clone())
+                    >
+                        <img src=src alt="历史图文营销图片" loading="lazy" />
+                    </button>
+                }
+            })}
+            {image_prompt.map(|prompt| view! {
+                <p>{prompt}</p>
+            })}
+            <div class="ai-graphic-image-actions">
+                {image.and_then(|image| graphic_image_download_href(&image).map(|href| {
+                    let filename = graphic_image_download_filename(&image);
+                    view! { <a class="btn btn-secondary" href=href download=filename>"下载图片"</a> }
+                }))}
             </div>
         </article>
     }
@@ -955,6 +1061,7 @@ mod tests {
             prompt: package.image_prompt.clone(),
             size: task.size.clone(),
             quality: task.quality.clone(),
+            package_id: package.history_id.clone(),
         };
         let mut changed_task = task.clone();
         changed_task.platform = "朋友圈".to_string();

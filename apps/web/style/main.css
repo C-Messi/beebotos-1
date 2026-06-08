@@ -1169,6 +1169,46 @@ body {
     font-size: 13px;
 }
 
+.ai-video-upload-field input[type="file"] {
+    padding: 9px 10px;
+}
+
+.ai-video-reference-image {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    padding: 10px;
+    background: var(--bg-glass);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+}
+
+.ai-video-reference-image img {
+    width: 72px;
+    height: 72px;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+}
+
+.ai-video-reference-image strong {
+    color: var(--text-primary);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.ai-video-reference-image .btn {
+    width: fit-content;
+    margin-top: 8px;
+}
+
+.ai-video-upload-error {
+    color: var(--danger);
+    font-size: 12px;
+    margin: 0;
+}
+
 .ai-video-result-item {
     padding: 14px;
 }
@@ -1953,6 +1993,19 @@ body {
 }
 
 .session-item:hover .btn-delete {
+    opacity: 1;
+}
+
+.session-delete-btn {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+}
+
+.session-list-item:hover .session-delete-btn,
+.session-list-item.selected .session-delete-btn {
     opacity: 1;
 }
 

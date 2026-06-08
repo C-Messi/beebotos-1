@@ -10,12 +10,14 @@ pub fn SessionList(
     sessions: Signal<Vec<ChatSession>>,
     #[prop(into)] selected_id: Signal<String>,
     #[prop(optional)] on_select: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+    #[prop(optional)] on_delete: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
 ) -> impl IntoView {
     view! {
         <div class="session-list-container">
             <div class="session-list">
                 {move || {
                     let on_select = on_select.clone();
+                    let on_delete = on_delete.clone();
                     let mut sorted_sessions = sessions.get();
                     sorted_sessions.sort_by(|a, b| {
                         if a.is_pinned && !b.is_pinned {
@@ -46,6 +48,7 @@ pub fn SessionList(
 
                                     {
                                         let id_select = id.clone();
+                                        let id_delete = id.clone();
                                         view! {
                                             <SessionListItem
                                                 session=session
@@ -56,6 +59,14 @@ pub fn SessionList(
                                                     Callback::from(move || {
                                                         if let Some(ref cb) = on_select {
                                                             cb(id_select.clone());
+                                                        }
+                                                    })
+                                                }
+                                                on_delete={
+                                                    let on_delete = on_delete.clone();
+                                                    Callback::from(move || {
+                                                        if let Some(ref cb) = on_delete {
+                                                            cb(id_delete.clone());
                                                         }
                                                     })
                                                 }
@@ -79,6 +90,7 @@ fn SessionListItem(
     #[prop(into)] selected_id: Signal<String>,
     is_active: bool,
     #[prop(into)] on_select: Callback<()>,
+    #[prop(into)] on_delete: Callback<()>,
 ) -> impl IntoView {
     let session_id = session.id.clone();
     let class = Signal::derive(move || {
@@ -133,6 +145,17 @@ fn SessionListItem(
                     <span>{format_timestamp(&session.updated_at)}</span>
                 </div>
             </div>
+            <button
+                class="btn btn-icon session-delete-btn"
+                title="Delete session"
+                aria-label="Delete session"
+                on:click=move |ev| {
+                    ev.stop_propagation();
+                    on_delete.run(());
+                }
+            >
+                "×"
+            </button>
         </div>
     }
 }

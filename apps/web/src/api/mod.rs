@@ -19,8 +19,8 @@ pub mod webchat;
 pub use ai_store_manager::{
     AiStoreManagerService, CreateGraphicImageEditRequest, CreateGraphicImageRequest,
     CreateGraphicPackageRequest, CreateVideoPackageRequest, CreateVideoTaskRequest,
-    GraphicImageResponse, GraphicMarketingCheck, GraphicPackageResponse, VideoPackageResponse,
-    VideoTaskResponse,
+    GraphicImageResponse, GraphicMarketingCheck, GraphicMarketingHistoryItem,
+    GraphicPackageResponse, ReferenceImageRequest, VideoPackageResponse, VideoTaskResponse,
 };
 pub use browser::{
     BrowserApiService, ClickRequest, EvaluateResponse, InputRequest, NavigationResponse,

@@ -14,7 +14,7 @@ use crate::components::webchat::{
     use_websocket_chat, MessageInput, MessageList, SessionList, SidePanel, UsagePanelComponent,
 };
 use crate::state::{use_auth_state, use_chat_ui_state, use_webchat_state};
-use crate::webchat::{ChatMessage, MessageMetadata, MessageRole};
+use crate::webchat::{ChatMessage, ChatSession, MessageMetadata, MessageRole};
 
 /// 获取或创建持久化的会话 ID（仅作本地缓存，后端为准）
 fn get_stored_session_id() -> Option<String> {
@@ -23,6 +23,10 @@ fn get_stored_session_id() -> Option<String> {
 
 fn store_session_id(id: &str) {
     let _ = LocalStorage::set("beebotos_webchat_session_id", id);
+}
+
+fn clear_stored_session_id() {
+    LocalStorage::delete("beebotos_webchat_session_id");
 }
 
 fn is_placeholder_assistant(message: &ChatMessage) -> bool {
@@ -64,6 +68,71 @@ fn should_refresh_after_send(current: &[ChatMessage], fetched: &[ChatMessage]) -
                     != tool_calls_json(&fetched_latest.metadata)
         }
         None => true,
+    }
+}
+
+fn next_session_after_delete(
+    sessions: &[ChatSession],
+    deleted_id: &str,
+    current_session_id: Option<&str>,
+) -> Option<String> {
+    if current_session_id != Some(deleted_id) {
+        return current_session_id.map(str::to_string);
+    }
+
+    let mut remaining: Vec<&ChatSession> = sessions
+        .iter()
+        .filter(|session| session.id != deleted_id)
+        .collect();
+    remaining.sort_by(|a, b| {
+        if a.is_pinned && !b.is_pinned {
+            std::cmp::Ordering::Less
+        } else if !a.is_pinned && b.is_pinned {
+            std::cmp::Ordering::Greater
+        } else {
+            b.updated_at.cmp(&a.updated_at)
+        }
+    });
+
+    remaining.first().map(|session| session.id.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(id: &str, updated_at: &str) -> ChatSession {
+        let mut session = ChatSession::new("Test");
+        session.id = id.to_string();
+        session.updated_at = updated_at.to_string();
+        session
+    }
+
+    #[test]
+    fn keeps_current_session_when_deleting_another_session() {
+        let sessions = vec![
+            session("old", "2026-06-01T00:00:00Z"),
+            session("current", "2026-06-02T00:00:00Z"),
+        ];
+
+        assert_eq!(
+            next_session_after_delete(&sessions, "old", Some("current")),
+            Some("current".to_string())
+        );
+    }
+
+    #[test]
+    fn selects_latest_remaining_session_when_deleting_current_session() {
+        let sessions = vec![
+            session("old", "2026-06-01T00:00:00Z"),
+            session("deleted", "2026-06-03T00:00:00Z"),
+            session("next", "2026-06-02T00:00:00Z"),
+        ];
+
+        assert_eq!(
+            next_session_after_delete(&sessions, "deleted", Some("deleted")),
+            Some("next".to_string())
+        );
     }
 }
 
@@ -394,6 +463,106 @@ pub fn WebchatPage() -> impl IntoView {
         }
     });
 
+    // 删除会话
+    let chat_state_delete = chat_state.clone();
+    let auth_state_delete = auth_state.clone();
+    let on_delete_session: std::sync::Arc<dyn Fn(String) + Send + Sync> = std::sync::Arc::new({
+        let chat_state = chat_state_delete.clone();
+        move |id: String| {
+            let confirmed = web_sys::window()
+                .and_then(|window| window.confirm_with_message("Delete this chat?").ok())
+                .unwrap_or(false);
+            if !confirmed {
+                return;
+            }
+
+            let current_id = chat_state.current_session_id.get();
+            let deleting_current = current_id.as_deref() == Some(id.as_str());
+            if deleting_current && (chat_state.is_sending.get() || chat_state.is_streaming.get()) {
+                chat_state.set_error(Some("请先停止当前生成后再删除会话".to_string()));
+                return;
+            }
+
+            let chat_state = chat_state.clone();
+            let auth_state = auth_state_delete.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let client = create_client();
+                client.set_auth_token(auth_state.get_token());
+                let service = create_webchat_service(client);
+
+                match service.delete_session(&id).await {
+                    Ok(()) => {
+                        let next_id = chat_state.sessions.with(|sessions| {
+                            next_session_after_delete(sessions, &id, current_id.as_deref())
+                        });
+
+                        chat_state.sessions.update(|sessions| {
+                            sessions.retain(|session| session.id != id);
+                        });
+                        chat_state.message_cache.update(|cache| {
+                            cache.remove(&id);
+                        });
+                        chat_state.set_error(None);
+
+                        if !deleting_current {
+                            return;
+                        }
+
+                        match next_id {
+                            Some(next_id) => {
+                                chat_state.current_session_id.set(Some(next_id.clone()));
+                                store_session_id(&next_id);
+
+                                let cached = chat_state
+                                    .message_cache
+                                    .with(|cache| cache.get(&next_id).cloned());
+                                if let Some(msgs) = cached {
+                                    chat_state.current_messages.set(msgs);
+                                    return;
+                                }
+
+                                match service.get_messages(&next_id).await {
+                                    Ok(msgs) => {
+                                        chat_state.current_messages.set(msgs.clone());
+                                        chat_state.message_cache.update(|cache| {
+                                            cache.insert(next_id.clone(), msgs);
+                                        });
+                                    }
+                                    Err(e) => {
+                                        chat_state.set_error(Some(format!("加载消息失败: {}", e)));
+                                        chat_state.current_messages.set(Vec::new());
+                                    }
+                                }
+                            }
+                            None => {
+                                clear_stored_session_id();
+                                match service.create_session("新会话").await {
+                                    Ok(session) => {
+                                        let id = session.id.clone();
+                                        chat_state
+                                            .sessions
+                                            .update(|sessions| sessions.push(session));
+                                        chat_state.current_session_id.set(Some(id.clone()));
+                                        chat_state.current_messages.set(Vec::new());
+                                        store_session_id(&id);
+                                    }
+                                    Err(e) => {
+                                        chat_state.current_session_id.set(None);
+                                        chat_state.current_messages.set(Vec::new());
+                                        chat_state.set_error(Some(format!("创建会话失败: {}", e)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        chat_state.set_error(Some(format!("删除会话失败: {}", e)));
+                    }
+                }
+            });
+        }
+    });
+
     // 当前会话标题
     let current_title = Signal::derive({
         let chat_state = chat_state.clone();
@@ -423,6 +592,7 @@ pub fn WebchatPage() -> impl IntoView {
                 <SessionsSidebar
                     on_select=on_select_session.clone()
                     on_new=on_new_session.clone()
+                    on_delete=on_delete_session.clone()
                     show_sessions_panel=show_sessions_panel
                 />
 
@@ -507,6 +677,7 @@ pub fn WebchatPage() -> impl IntoView {
 fn SessionsSidebar(
     #[prop(into)] on_select: std::sync::Arc<dyn Fn(String) + Send + Sync>,
     #[prop(into)] on_new: std::sync::Arc<dyn Fn() + Send + Sync>,
+    #[prop(into)] on_delete: std::sync::Arc<dyn Fn(String) + Send + Sync>,
     show_sessions_panel: RwSignal<bool>,
 ) -> impl IntoView {
     let chat_state = use_webchat_state();
@@ -546,6 +717,7 @@ fn SessionsSidebar(
                     sessions=chat_state.sessions.into()
                     selected_id=Signal::derive(move || chat_state.current_session_id.get().unwrap_or_default())
                     on_select=on_select.clone()
+                    on_delete=on_delete.clone()
                 />
             </div>
         </aside>

@@ -921,7 +921,7 @@ impl KernelAgentBuilder {
             agent_config: agent_config.clone(),
             capabilities: capabilities.clone(),
             initial_state: AgentState::Registered,
-            task_receive_timeout_secs: 1,     // Default: 1 second
+            task_receive_timeout_secs: 1,      // Default: 1 second
             task_execution_timeout_secs: 1200, // Default: ~8 minutes
         };
 
@@ -990,7 +990,7 @@ impl KernelIntegrable for Agent {
             agent_config: config.clone(),
             capabilities: capabilities.clone(),
             initial_state: AgentState::Registered,
-            task_receive_timeout_secs: 1,     // Default: 1 second
+            task_receive_timeout_secs: 1,      // Default: 1 second
             task_execution_timeout_secs: 1200, // Default: ~8 minutes
         };
 
