@@ -7,7 +7,6 @@ use axum::response::IntoResponse;
 use axum::Json;
 use base64::engine::general_purpose;
 use base64::Engine as _;
-use beebotos_agents::communication::PlatformType;
 use beebotos_agents::llm::Message as LLMMessage;
 use chrono::Utc;
 use gateway::middleware::{require_any_role, AuthUser};
@@ -24,6 +23,19 @@ const VIDEO_TASK_LIST_LIMIT: usize = 6;
 const VIDEO_TASK_HISTORY_LIMIT: i64 = 20;
 const VIDEO_ASSET_DIR: &str = "data/ai-video-marketing/videos";
 const VIDEO_ASSET_ROUTE: &str = "/api/v1/ai-store-manager/video-assets";
+const GRAPHIC_HISTORY_LIMIT: i64 = 20;
+const GRAPHIC_ASSET_DIR: &str = "data/ai-graphic-marketing/images";
+const GRAPHIC_ASSET_ROUTE: &str = "/api/v1/ai-store-manager/graphic-assets";
+const MAX_VIDEO_REFERENCE_IMAGES: usize = 1;
+const MAX_VIDEO_REFERENCE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReferenceImageRequest {
+    pub mime_type: String,
+    pub data_url: String,
+    #[serde(default)]
+    pub file_name: Option<String>,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CreateVideoTaskRequest {
@@ -44,6 +56,8 @@ pub struct CreateVideoTaskRequest {
     pub generate_audio: bool,
     #[serde(default)]
     pub watermark: bool,
+    #[serde(default)]
+    pub reference_images: Vec<ReferenceImageRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,6 +74,7 @@ pub struct VideoTaskResponse {
     pub queue_position: Option<u32>,
     pub submitted_at: Option<String>,
     pub updated_at: Option<String>,
+    pub reference_image_count: Option<u8>,
 }
 
 fn default_video_task_duration() -> u8 {
@@ -93,7 +108,17 @@ struct VolcengineVideoTaskRequest {
 struct VolcengineVideoContentInput {
     #[serde(rename = "type")]
     kind: String,
-    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_url: Option<VolcengineVideoImageUrlInput>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct VolcengineVideoImageUrlInput {
+    url: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -164,6 +189,8 @@ pub struct GraphicMarketingCheck {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GraphicPackageResponse {
+    #[serde(default)]
+    pub history_id: Option<String>,
     pub title_options: Vec<String>,
     pub body: String,
     pub moments_copy: String,
@@ -184,6 +211,8 @@ pub struct CreateVideoPackageRequest {
     pub duration_seconds: Option<u8>,
     pub ratio: Option<String>,
     pub generate_audio: Option<bool>,
+    #[serde(default)]
+    pub reference_images: Vec<ReferenceImageRequest>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -204,18 +233,56 @@ fn build_seedance_video_payload(
     model: &str,
     req: &CreateVideoTaskRequest,
 ) -> VolcengineVideoTaskRequest {
+    let selected_model = video_task_model(model, req);
+    let image_role = seedance_reference_image_role(&selected_model);
+    let mut content: Vec<VolcengineVideoContentInput> = req
+        .reference_images
+        .iter()
+        .map(|image| VolcengineVideoContentInput {
+            kind: "image_url".to_string(),
+            role: Some(image_role.to_string()),
+            text: None,
+            image_url: Some(VolcengineVideoImageUrlInput {
+                url: image.data_url.trim().to_string(),
+            }),
+        })
+        .collect();
+    content.push(VolcengineVideoContentInput {
+        kind: "text".to_string(),
+        role: None,
+        text: Some(seedance_prompt_with_reference_guard(req)),
+        image_url: None,
+    });
+
     VolcengineVideoTaskRequest {
-        model: video_task_model(model, req),
-        content: vec![VolcengineVideoContentInput {
-            kind: "text".to_string(),
-            text: req.prompt.trim().to_string(),
-        }],
+        model: selected_model,
+        content,
         resolution: req.resolution.trim().to_string(),
         ratio: req.ratio.trim().to_string(),
         duration: req.duration_seconds,
         generate_audio: req.generate_audio,
         watermark: req.watermark,
     }
+}
+
+fn seedance_reference_image_role(model: &str) -> &'static str {
+    if model.trim().starts_with("doubao-seedance-2.0") {
+        "reference_image"
+    } else {
+        "first_frame"
+    }
+}
+
+fn seedance_prompt_with_reference_guard(req: &CreateVideoTaskRequest) -> String {
+    let prompt = req.prompt.trim();
+    if req.reference_images.is_empty() {
+        return prompt.to_string();
+    }
+
+    format!(
+        "{prompt}\n参考图片约束：已随请求提供参考图片，必须以参考图片中的商品主体、包装、\
+         颜色和外观为准生成视频；不要替换为同名但不同外观的商品，不要加入与参考图冲突的主体。"
+    )
 }
 
 fn video_task_model(fallback_model: &str, req: &CreateVideoTaskRequest) -> String {
@@ -252,6 +319,7 @@ fn validate_video_task_request(req: &CreateVideoTaskRequest) -> Result<(), Gatew
     if !is_supported_video_ratio(req.ratio.trim()) {
         return Err(GatewayError::bad_request("不支持的视频比例"));
     }
+    validate_reference_images(&req.reference_images)?;
     Ok(())
 }
 
@@ -292,6 +360,36 @@ fn validate_video_package_request(req: &CreateVideoPackageRequest) -> Result<(),
             return Err(GatewayError::bad_request("不支持的视频比例"));
         }
     }
+    validate_reference_images(&req.reference_images)?;
+    Ok(())
+}
+
+fn validate_reference_images(images: &[ReferenceImageRequest]) -> Result<(), GatewayError> {
+    if images.len() > MAX_VIDEO_REFERENCE_IMAGES {
+        return Err(GatewayError::bad_request("第一版最多上传 1 张参考图片"));
+    }
+    for image in images {
+        let mime_type = image.mime_type.trim();
+        if !matches!(mime_type, "image/png" | "image/jpeg" | "image/webp") {
+            return Err(GatewayError::bad_request(
+                "参考图片仅支持 PNG、JPEG 或 WebP",
+            ));
+        }
+        let data_url = image.data_url.trim();
+        let prefix = format!("data:{};base64,", mime_type);
+        let Some(encoded) = data_url.strip_prefix(&prefix) else {
+            return Err(GatewayError::bad_request("参考图片 data URL 无效"));
+        };
+        let bytes = general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| GatewayError::bad_request("参考图片 data URL 无效"))?;
+        if bytes.is_empty() {
+            return Err(GatewayError::bad_request("参考图片不能为空"));
+        }
+        if bytes.len() > MAX_VIDEO_REFERENCE_IMAGE_BYTES {
+            return Err(GatewayError::bad_request("参考图片不能超过 8MB"));
+        }
+    }
     Ok(())
 }
 
@@ -317,6 +415,7 @@ async fn init_video_task_history_schema(db: &SqlitePool) -> Result<(), GatewayEr
             queue_position INTEGER,
             submitted_at TEXT,
             updated_at TEXT,
+            reference_image_count INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             last_synced_at TEXT NOT NULL
         )
@@ -325,6 +424,21 @@ async fn init_video_task_history_schema(db: &SqlitePool) -> Result<(), GatewayEr
     .execute(db)
     .await
     .map_err(|err| GatewayError::internal(format!("初始化视频任务历史表失败: {}", err)))?;
+
+    if let Err(err) = sqlx::query(
+        "ALTER TABLE ai_video_marketing_tasks ADD COLUMN reference_image_count INTEGER NOT NULL \
+         DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    {
+        if !err.to_string().contains("duplicate column name") {
+            return Err(GatewayError::internal(format!(
+                "初始化视频任务历史字段失败: {}",
+                err
+            )));
+        }
+    }
 
     sqlx::query(
         r#"
@@ -362,15 +476,19 @@ async fn insert_video_task_history(
         .unwrap_or_else(|| req.ratio.trim().to_string());
     let duration_seconds = task.duration_seconds.unwrap_or(req.duration_seconds);
     let queue_position = task.queue_position.map(|position| position as i64);
+    let reference_image_count = task
+        .reference_image_count
+        .unwrap_or(req.reference_images.len() as u8) as i64;
 
     sqlx::query(
         r#"
         INSERT INTO ai_video_marketing_tasks (
             id, user_id, product, platform, prompt, model, provider, status, message,
             preview_url, resolution, ratio, duration_seconds, generate_audio, watermark,
-            queue_position, submitted_at, updated_at, created_at, last_synced_at
+            queue_position, submitted_at, updated_at, reference_image_count, created_at,
+            last_synced_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
         ON CONFLICT(id) DO UPDATE SET
             user_id = excluded.user_id,
             product = excluded.product,
@@ -389,6 +507,7 @@ async fn insert_video_task_history(
             queue_position = excluded.queue_position,
             submitted_at = excluded.submitted_at,
             updated_at = excluded.updated_at,
+            reference_image_count = excluded.reference_image_count,
             last_synced_at = excluded.last_synced_at
         "#,
     )
@@ -410,6 +529,7 @@ async fn insert_video_task_history(
     .bind(queue_position)
     .bind(&submitted_at)
     .bind(&updated_at)
+    .bind(reference_image_count)
     .bind(&submitted_at)
     .bind(&now)
     .execute(db)
@@ -433,15 +553,17 @@ async fn update_video_task_history(
         .unwrap_or_else(|| updated_at.clone());
     let duration_seconds = task.duration_seconds.map(|duration| duration as i64);
     let queue_position = task.queue_position.map(|position| position as i64);
+    let reference_image_count = task.reference_image_count.unwrap_or(0) as i64;
 
     sqlx::query(
         r#"
         INSERT INTO ai_video_marketing_tasks (
             id, user_id, product, platform, prompt, model, provider, status, message,
             preview_url, resolution, ratio, duration_seconds, generate_audio, watermark,
-            queue_position, submitted_at, updated_at, created_at, last_synced_at
+            queue_position, submitted_at, updated_at, reference_image_count, created_at,
+            last_synced_at
         )
-        VALUES (?1, ?2, '', '', '', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 0, ?11, ?12, ?13, ?14, ?15)
+        VALUES (?1, ?2, '', '', '', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 0, ?11, ?12, ?13, ?14, ?15, ?16)
         ON CONFLICT(id) DO UPDATE SET
             user_id = excluded.user_id,
             model = excluded.model,
@@ -455,6 +577,10 @@ async fn update_video_task_history(
             queue_position = excluded.queue_position,
             submitted_at = COALESCE(ai_video_marketing_tasks.submitted_at, excluded.submitted_at),
             updated_at = excluded.updated_at,
+            reference_image_count = CASE
+                WHEN excluded.reference_image_count > 0 THEN excluded.reference_image_count
+                ELSE ai_video_marketing_tasks.reference_image_count
+            END,
             last_synced_at = excluded.last_synced_at
         "#,
     )
@@ -471,6 +597,7 @@ async fn update_video_task_history(
     .bind(queue_position)
     .bind(&submitted_at)
     .bind(&updated_at)
+    .bind(reference_image_count)
     .bind(&submitted_at)
     .bind(&now)
     .execute(db)
@@ -489,7 +616,8 @@ async fn list_video_task_history(
     let rows = sqlx::query(
         r#"
         SELECT id, provider, model, status, message, preview_url, resolution, ratio,
-               duration_seconds, queue_position, submitted_at, updated_at
+               duration_seconds, queue_position, submitted_at, updated_at,
+               reference_image_count
         FROM ai_video_marketing_tasks
         WHERE user_id = ?1
         ORDER BY COALESCE(updated_at, created_at) DESC, created_at DESC
@@ -521,8 +649,281 @@ async fn list_video_task_history(
                 .map(|position| position as u32),
             submitted_at: row.get("submitted_at"),
             updated_at: row.get("updated_at"),
+            reference_image_count: row
+                .get::<Option<i64>, _>("reference_image_count")
+                .map(|count| count as u8),
         })
         .collect())
+}
+
+fn new_graphic_record_id() -> String {
+    format!("graphic-record-{}", uuid::Uuid::new_v4())
+}
+
+fn new_graphic_image_id() -> String {
+    format!("graphic-image-{}", uuid::Uuid::new_v4())
+}
+
+async fn init_graphic_marketing_history_schema(db: &SqlitePool) -> Result<(), GatewayError> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS ai_graphic_marketing_records (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            product TEXT NOT NULL,
+            selling_points TEXT NOT NULL DEFAULT '',
+            audience TEXT NOT NULL DEFAULT '',
+            price_range TEXT NOT NULL DEFAULT '',
+            platform TEXT NOT NULL,
+            goal TEXT NOT NULL DEFAULT '',
+            style TEXT NOT NULL DEFAULT '',
+            size TEXT,
+            quality TEXT,
+            package_json TEXT,
+            image_id TEXT,
+            image_provider TEXT,
+            image_status TEXT,
+            image_message TEXT,
+            image_url TEXT,
+            image_prompt TEXT,
+            source_image_filename TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(db)
+    .await
+    .map_err(|err| GatewayError::internal(format!("初始化图文营销历史表失败: {}", err)))?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_ai_graphic_marketing_records_user_updated
+        ON ai_graphic_marketing_records(user_id, updated_at, created_at)
+        "#,
+    )
+    .execute(db)
+    .await
+    .map_err(|err| GatewayError::internal(format!("初始化图文营销历史索引失败: {}", err)))?;
+
+    Ok(())
+}
+
+async fn insert_graphic_package_history(
+    db: &SqlitePool,
+    user_id: &str,
+    req: &CreateGraphicPackageRequest,
+    mut package: GraphicPackageResponse,
+) -> Result<GraphicPackageResponse, GatewayError> {
+    init_graphic_marketing_history_schema(db).await?;
+    let record_id = package
+        .history_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(new_graphic_record_id);
+    package.history_id = Some(record_id.clone());
+    let now = Utc::now().to_rfc3339();
+    let package_json = serde_json::to_string(&package)
+        .map_err(|err| GatewayError::internal(format!("图文营销包序列化失败: {}", err)))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO ai_graphic_marketing_records (
+            id, user_id, product, selling_points, audience, price_range, platform,
+            goal, style, package_json, image_prompt, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        ON CONFLICT(id) DO UPDATE SET
+            product = excluded.product,
+            selling_points = excluded.selling_points,
+            audience = excluded.audience,
+            price_range = excluded.price_range,
+            platform = excluded.platform,
+            goal = excluded.goal,
+            style = excluded.style,
+            package_json = excluded.package_json,
+            image_prompt = excluded.image_prompt,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(&record_id)
+    .bind(user_id)
+    .bind(req.product.trim())
+    .bind(req.selling_points.trim())
+    .bind(req.audience.trim())
+    .bind(req.price_range.trim())
+    .bind(req.platform.trim())
+    .bind(req.goal.trim())
+    .bind(req.style.trim())
+    .bind(package_json)
+    .bind(package.image_prompt.trim())
+    .bind(&now)
+    .bind(&now)
+    .execute(db)
+    .await
+    .map_err(|err| GatewayError::internal(format!("保存图文营销历史失败: {}", err)))?;
+
+    Ok(package)
+}
+
+async fn upsert_graphic_image_history(
+    db: &SqlitePool,
+    user_id: &str,
+    req: &CreateGraphicImageRequest,
+    source_image_filename: Option<&str>,
+    image: GraphicImageResponse,
+) -> Result<GraphicImageResponse, GatewayError> {
+    init_graphic_marketing_history_schema(db).await?;
+    let now = Utc::now().to_rfc3339();
+    let requested_record_id = req
+        .package_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+
+    if let Some(record_id) = requested_record_id {
+        let result = sqlx::query(
+            r#"
+            UPDATE ai_graphic_marketing_records
+            SET product = ?3,
+                platform = ?4,
+                size = ?5,
+                quality = ?6,
+                image_id = ?7,
+                image_provider = ?8,
+                image_status = ?9,
+                image_message = ?10,
+                image_url = ?11,
+                image_prompt = ?12,
+                source_image_filename = ?13,
+                updated_at = ?14
+            WHERE id = ?1 AND user_id = ?2
+            "#,
+        )
+        .bind(record_id)
+        .bind(user_id)
+        .bind(req.product.trim())
+        .bind(req.platform.trim())
+        .bind(req.size.trim())
+        .bind(req.quality.trim())
+        .bind(&image.id)
+        .bind(&image.provider)
+        .bind(&image.status)
+        .bind(&image.message)
+        .bind(image.image_url.as_deref())
+        .bind(req.prompt.trim())
+        .bind(source_image_filename)
+        .bind(&now)
+        .execute(db)
+        .await
+        .map_err(|err| GatewayError::internal(format!("更新图文营销图片历史失败: {}", err)))?;
+
+        if result.rows_affected() > 0 {
+            return Ok(image);
+        }
+    }
+
+    let record_id = new_graphic_record_id();
+    sqlx::query(
+        r#"
+        INSERT INTO ai_graphic_marketing_records (
+            id, user_id, product, platform, size, quality, image_id, image_provider,
+            image_status, image_message, image_url, image_prompt, source_image_filename,
+            created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        "#,
+    )
+    .bind(&record_id)
+    .bind(user_id)
+    .bind(req.product.trim())
+    .bind(req.platform.trim())
+    .bind(req.size.trim())
+    .bind(req.quality.trim())
+    .bind(&image.id)
+    .bind(&image.provider)
+    .bind(&image.status)
+    .bind(&image.message)
+    .bind(image.image_url.as_deref())
+    .bind(req.prompt.trim())
+    .bind(source_image_filename)
+    .bind(&now)
+    .bind(&now)
+    .execute(db)
+    .await
+    .map_err(|err| GatewayError::internal(format!("保存图文营销图片历史失败: {}", err)))?;
+
+    Ok(image)
+}
+
+async fn list_graphic_marketing_history(
+    db: &SqlitePool,
+    user_id: &str,
+    limit: i64,
+) -> Result<Vec<GraphicMarketingHistoryItem>, GatewayError> {
+    init_graphic_marketing_history_schema(db).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, product, platform, package_json, image_id, image_provider, image_status,
+               image_message, image_url, image_prompt, size, quality, source_image_filename,
+               created_at, updated_at
+        FROM ai_graphic_marketing_records
+        WHERE user_id = ?1
+        ORDER BY COALESCE(updated_at, created_at) DESC, created_at DESC
+        LIMIT ?2
+        "#,
+    )
+    .bind(user_id)
+    .bind(limit)
+    .fetch_all(db)
+    .await
+    .map_err(|err| GatewayError::internal(format!("读取图文营销历史失败: {}", err)))?;
+
+    rows.into_iter()
+        .map(|row| {
+            let id: String = row.get("id");
+            let package = row
+                .get::<Option<String>, _>("package_json")
+                .map(|raw| {
+                    let mut package: GraphicPackageResponse =
+                        serde_json::from_str(&raw).map_err(|err| {
+                            GatewayError::internal(format!("图文营销历史 JSON 解析失败: {}", err))
+                        })?;
+                    package.history_id = Some(id.clone());
+                    Ok::<GraphicPackageResponse, GatewayError>(package)
+                })
+                .transpose()?;
+            let image_id: Option<String> = row.get("image_id");
+            let image = image_id.map(|image_id| GraphicImageResponse {
+                id: image_id,
+                provider: row
+                    .get::<Option<String>, _>("image_provider")
+                    .unwrap_or_else(|| "openai-compatible-image".to_string()),
+                status: row
+                    .get::<Option<String>, _>("image_status")
+                    .unwrap_or_else(|| "completed".to_string()),
+                message: row
+                    .get::<Option<String>, _>("image_message")
+                    .unwrap_or_else(|| "图片已生成。".to_string()),
+                image_url: row.get("image_url"),
+                b64_json: None,
+            });
+
+            Ok(GraphicMarketingHistoryItem {
+                id,
+                product: row.get("product"),
+                platform: row.get("platform"),
+                package,
+                image,
+                image_prompt: row.get("image_prompt"),
+                size: row.get("size"),
+                quality: row.get("quality"),
+                source_image_filename: row.get("source_image_filename"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+            })
+        })
+        .collect()
 }
 
 fn merge_video_task_history_refresh(
@@ -543,6 +944,9 @@ fn merge_video_task_history_refresh(
     }
     if refreshed.queue_position.is_none() {
         refreshed.queue_position = previous.queue_position;
+    }
+    if refreshed.reference_image_count.is_none() {
+        refreshed.reference_image_count = previous.reference_image_count;
     }
     if refreshed.submitted_at.is_none() {
         refreshed.submitted_at = previous.submitted_at.clone();
@@ -574,6 +978,36 @@ fn video_asset_path(root: &FsPath, task_id: &str) -> PathBuf {
 
 fn default_video_asset_root() -> PathBuf {
     PathBuf::from(VIDEO_ASSET_DIR)
+}
+
+fn graphic_asset_file_name(image_id: &str) -> String {
+    let safe_id = image_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("{}.png", safe_id)
+}
+
+fn graphic_asset_url(image_id: &str) -> String {
+    format!(
+        "{}/{}",
+        GRAPHIC_ASSET_ROUTE,
+        graphic_asset_file_name(image_id)
+    )
+}
+
+fn graphic_asset_path(root: &FsPath, image_id: &str) -> PathBuf {
+    root.join(graphic_asset_file_name(image_id))
+}
+
+fn default_graphic_asset_root() -> PathBuf {
+    PathBuf::from(GRAPHIC_ASSET_DIR)
 }
 
 fn clear_uncached_remote_video_preview(mut task: VideoTaskResponse) -> VideoTaskResponse {
@@ -667,6 +1101,82 @@ async fn cache_video_task_preview(
 
     task.preview_url = Some(local_url);
     task
+}
+
+async fn cache_graphic_image_asset(
+    root: &FsPath,
+    client: &reqwest::Client,
+    mut image: GraphicImageResponse,
+) -> GraphicImageResponse {
+    let local_url = graphic_asset_url(&image.id);
+    if image.image_url.as_deref() == Some(local_url.as_str()) {
+        image.b64_json = None;
+        return image;
+    }
+
+    let path = graphic_asset_path(root, &image.id);
+    if path.exists() {
+        image.image_url = Some(local_url);
+        image.b64_json = None;
+        return image;
+    }
+
+    let bytes = if let Some(b64) = image.b64_json.as_deref() {
+        match general_purpose::STANDARD.decode(b64.trim()) {
+            Ok(bytes) if !bytes.is_empty() => Some(bytes),
+            Ok(_) => None,
+            Err(err) => {
+                warn!(image_id = image.id, error = %err, "graphic image base64 decode failed");
+                None
+            }
+        }
+    } else if let Some(remote_url) = image
+        .image_url
+        .clone()
+        .filter(|url| url.starts_with("http"))
+    {
+        match client.get(&remote_url).send().await {
+            Ok(response) if response.status().is_success() => match response.bytes().await {
+                Ok(bytes) if !bytes.is_empty() => Some(bytes.to_vec()),
+                Ok(_) => None,
+                Err(err) => {
+                    warn!(image_id = image.id, error = %err, "graphic image cache read failed");
+                    None
+                }
+            },
+            Ok(response) => {
+                warn!(
+                    image_id = image.id,
+                    status = %response.status(),
+                    "graphic image cache skipped"
+                );
+                None
+            }
+            Err(err) => {
+                warn!(image_id = image.id, error = %err, "graphic image cache failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let Some(bytes) = bytes else {
+        return image;
+    };
+
+    if let Err(err) = tokio::fs::create_dir_all(root).await {
+        warn!(image_id = image.id, error = %err, "graphic image cache directory creation failed");
+        return image;
+    }
+    if let Err(err) = tokio::fs::write(&path, bytes).await {
+        warn!(image_id = image.id, error = %err, "graphic image cache write failed");
+        return image;
+    }
+
+    image.image_url = Some(local_url);
+    image.b64_json = None;
+    image
 }
 
 async fn refresh_video_task_history(
@@ -770,6 +1280,7 @@ fn video_generation_config_required_response(model: &str) -> VideoTaskResponse {
         queue_position: None,
         submitted_at: Some(now.clone()),
         updated_at: Some(now),
+        reference_image_count: Some(0),
     }
 }
 
@@ -795,6 +1306,7 @@ fn video_upstream_unavailable_response(
         queue_position: None,
         submitted_at: Some(now.clone()),
         updated_at: Some(now),
+        reference_image_count: Some(0),
     }
 }
 
@@ -851,6 +1363,7 @@ fn video_create_to_response(
         queue_position: Some(1),
         submitted_at: Some(now.clone()),
         updated_at: Some(now),
+        reference_image_count: Some(req.reference_images.len() as u8),
     }
 }
 
@@ -890,6 +1403,7 @@ fn video_status_to_response(
         queue_position: None,
         submitted_at: None,
         updated_at: Some(Utc::now().to_rfc3339()),
+        reference_image_count: None,
     }
 }
 
@@ -917,6 +1431,7 @@ pub fn create_graphic_package(req: &CreateGraphicPackageRequest) -> GraphicPacka
     };
 
     GraphicPackageResponse {
+        history_id: None,
         title_options: vec![
             format!(
                 "{}｜{}也会想收藏的{}",
@@ -1096,11 +1611,160 @@ fn package_scene_limit(duration_seconds: u8) -> usize {
     }
 }
 
+fn reference_image_prompt_summary(images: &[ReferenceImageRequest]) -> String {
+    if images.is_empty() {
+        return "无".to_string();
+    }
+    let names = images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            image
+                .file_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("参考图{}", index + 1))
+        })
+        .collect::<Vec<_>>()
+        .join("、");
+    format!("{} 张（{}）", images.len(), names)
+}
+
+fn image_understanding_chat_url(base_url: &str) -> String {
+    let base_url = base_url.trim().trim_end_matches('/');
+    if base_url.ends_with("/chat/completions") {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/chat/completions")
+    }
+}
+
+fn ark_vision_response_content(raw: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    value
+        .get("choices")?
+        .as_array()?
+        .first()?
+        .get("message")?
+        .get("content")?
+        .as_str()
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(str::to_string)
+}
+
+fn image_understanding_error(message: impl AsRef<str>) -> GatewayError {
+    let message = message.as_ref();
+    warn!(error_message = %message, "image understanding failed");
+    let user_message = if image_understanding_auth_error(message) {
+        "参考图片理解鉴权失败：请确认图片理解的 API Key、base URL、模型名称和模型权限匹配；Agent Plan key 需要使用 \
+         https://ark.cn-beijing.volces.com/api/plan/v3 和支持 image 输入的模型。"
+    } else {
+        "参考图片理解失败：请检查图片理解模型配置、API Key 或模型订阅后重试。"
+    };
+    GatewayError::service_unavailable("ImageUnderstanding", user_message)
+}
+
+fn image_understanding_auth_error(message: &str) -> bool {
+    message.contains("401")
+        || message.contains("Unauthorized")
+        || message.contains("AuthenticationError")
+}
+
+async fn describe_reference_images_for_video_package(
+    state: &AppState,
+    req: &CreateVideoPackageRequest,
+) -> Result<Option<String>, GatewayError> {
+    let Some(image) = req.reference_images.first() else {
+        return Ok(None);
+    };
+    let config = &state.config.image_understanding;
+    let api_key = config
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| {
+            GatewayError::service_unavailable(
+                "ImageUnderstanding",
+                "已上传参考图片，但图片理解模型未配置 API Key。请配置 IMAGE_UNDERSTANDING_API_KEY \
+                 或 ARK_API_KEY；如果使用 Agent Plan，请确认图片理解 base URL 是 \
+                 https://ark.cn-beijing.volces.com/api/plan/v3。",
+            )
+        })?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(config.timeout_seconds))
+        .build()
+        .map_err(|err| image_understanding_error(format!("创建图片理解客户端失败: {err}")))?;
+    let prompt = format!(
+        "请识别这张营销参考图，只输出中文图片描述，重点覆盖商品外观、包装文字、颜色、材质、场景、\
+         构图、光线、风格和适合短视频使用的视觉卖点。商品名：{}。核心卖点：{}。",
+        req.product.trim(),
+        req.selling_points.trim()
+    );
+    let body = json!({
+        "model": config.model.trim(),
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image.data_url.trim(),
+                        "detail": "auto"
+                    }
+                }
+            ]
+        }],
+        "max_tokens": 500,
+        "temperature": 0.2
+    });
+
+    let response = client
+        .post(image_understanding_chat_url(&config.base_url))
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|err| image_understanding_error(format!("图片理解请求失败: {err}")))?;
+    let status = response.status();
+    let raw = response
+        .text()
+        .await
+        .map_err(|err| image_understanding_error(format!("读取图片理解响应失败: {err}")))?;
+    if !status.is_success() {
+        return Err(image_understanding_error(format!(
+            "图片理解上游失败: status={status}, body={}",
+            raw.chars().take(300).collect::<String>()
+        )));
+    }
+    let content = ark_vision_response_content(&raw)
+        .ok_or_else(|| image_understanding_error("图片理解响应缺少 message.content"))?;
+    Ok(Some(content.chars().take(1200).collect()))
+}
+
+#[cfg(test)]
 fn build_video_package_prompt(req: &CreateVideoPackageRequest) -> String {
+    build_video_package_prompt_with_reference_context(req, None)
+}
+
+fn build_video_package_prompt_with_reference_context(
+    req: &CreateVideoPackageRequest,
+    reference_image_context: Option<&str>,
+) -> String {
     let duration_seconds = package_duration_seconds(req);
     let ratio = package_ratio(req);
     let voiceover_limit = package_voiceover_limit(duration_seconds);
     let scene_limit = package_scene_limit(duration_seconds);
+    let reference_images = reference_image_prompt_summary(&req.reference_images);
+    let reference_image_context = reference_image_context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("无");
     let audio_requirement = if req.generate_audio.unwrap_or(true) {
         format!(
             "`oral_script` 必须是可直接用于 {duration_seconds} 秒成片的短口播，最多 \
@@ -1121,13 +1785,16 @@ fn build_video_package_prompt(req: &CreateVideoPackageRequest) -> String {
 - 营销目标：{goal}
 - 内容风格：{style}
 - 计划成片：{duration_seconds} 秒，{ratio} 画幅
+- 参考图片：{reference_images}
+- 图片理解：{reference_image_context}
 
 要求：
 1. 结果必须贴合商品、平台、人群、目标和风格，不要输出通用模板。
 2. {audio_requirement}
 3. `storyboard`、`subtitles`、`shot_prompts` 每项 2 到 {scene_limit} 条，镜头数量必须适合 {duration_seconds} 秒。
 4. `video_prompt` 会直接传给视频生成模型，必须是一段紧凑成片提示词，包含商品主体、镜头顺序、画幅、节奏、字幕/口播约束。
-5. 只输出 JSON，不要 Markdown，不要解释。
+5. 如果有参考图片，必须以“图片理解”中的真实视觉信息为准，不要编造与图片冲突的外观。
+6. 只输出 JSON，不要 Markdown，不要解释。
 
 JSON 结构：
 {{
@@ -1153,6 +1820,8 @@ JSON 结构：
         style = req.style,
         duration_seconds = duration_seconds,
         ratio = ratio,
+        reference_images = reference_images,
+        reference_image_context = reference_image_context,
         audio_requirement = audio_requirement,
         scene_limit = scene_limit
     )
@@ -1206,90 +1875,58 @@ fn video_package_from_agent_response(
     Ok(package)
 }
 
-fn agent_output_text(output: &serde_json::Value) -> Option<String> {
-    output
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| {
-            output
-                .get("response")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            output
-                .get("content")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-}
-
-async fn resolve_video_package_agent_id(
-    state: &AppState,
-    user: &AuthUser,
-) -> Result<String, GatewayError> {
-    if let Some(resolver) = &state.agent_resolver {
-        return resolver
-            .resolve(
-                PlatformType::Custom,
-                "ai-store-manager:video-marketing",
-                &user.user_id,
-            )
-            .await;
-    }
-
-    let agents = state
-        .agent_runtime
-        .list_agents()
-        .await
-        .map_err(|err| GatewayError::internal(format!("读取内部 agent 失败: {}", err)))?;
-    agents
-        .into_iter()
-        .find(|agent| {
-            !matches!(
-                agent.state,
-                gateway::AgentState::Stopped | gateway::AgentState::Error
-            )
-        })
-        .map(|agent| agent.agent_id)
-        .ok_or_else(|| GatewayError::internal("没有可用的内部 agent"))
-}
-
-async fn generate_video_package_with_agent(
-    state: &AppState,
-    user: &AuthUser,
+fn video_package_from_llm_response(
+    raw: &str,
     req: &CreateVideoPackageRequest,
 ) -> Result<VideoPackageResponse, GatewayError> {
-    let agent_id = resolve_video_package_agent_id(state, user).await?;
-    let task = gateway::TaskConfig {
-        task_type: "llm_chat".to_string(),
-        input: json!({
-            "content": build_video_package_prompt(req),
-            "platform": "custom",
-            "channel_id": "ai-store-manager:video-marketing",
-            "user_id": user.user_id,
-            "session_id": format!("ai-video-marketing-{}", uuid::Uuid::new_v4()),
-        }),
-        timeout_secs: 1200,
-        priority: 6,
-        stream_tx: None,
-    };
+    let mut package = video_package_from_agent_response(raw, req, "llm-service")?;
+    package.agent_id = None;
+    Ok(package)
+}
 
-    let result = state
-        .agent_runtime
-        .execute_task(&agent_id, task)
+fn video_package_llm_error(message: impl AsRef<str>) -> GatewayError {
+    let message = message.as_ref().trim();
+    let normalized = message.to_ascii_lowercase();
+    let user_message = if normalized.contains("invalid api key")
+        || normalized.contains("authentication error")
+        || normalized.contains("unauthorized")
+        || normalized.contains("401")
+    {
+        "AI 脚本包生成失败：大模型 API Key 无效，请检查默认模型配置后重试。"
+    } else if normalized.contains("timed out") || normalized.contains("timeout") {
+        "AI 脚本包生成失败：大模型响应超时，请稍后重试或切换更快的默认模型。"
+    } else if normalized.contains("all providers failed")
+        || normalized.contains("llm request failed")
+        || normalized.contains("unavailable")
+    {
+        "AI 脚本包生成失败：大模型服务暂时不可用，请检查默认模型配置后重试。"
+    } else {
+        "AI 脚本包生成失败：大模型暂时不可用，请稍后重试。"
+    };
+    warn!(error_message = %message, "video package llm failed");
+    GatewayError::agent(user_message)
+}
+
+async fn generate_video_package_with_llm(
+    state: &AppState,
+    req: &CreateVideoPackageRequest,
+) -> Result<VideoPackageResponse, GatewayError> {
+    let reference_image_context = describe_reference_images_for_video_package(state, req).await?;
+    let prompt =
+        build_video_package_prompt_with_reference_context(req, reference_image_context.as_deref());
+    let messages = vec![
+        LLMMessage::system(
+            "你是资深短视频营销编导，只返回符合用户 JSON schema 的中文短视频脚本包。",
+        ),
+        LLMMessage::user(prompt),
+    ];
+    let response = state
+        .llm_service
+        .chat(messages, Some(1800), None, Some("none".to_string()), None)
         .await
-        .map_err(|err| GatewayError::internal(format!("内部 agent 执行失败: {}", err)))?;
-    if !result.success {
-        return Err(GatewayError::internal(
-            result
-                .error
-                .unwrap_or_else(|| "内部 agent 生成视频脚本包失败".to_string()),
-        ));
-    }
-    let raw = agent_output_text(&result.output)
-        .ok_or_else(|| GatewayError::internal("内部 agent 返回为空"))?;
-    video_package_from_agent_response(&raw, req, &agent_id)
+        .map_err(|err| video_package_llm_error(err.to_string()))?;
+
+    video_package_from_llm_response(&response, req)
 }
 
 async fn generate_graphic_package_with_llm(
@@ -1315,6 +1952,8 @@ pub struct CreateGraphicImageRequest {
     pub prompt: String,
     pub size: String,
     pub quality: String,
+    #[serde(default)]
+    pub package_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1327,6 +1966,8 @@ pub struct CreateGraphicImageEditRequest {
     pub image_b64: String,
     pub image_mime_type: String,
     pub image_filename: String,
+    #[serde(default)]
+    pub package_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1337,6 +1978,21 @@ pub struct GraphicImageResponse {
     pub message: String,
     pub image_url: Option<String>,
     pub b64_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GraphicMarketingHistoryItem {
+    pub id: String,
+    pub product: String,
+    pub platform: String,
+    pub package: Option<GraphicPackageResponse>,
+    pub image: Option<GraphicImageResponse>,
+    pub image_prompt: Option<String>,
+    pub size: Option<String>,
+    pub quality: Option<String>,
+    pub source_image_filename: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1464,6 +2120,7 @@ fn validate_graphic_image_edit_request(
         prompt: req.prompt.clone(),
         size: req.size.clone(),
         quality: req.quality.clone(),
+        package_id: req.package_id.clone(),
     })?;
     if !matches!(
         req.image_mime_type.trim(),
@@ -1476,8 +2133,8 @@ fn validate_graphic_image_edit_request(
 }
 
 fn image_response_to_graphic_result(
-    product: &str,
-    platform: &str,
+    _product: &str,
+    _platform: &str,
     response: SeedreamImageResponse,
 ) -> Result<GraphicImageResponse, GatewayError> {
     let first = response
@@ -1491,7 +2148,7 @@ fn image_response_to_graphic_result(
     }
 
     Ok(GraphicImageResponse {
-        id: format!("graphic-image-{}-{}", platform, product).replace(' ', "-"),
+        id: new_graphic_image_id(),
         provider: "openai-compatible-image".to_string(),
         status: "completed".to_string(),
         message: "图片已生成。".to_string(),
@@ -1590,6 +2247,24 @@ pub async fn get_video_asset(Path(file): Path<String>) -> Result<impl IntoRespon
     Ok(([(header::CONTENT_TYPE, "video/mp4")], bytes))
 }
 
+pub async fn get_graphic_asset(
+    Path(file): Path<String>,
+) -> Result<impl IntoResponse, GatewayError> {
+    let Some(image_id) = file.strip_suffix(".png") else {
+        return Err(GatewayError::not_found("graphic asset", file));
+    };
+    if file != graphic_asset_file_name(image_id) {
+        return Err(GatewayError::not_found("graphic asset", file));
+    }
+
+    let path = default_graphic_asset_root().join(&file);
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| GatewayError::not_found("graphic asset", file))?;
+
+    Ok(([(header::CONTENT_TYPE, "image/png")], bytes))
+}
+
 pub async fn create_video_package_handler(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1597,7 +2272,7 @@ pub async fn create_video_package_handler(
 ) -> Result<Json<VideoPackageResponse>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
     validate_video_package_request(&req)?;
-    let package = generate_video_package_with_agent(&state, &user, &req).await?;
+    let package = generate_video_package_with_llm(&state, &req).await?;
     Ok(Json(package))
 }
 
@@ -1622,10 +2297,12 @@ pub async fn create_graphic_package_handler(
             fallback
         }
     };
+    let package = insert_graphic_package_history(&state.db, &user.user_id, &req, package).await?;
     Ok(Json(package))
 }
 
 pub async fn create_graphic_image(
+    State(state): State<Arc<AppState>>,
     user: AuthUser,
     Json(req): Json<CreateGraphicImageRequest>,
 ) -> Result<Json<GraphicImageResponse>, GatewayError> {
@@ -1673,11 +2350,14 @@ pub async fn create_graphic_image(
         .await
         .map_err(|err| GatewayError::internal(format!("图片生成响应解析失败: {}", err)))?;
     let result = image_response_to_graphic_result(&req.product, &req.platform, image_response)?;
+    let result = cache_graphic_image_asset(&default_graphic_asset_root(), &client, result).await;
+    let result = upsert_graphic_image_history(&state.db, &user.user_id, &req, None, result).await?;
 
     Ok(Json(result))
 }
 
 pub async fn create_graphic_image_edit(
+    State(state): State<Arc<AppState>>,
     user: AuthUser,
     Json(req): Json<CreateGraphicImageEditRequest>,
 ) -> Result<Json<GraphicImageResponse>, GatewayError> {
@@ -1703,6 +2383,7 @@ pub async fn create_graphic_image_edit(
             prompt: req.prompt.clone(),
             size: req.size.clone(),
             quality: req.quality.clone(),
+            package_id: req.package_id.clone(),
         },
         Some(&req.image_mime_type),
         Some(&req.image_b64),
@@ -1737,8 +2418,35 @@ pub async fn create_graphic_image_edit(
         .await
         .map_err(|err| GatewayError::internal(format!("图片编辑响应解析失败: {}", err)))?;
     let result = image_response_to_graphic_result(&req.product, &req.platform, image_response)?;
+    let result = cache_graphic_image_asset(&default_graphic_asset_root(), &client, result).await;
+    let image_req = CreateGraphicImageRequest {
+        product: req.product.clone(),
+        platform: req.platform.clone(),
+        prompt: req.prompt.clone(),
+        size: req.size.clone(),
+        quality: req.quality.clone(),
+        package_id: req.package_id.clone(),
+    };
+    let result = upsert_graphic_image_history(
+        &state.db,
+        &user.user_id,
+        &image_req,
+        Some(req.image_filename.trim()),
+        result,
+    )
+    .await?;
 
     Ok(Json(result))
+}
+
+pub async fn list_graphic_marketing_history_handler(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<GraphicMarketingHistoryItem>>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+    let history =
+        list_graphic_marketing_history(&state.db, &user.user_id, GRAPHIC_HISTORY_LIMIT).await?;
+    Ok(Json(history))
 }
 
 pub async fn list_video_tasks(
@@ -1971,18 +2679,101 @@ mod tests {
             ratio: "16:9".to_string(),
             generate_audio: false,
             watermark: true,
+            reference_images: vec![],
         };
 
         let payload = build_seedance_video_payload("doubao-seedance-2.0", &req);
 
         assert_eq!(payload.model, "doubao-seedance-lite-test");
         assert_eq!(payload.content[0].kind, "text");
-        assert_eq!(payload.content[0].text, "为云柑礼盒生成短视频");
+        assert_eq!(
+            payload.content[0].text.as_deref(),
+            Some("为云柑礼盒生成短视频")
+        );
         assert_eq!(payload.duration, 8);
         assert_eq!(payload.resolution, "1080p");
         assert_eq!(payload.ratio, "16:9");
         assert!(!payload.generate_audio);
         assert!(payload.watermark);
+    }
+
+    #[test]
+    fn seedance_payload_marks_uploaded_image_as_seedance_reference() {
+        let req = CreateVideoTaskRequest {
+            product: "云柑礼盒".to_string(),
+            platform: "抖音".to_string(),
+            version: None,
+            prompt: "按商品图生成开箱短视频".to_string(),
+            model: Some("doubao-seedance-2.0".to_string()),
+            duration_seconds: 8,
+            resolution: "720p".to_string(),
+            ratio: "9:16".to_string(),
+            generate_audio: true,
+            watermark: false,
+            reference_images: vec![sample_reference_image()],
+        };
+
+        let payload = build_seedance_video_payload("doubao-seedance-2.0", &req);
+
+        assert_eq!(payload.content.len(), 2);
+        assert_eq!(payload.content[0].kind, "image_url");
+        let payload_json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(payload_json["content"][0]["role"], "reference_image");
+        assert_eq!(
+            payload.content[0]
+                .image_url
+                .as_ref()
+                .map(|image| image.url.as_str()),
+            Some("data:image/png;base64,aGVsbG8=")
+        );
+        assert_eq!(payload.content[1].kind, "text");
+        let text = payload.content[1].text.as_deref().unwrap_or_default();
+        assert!(text.contains("按商品图生成开箱短视频"));
+        assert!(text.contains("必须以参考图片中的商品主体、包装、颜色和外观为准"));
+    }
+
+    #[test]
+    fn seedance_payload_uses_first_frame_role_for_legacy_image_video_model() {
+        let req = CreateVideoTaskRequest {
+            product: "云柑礼盒".to_string(),
+            platform: "抖音".to_string(),
+            version: None,
+            prompt: "按商品图生成开箱短视频".to_string(),
+            model: Some("doubao-seedance-1.5-pro".to_string()),
+            duration_seconds: 8,
+            resolution: "720p".to_string(),
+            ratio: "9:16".to_string(),
+            generate_audio: true,
+            watermark: false,
+            reference_images: vec![sample_reference_image()],
+        };
+
+        let payload = build_seedance_video_payload("doubao-seedance-2.0", &req);
+        let payload_json = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(payload_json["content"][0]["role"], "first_frame");
+    }
+
+    #[test]
+    fn video_task_request_rejects_invalid_reference_image_mime() {
+        let mut req = CreateVideoTaskRequest {
+            product: "云柑礼盒".to_string(),
+            platform: "抖音".to_string(),
+            version: None,
+            prompt: "按商品图生成开箱短视频".to_string(),
+            model: Some("doubao-seedance-2.0".to_string()),
+            duration_seconds: 8,
+            resolution: "720p".to_string(),
+            ratio: "9:16".to_string(),
+            generate_audio: true,
+            watermark: false,
+            reference_images: vec![sample_reference_image()],
+        };
+        req.reference_images[0].mime_type = "image/gif".to_string();
+
+        let err = validate_video_task_request(&req).unwrap_err();
+
+        assert_eq!(err.user_message(), "参考图片仅支持 PNG、JPEG 或 WebP");
     }
 
     #[test]
@@ -2073,6 +2864,7 @@ mod tests {
             ratio: "9:16".to_string(),
             generate_audio: true,
             watermark: false,
+            reference_images: vec![],
         };
         let mut first = sample_video_task_response("task-old", "queued");
         first.submitted_at = Some("2026-06-03T08:00:00Z".to_string());
@@ -2127,6 +2919,7 @@ mod tests {
             ratio: "9:16".to_string(),
             generate_audio: true,
             watermark: false,
+            reference_images: vec![],
         };
         insert_video_task_history(
             &db,
@@ -2242,6 +3035,7 @@ mod tests {
             duration_seconds: Some(5),
             ratio: Some("9:16".to_string()),
             generate_audio: Some(true),
+            reference_images: vec![],
         };
 
         let prompt = build_video_package_prompt(&req);
@@ -2249,6 +3043,94 @@ mod tests {
         assert!(prompt.contains("计划成片：5 秒，9:16 画幅"));
         assert!(prompt.contains("最多 28 个中文字符"));
         assert!(prompt.contains("每项 2 到 2 条"));
+    }
+
+    #[test]
+    fn video_package_prompt_uses_reference_image_context() {
+        let req = CreateVideoPackageRequest {
+            product: "云柑礼盒".to_string(),
+            selling_points: "当季鲜果、顺丰冷链、送礼体面".to_string(),
+            audience: "25-40 岁办公室人群".to_string(),
+            goal: "新品种草".to_string(),
+            platform: "抖音".to_string(),
+            style: "真实测评".to_string(),
+            duration_seconds: Some(8),
+            ratio: Some("9:16".to_string()),
+            generate_audio: Some(true),
+            reference_images: vec![sample_reference_image()],
+        };
+
+        let prompt = build_video_package_prompt(&req);
+
+        assert!(prompt.contains("参考图片：1 张"));
+        assert!(prompt.contains("product.png"));
+        assert!(prompt.contains("以“图片理解”中的真实视觉信息为准"));
+    }
+
+    #[test]
+    fn video_package_prompt_includes_reference_image_description() {
+        let req = CreateVideoPackageRequest {
+            product: "云柑礼盒".to_string(),
+            selling_points: "当季鲜果、顺丰冷链、送礼体面".to_string(),
+            audience: "25-40 岁办公室人群".to_string(),
+            goal: "新品种草".to_string(),
+            platform: "抖音".to_string(),
+            style: "真实测评".to_string(),
+            duration_seconds: Some(8),
+            ratio: Some("9:16".to_string()),
+            generate_audio: Some(true),
+            reference_images: vec![sample_reference_image()],
+        };
+
+        let prompt = build_video_package_prompt_with_reference_context(
+            &req,
+            Some("橙色礼盒包装，桌面自然光，适合送礼场景。"),
+        );
+
+        assert!(prompt.contains("图片理解：橙色礼盒包装，桌面自然光，适合送礼场景。"));
+        assert!(prompt.contains("以“图片理解”中的真实视觉信息为准"));
+    }
+
+    #[test]
+    fn image_understanding_chat_url_appends_chat_completions() {
+        assert_eq!(
+            image_understanding_chat_url("https://ark.cn-beijing.volces.com/api/v3"),
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+        );
+        assert_eq!(
+            image_understanding_chat_url(
+                "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+            ),
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+        );
+    }
+
+    #[test]
+    fn ark_vision_response_content_extracts_message_text() {
+        let raw = r#"{
+            "choices": [
+                {"message": {"content": "橙色礼盒包装，自然光桌面。"}}
+            ]
+        }"#;
+
+        assert_eq!(
+            ark_vision_response_content(raw).as_deref(),
+            Some("橙色礼盒包装，自然光桌面。")
+        );
+    }
+
+    #[test]
+    fn image_understanding_auth_error_is_actionable() {
+        let err = image_understanding_error(
+            "图片理解上游失败: status=401 Unauthorized, \
+             body={\"error\":{\"code\":\"AuthenticationError\"}}",
+        );
+
+        assert_eq!(
+            err.user_message(),
+            "Service unavailable: 参考图片理解鉴权失败：请确认图片理解的 API Key、base URL、模型名称和模型权限匹配；Agent Plan key 需要使用 \
+             https://ark.cn-beijing.volces.com/api/plan/v3 和支持 image 输入的模型。"
+        );
     }
 
     #[test]
@@ -2263,6 +3145,7 @@ mod tests {
             duration_seconds: Some(12),
             ratio: Some("9:16".to_string()),
             generate_audio: Some(true),
+            reference_images: vec![],
         };
         let raw = r##"```json
 {
@@ -2292,6 +3175,38 @@ mod tests {
     }
 
     #[test]
+    fn video_package_from_llm_response_has_no_agent_id() {
+        let req = CreateVideoPackageRequest {
+            product: "云柑礼盒".to_string(),
+            selling_points: "当季鲜果、顺丰冷链、送礼体面".to_string(),
+            audience: "25-40 岁办公室人群".to_string(),
+            goal: "新品种草".to_string(),
+            platform: "抖音".to_string(),
+            style: "真实测评".to_string(),
+            duration_seconds: Some(12),
+            ratio: Some("9:16".to_string()),
+            generate_audio: Some(true),
+            reference_images: vec![],
+        };
+        let raw = r##"{
+  "title": "标题",
+  "hook": "钩子",
+  "oral_script": "口播",
+  "storyboard": ["分镜"],
+  "subtitles": ["字幕"],
+  "shot_prompts": ["镜头"],
+  "tags": ["#标签"],
+  "video_prompt": "视频提示词",
+  "checks": []
+}"##;
+
+        let package = video_package_from_llm_response(raw, &req).unwrap();
+
+        assert_eq!(package.video_prompt, "视频提示词");
+        assert!(package.agent_id.is_none());
+    }
+
+    #[test]
     fn video_package_from_agent_response_rejects_missing_video_prompt() {
         let req = CreateVideoPackageRequest {
             product: "云柑礼盒".to_string(),
@@ -2303,6 +3218,7 @@ mod tests {
             duration_seconds: Some(12),
             ratio: Some("9:16".to_string()),
             generate_audio: Some(true),
+            reference_images: vec![],
         };
         let raw = r##"{
   "title": "标题",
@@ -2316,6 +3232,19 @@ mod tests {
 }"##;
 
         assert!(video_package_from_agent_response(raw, &req, "agent-1").is_err());
+    }
+
+    #[test]
+    fn video_package_llm_auth_failure_is_actionable() {
+        let err = video_package_llm_error(
+            "Execution error: LLM request failed: Provider error: All providers failed or are \
+             unavailable: Authentication error: Invalid API key",
+        );
+
+        assert_eq!(
+            err.user_message(),
+            "AI 脚本包生成失败：大模型 API Key 无效，请检查默认模型配置后重试。"
+        );
     }
 
     fn sample_video_task_response(id: &str, status: &str) -> VideoTaskResponse {
@@ -2332,6 +3261,15 @@ mod tests {
             queue_position: Some(1),
             submitted_at: Some("2026-06-03T08:00:00Z".to_string()),
             updated_at: Some("2026-06-03T08:00:00Z".to_string()),
+            reference_image_count: Some(0),
+        }
+    }
+
+    fn sample_reference_image() -> ReferenceImageRequest {
+        ReferenceImageRequest {
+            mime_type: "image/png".to_string(),
+            data_url: "data:image/png;base64,aGVsbG8=".to_string(),
+            file_name: Some("product.png".to_string()),
         }
     }
 
@@ -2451,6 +3389,73 @@ mod tests {
         assert!(graphic_package_from_llm_response(raw, &req).is_err());
     }
 
+    #[tokio::test]
+    async fn graphic_marketing_history_persists_package_and_image() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(":memory:")
+            .await
+            .unwrap();
+        init_graphic_marketing_history_schema(&db).await.unwrap();
+        let package_req = CreateGraphicPackageRequest {
+            product: "云柑礼盒".to_string(),
+            selling_points: "当季鲜果、顺丰冷链、送礼体面".to_string(),
+            audience: "25-40 岁办公室人群".to_string(),
+            price_range: "99-199 元".to_string(),
+            platform: "小红书".to_string(),
+            goal: "新品种草".to_string(),
+            style: "真实测评".to_string(),
+        };
+        let package = create_graphic_package(&package_req);
+
+        let package = insert_graphic_package_history(&db, "user-1", &package_req, package)
+            .await
+            .unwrap();
+        let record_id = package.history_id.clone().unwrap();
+        let image_req = CreateGraphicImageRequest {
+            product: "云柑礼盒".to_string(),
+            platform: "小红书".to_string(),
+            prompt: package.image_prompt.clone(),
+            size: "1024x1536".to_string(),
+            quality: "medium".to_string(),
+            package_id: Some(record_id.clone()),
+        };
+        let image = GraphicImageResponse {
+            id: "graphic-image-1".to_string(),
+            provider: "openai-compatible-image".to_string(),
+            status: "completed".to_string(),
+            message: "图片已生成。".to_string(),
+            image_url: Some(
+                "/api/v1/ai-store-manager/graphic-assets/graphic-image-1.png".to_string(),
+            ),
+            b64_json: None,
+        };
+
+        upsert_graphic_image_history(&db, "user-1", &image_req, None, image)
+            .await
+            .unwrap();
+
+        let history = list_graphic_marketing_history(&db, "user-1", 20)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, record_id);
+        assert_eq!(history[0].product, "云柑礼盒");
+        assert_eq!(
+            history[0].package.as_ref().unwrap().image_prompt,
+            package.image_prompt
+        );
+        assert_eq!(
+            history[0].image.as_ref().unwrap().image_url.as_deref(),
+            Some("/api/v1/ai-store-manager/graphic-assets/graphic-image-1.png")
+        );
+
+        let other_user = list_graphic_marketing_history(&db, "user-2", 20)
+            .await
+            .unwrap();
+        assert!(other_user.is_empty());
+    }
+
     #[test]
     fn image_payload_targets_volcengine_seedream_options() {
         let req = CreateGraphicImageRequest {
@@ -2459,6 +3464,7 @@ mod tests {
             prompt: "生成海报".to_string(),
             size: "1024x1536".to_string(),
             quality: "medium".to_string(),
+            package_id: None,
         };
 
         let payload = build_image_generation_payload("doubao-seedream-5.0-lite", &req);
@@ -2481,6 +3487,7 @@ mod tests {
             prompt: "生成营销图".to_string(),
             size: "1024x1024".to_string(),
             quality: "high".to_string(),
+            package_id: None,
         };
 
         let payload = build_image_generation_payload_with_image(
@@ -2516,6 +3523,7 @@ mod tests {
             image_b64: "".to_string(),
             image_mime_type: "image/png".to_string(),
             image_filename: "product.png".to_string(),
+            package_id: None,
         };
 
         assert!(validate_graphic_image_edit_request(&req).is_err());
@@ -2566,6 +3574,7 @@ mod tests {
             prompt: "生成海报".to_string(),
             size: "1024x1536".to_string(),
             quality: "medium".to_string(),
+            package_id: None,
         };
         assert!(validate_graphic_image_request(&req).is_ok());
 

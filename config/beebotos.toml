@@ -58,7 +58,7 @@ retry_count = 3
 timeout_ms = 60000
 
 [models]
-default_provider = "deepseek"
+default_provider = "doubao"
 fallback_chain = []
 max_tokens = 8192
 request_timeout = 180
@@ -140,6 +140,12 @@ base_url = "https://ark.cn-beijing.volces.com/api/plan/v3"
 api_key = ""
 model = "doubao-seedream-5.0-lite"
 timeout_seconds = 180
+
+[image_understanding]
+base_url = "https://ark.cn-beijing.volces.com/api/plan/v3"
+api_key = ""
+model = "doubao-seed-2.0-lite"
+timeout_seconds = 90
 
 [video_generation]
 base_url = "https://ark.cn-beijing.volces.com/api/plan/v3"

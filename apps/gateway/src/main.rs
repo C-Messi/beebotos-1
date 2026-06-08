@@ -2310,6 +2310,10 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
             "/api/v1/ai-store-manager/video-assets/:file",
             get(handlers::http::ai_store_manager::get_video_asset),
         )
+        .route(
+            "/api/v1/ai-store-manager/graphic-assets/:file",
+            get(handlers::http::ai_store_manager::get_graphic_asset),
+        )
         // WebSocket status endpoint (public for health checks)
         .route("/ws/status", get(handlers::websocket::ws_status_handler))
         // Webhook routes
@@ -2412,6 +2416,10 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         .route(
             "/api/v1/ai-store-manager/graphic-packages",
             post(handlers::http::ai_store_manager::create_graphic_package_handler),
+        )
+        .route(
+            "/api/v1/ai-store-manager/graphic-history",
+            get(handlers::http::ai_store_manager::list_graphic_marketing_history_handler),
         )
         .route(
             "/api/v1/ai-store-manager/graphic-images/:id",
@@ -3345,6 +3353,7 @@ mod tests {
                 },
             },
             image_generation: config::ImageGenerationConfig::default(),
+            image_understanding: config::ImageUnderstandingConfig::default(),
             video_generation: config::VideoGenerationConfig::default(),
             voice_marketing: config::VoiceMarketingConfig::default(),
             channels: config::ChannelsConfig {
