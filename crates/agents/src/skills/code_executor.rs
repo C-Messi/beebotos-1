@@ -234,7 +234,7 @@ impl CodeSkillExecutor {
         let tool = ProcessExecTool::new(vec![skill_path.to_path_buf()]);
         let params = serde_json::json!({
             "command": command,
-            "timeout_ms": 30000
+            "timeout_ms": 180000
         });
 
         match tool.execute(&params).await {

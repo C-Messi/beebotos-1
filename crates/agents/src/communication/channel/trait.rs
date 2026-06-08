@@ -408,7 +408,7 @@ impl Default for PollingConfig {
     fn default() -> Self {
         Self {
             interval_secs: 1,
-            timeout_secs: 30,
+            timeout_secs: 180,
             retry_interval_secs: 5,
             max_retry_attempts: 10,
         }

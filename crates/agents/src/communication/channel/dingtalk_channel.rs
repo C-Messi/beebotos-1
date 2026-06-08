@@ -344,7 +344,7 @@ impl DingTalkChannel {
         let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
-            let mut heartbeat_interval = interval(Duration::from_secs(30));
+            let mut heartbeat_interval = interval(Duration::from_secs(180));
 
             loop {
                 tokio::select! {

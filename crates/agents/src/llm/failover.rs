@@ -47,7 +47,7 @@ pub struct FailoverConfig {
 impl Default for FailoverConfig {
     fn default() -> Self {
         Self {
-            attempt_timeout_secs: 30,
+            attempt_timeout_secs: 180,
             max_failures: 3,
             health_check_interval_secs: 60,
             enable_circuit_breaker: true,
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn test_failover_config_default() {
         let config = FailoverConfig::default();
-        assert_eq!(config.attempt_timeout_secs, 30);
+        assert_eq!(config.attempt_timeout_secs, 180);
         assert_eq!(config.max_failures, 3);
         assert!(config.enable_circuit_breaker);
     }

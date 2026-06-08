@@ -862,7 +862,7 @@ impl LlmService {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<String>(100);
         tokio::spawn(async move {
-            let chunk_timeout = tokio::time::Duration::from_secs(30);
+            let chunk_timeout = tokio::time::Duration::from_secs(180);
             loop {
                 match tokio::time::timeout(chunk_timeout, chunk_rx.recv()).await {
                     Ok(Some(chunk)) => {
@@ -878,7 +878,7 @@ impl LlmService {
                     Ok(None) => break,
                     Err(_) => {
                         tracing::warn!(
-                            "LLM stream chunk timeout (no data for 30s), aborting stream"
+                            "LLM stream chunk timeout (no data for 180s), aborting stream"
                         );
                         break;
                     }

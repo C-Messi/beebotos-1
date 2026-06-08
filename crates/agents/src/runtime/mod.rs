@@ -86,7 +86,7 @@ impl Default for RuntimeConfig {
             enable_connection_pool: true,
             http_pool_max_idle: 10,
             http_pool_idle_timeout_secs: 90,
-            http_timeout_secs: 30,
+            http_timeout_secs: 180,
             enable_shared_media_downloader: true,
             max_concurrent_downloads: 10,
             enable_batch_processing: true,

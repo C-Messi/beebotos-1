@@ -149,7 +149,7 @@ impl Default for RetryPolicy {
         Self {
             max_retries: 3,
             base_delay: std::time::Duration::from_millis(500),
-            max_delay: std::time::Duration::from_secs(30),
+            max_delay: std::time::Duration::from_secs(180),
             backoff_multiplier: 2.0,
             retry_on_rate_limit: true,
         }

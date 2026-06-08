@@ -190,7 +190,7 @@ impl Default for WebhookConfig {
             verify_signatures: true,
             decrypt_messages: false,
             allowed_ips: vec![],
-            timeout_secs: 30,
+            timeout_secs: 180,
             max_body_size: 10 * 1024 * 1024, // 10MB
         }
     }

@@ -51,7 +51,7 @@ impl Default for CdpConnectionConfig {
             host: "localhost".to_string(),
             port: 9222,
             secure: false,
-            connection_timeout_ms: 30000,
+            connection_timeout_ms: 180000,
         }
     }
 }

@@ -1389,7 +1389,7 @@ async fn main() -> anyhow::Result<()> {
         let instance_manager = registry.instance_manager();
 
         // Start health monitor for auto-reconnect
-        instance_manager.start_health_monitor(Duration::from_secs(30));
+        instance_manager.start_health_monitor(Duration::from_secs(180));
 
         // Initialize SQLite-backed stores
         let db = app_state.db.clone();
@@ -1890,10 +1890,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Wait for server shutdown with a hard timeout so a stuck connection
     // cannot block the process forever.
-    match tokio::time::timeout(std::time::Duration::from_secs(30), server_handle).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(180), server_handle).await {
         Ok(Ok(_)) => info!("HTTP server stopped gracefully"),
         Ok(Err(e)) => error!("HTTP server error: {}", e),
-        Err(_) => warn!("HTTP server shutdown timed out after 30s, forcing stop"),
+        Err(_) => warn!("HTTP server shutdown timed out after 180s, forcing stop"),
     }
 
     // Cleanup other services
@@ -3301,7 +3301,7 @@ mod tests {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
                 grpc_port: 50051,
-                timeout_seconds: 30,
+                timeout_seconds: 180,
                 max_body_size_mb: 10,
                 cors: config::CorsConfig {
                     allowed_origins: vec!["http://localhost:8000".to_string()],
@@ -3616,7 +3616,7 @@ entry_point: handle
     #[test]
     fn graphic_image_route_timeout_uses_image_generation_timeout() {
         let mut config = create_test_config();
-        config.server.timeout_seconds = 30;
+        config.server.timeout_seconds = 180;
         config.image_generation.timeout_seconds = 180;
 
         assert_eq!(

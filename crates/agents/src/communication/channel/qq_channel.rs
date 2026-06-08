@@ -219,7 +219,7 @@ impl QQChannel {
         }
 
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(180))
             .build()
             .map_err(|e| {
                 AgentError::configuration(format!("Failed to create HTTP client: {}", e))

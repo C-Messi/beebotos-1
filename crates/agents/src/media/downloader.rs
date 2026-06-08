@@ -246,7 +246,7 @@ impl MediaDownloader {
             // Connection pool settings for efficient media downloads
             .pool_max_idle_per_host(config.pool_max_idle_per_host)
             .pool_idle_timeout(Duration::from_secs(config.pool_idle_timeout_secs))
-            .connect_timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(180))
             .build()
             .map_err(|e| AgentError::Platform(format!("Failed to build HTTP client: {}", e)))?;
 

@@ -1658,7 +1658,7 @@ api_key = ""
                 host: "0.0.0.0".to_string(),
                 port: 8080,
                 grpc_port: 50051,
-                timeout_seconds: 30,
+                timeout_seconds: 180,
                 max_body_size_mb: 10,
                 cors: CorsConfig {
                     allowed_origins: vec!["*".to_string()],

@@ -104,7 +104,7 @@ keepalive_seconds = 75
 max_body_size = 10485760
 max_connections = 1000
 port = 8000
-timeout_seconds = 30
+timeout_seconds = 180
 
 [server.cors]
 allow_credentials = false
@@ -124,9 +124,9 @@ allowed_methods = [
 allowed_origins = ["*"]
 
 [services]
-chain_timeout_seconds = 30
+chain_timeout_seconds = 180
 chain_url = "http://localhost:8545"
-kernel_timeout_seconds = 30
+kernel_timeout_seconds = 180
 kernel_url = "http://localhost:9000"
 
 [tls]

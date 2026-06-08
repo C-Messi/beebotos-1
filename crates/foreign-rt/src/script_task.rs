@@ -250,7 +250,7 @@ impl ScriptTaskBuilder {
             input: serde_json::Value::Null,
             sandbox: SandboxRequirements::default(),
             permissions: Vec::new(),
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(180),
             agent_id: None,
         }
     }

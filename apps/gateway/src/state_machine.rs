@@ -447,7 +447,7 @@ impl StateMachineManager {
         let mut default_timeouts = HashMap::new();
         default_timeouts.insert(AgentLifecycleState::Initializing, Duration::from_secs(60));
         default_timeouts.insert(AgentLifecycleState::Working, Duration::from_secs(300));
-        default_timeouts.insert(AgentLifecycleState::ShuttingDown, Duration::from_secs(30));
+        default_timeouts.insert(AgentLifecycleState::ShuttingDown, Duration::from_secs(180));
 
         Self {
             contexts: HashMap::new(),

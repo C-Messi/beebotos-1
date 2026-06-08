@@ -469,7 +469,7 @@ impl AgentService {
         .await;
 
         // Main heartbeat loop
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(180));
         let mut consecutive_errors = 0;
 
         loop {

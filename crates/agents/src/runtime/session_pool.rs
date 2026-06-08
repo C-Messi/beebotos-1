@@ -549,7 +549,7 @@ impl SessionPool {
         }
 
         // Wait for assignment with timeout
-        match timeout(Duration::from_secs(30), rx).await {
+        match timeout(Duration::from_secs(180), rx).await {
             Ok(Ok(session_id)) => Ok(session_id),
             _ => Ok(None),
         }

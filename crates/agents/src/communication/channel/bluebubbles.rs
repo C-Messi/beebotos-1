@@ -69,7 +69,7 @@ impl Default for BlueBubblesConfig {
             api_prefix: "/api/v1".to_string(),
             use_tls: false,
             reconnect_interval_secs: 5,
-            request_timeout_secs: 30,
+            request_timeout_secs: 180,
             base,
         }
     }

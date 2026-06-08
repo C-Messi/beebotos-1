@@ -82,14 +82,14 @@ impl WebScraper {
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(180))
             .build()
             .map_err(|e| AgentError::platform(format!("Failed to create HTTP client: {}", e)))?;
 
         Ok(Self {
             client,
             max_content_length: 100_000, // 100KB max
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(180),
         })
     }
 

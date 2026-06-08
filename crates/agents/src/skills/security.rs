@@ -43,7 +43,7 @@ impl Default for SkillSecurityPolicy {
             allow_filesystem: false,
             allow_env_access: false,
             max_memory_mb: 128,
-            timeout_secs: 30,
+            timeout_secs: 180,
             allowed_imports: vec![
                 "env.memory".to_string(),
                 "env.__stack_pointer".to_string(),

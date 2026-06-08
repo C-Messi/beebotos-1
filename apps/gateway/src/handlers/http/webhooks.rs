@@ -686,7 +686,7 @@ fn load_telegram_config() -> Result<TelegramWebhookConfig, Box<dyn std::error::E
         bot_token,
         secret_token,
         endpoint_path: "/webhook/telegram".to_string(),
-        timeout_secs: 30,
+        timeout_secs: 180,
         max_body_size: 10 * 1024 * 1024,
     })
 }
@@ -746,7 +746,7 @@ fn load_whatsapp_config() -> Result<WebhookConfig, Box<dyn std::error::Error>> {
         verify_signatures: std::env::var("WHATSAPP_WEBHOOK_SECRET").is_ok(),
         decrypt_messages: false,
         allowed_ips: vec!["127.0.0.1".to_string()], // Only accept from localhost
-        timeout_secs: 30,
+        timeout_secs: 180,
         max_body_size: 50 * 1024 * 1024, // 50MB for media
     })
 }
@@ -764,7 +764,7 @@ fn load_signal_config() -> Result<WebhookConfig, Box<dyn std::error::Error>> {
         verify_signatures: false,
         decrypt_messages: false,
         allowed_ips: vec!["127.0.0.1".to_string()],
-        timeout_secs: 30,
+        timeout_secs: 180,
         max_body_size: 10 * 1024 * 1024,
     })
 }
@@ -784,7 +784,7 @@ fn load_matrix_config() -> Result<WebhookConfig, Box<dyn std::error::Error>> {
         verify_signatures: false, // Token is in query param
         decrypt_messages: false,
         allowed_ips: vec![],
-        timeout_secs: 30,
+        timeout_secs: 180,
         max_body_size: 10 * 1024 * 1024,
     })
 }
@@ -802,7 +802,7 @@ fn load_imessage_config() -> Result<WebhookConfig, Box<dyn std::error::Error>> {
         verify_signatures: false,
         decrypt_messages: false,
         allowed_ips: vec![], // BlueBubbles can be on any IP
-        timeout_secs: 30,
+        timeout_secs: 180,
         max_body_size: 50 * 1024 * 1024,
     })
 }

@@ -17,7 +17,7 @@ use crate::communication::{Message, MessageType, PlatformType};
 use crate::error::{AgentError, Result};
 
 /// Matrix sync timeout in milliseconds
-const MATRIX_SYNC_TIMEOUT_MS: u64 = 30000;
+const MATRIX_SYNC_TIMEOUT_MS: u64 = 180000;
 
 /// Matrix Channel configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

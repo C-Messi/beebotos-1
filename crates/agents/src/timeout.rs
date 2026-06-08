@@ -21,7 +21,7 @@ impl TimeoutConfig {
     pub fn new(default_secs: u64) -> Self {
         Self {
             default: Duration::from_secs(default_secs),
-            network: Duration::from_secs(30),
+            network: Duration::from_secs(180),
             database: Duration::from_secs(10),
             external_api: Duration::from_secs(60),
         }

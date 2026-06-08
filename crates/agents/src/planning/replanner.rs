@@ -251,7 +251,7 @@ impl FeedbackRePlanner {
         // Add retry action
         step.actions.push(Action::Wait {
             condition: format!("Recover from: {}", error),
-            timeout: Some(Duration::from_secs(30)),
+            timeout: Some(Duration::from_secs(180)),
         });
 
         // Reset step status

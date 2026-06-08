@@ -72,10 +72,10 @@ impl SkillSelector {
             // degrades with too many candidates. 5 is the sweet spot for
             // accurate scoring without overwhelming the LLM.
             max_candidates: 5,
-            // 🆕 FIX: Increased to 30s — skill selection needs time for LLM ranking
+            // 🆕 FIX: Increased to 180s — skill selection needs time for LLM ranking
             // of complex queries (e.g. weather, multi-step tasks).
-            // Note: Kimi k2.6 can take 15-25s for ranking output at peak load.
-            timeout: Duration::from_secs(30),
+            // Note: Kimi k2.6 can take longer for ranking output at peak load.
+            timeout: Duration::from_secs(180),
             cache: RwLock::new(HashMap::new()),
             cache_ttl: Duration::from_secs(300), // 5 minutes
         }

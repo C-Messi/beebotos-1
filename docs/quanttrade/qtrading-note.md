@@ -4992,4 +4992,89 @@ beebotos-setup.iss 文件，修改内容：
 
 现在可以在 Windows 上用 Inno Setup 编译器编译 `tools/scripts/setup/beebotos-setup.iss` 了。
 
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+查找全部30S的清单：
+
+已定位，暂未修改代码。
+
+**直接导致日志报错的参数**
+`Execution error: LLM ReAct turn timed out after 30s (round 1)` 来自：
+
+- [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:4407)  
+  `const LLM_TURN_TIMEOUT_SECS: u64 = 30;`
+
+这里包住了每一轮 `llm.call_llm_tool_turn(...)`。日志里的 `round 1`、`timed out after 30s` 就是这段生成的。
+
+同一文件还有一个相关的 30s：
+
+- [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:2789)  
+  `const FINAL_ANSWER_TIMEOUT_SECS: u64 = 30;`  
+  用于 ReAct 达到最大轮数后，强制最终回答的 LLM 超时。
+
+**核心 LLM / ReAct 相关 30s**
+- [llm/failover.rs](/root/beebotos/crates/agents/src/llm/failover.rs:50) `attempt_timeout_secs: 30`
+- [llm/providers/kimi.rs](/root/beebotos/crates/agents/src/llm/providers/kimi.rs:357) Kimi stream idle timeout `30s`
+- [apps/gateway/src/services/llm_service.rs](/root/beebotos/apps/gateway/src/services/llm_service.rs:865) LLM stream chunk idle timeout `30s`
+
+**配置文件 30s**
+- [config/beebotos.toml](/root/beebotos/config/beebotos.toml:107) `[server] timeout_seconds = 30`
+- [config/beebotos.toml](/root/beebotos/config/beebotos.toml:127) `[services] chain_timeout_seconds = 30`
+- [config/beebotos.toml](/root/beebotos/config/beebotos.toml:129) `[services] kernel_timeout_seconds = 30`
+- [deployments/k8s/configmap.yaml](/root/beebotos/deployments/k8s/configmap.yaml:17) `timeout_secs: 30`
+
+**工具 / 执行器默认 30s**
+- [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:753) builtin exec tool `timeout_ms` 默认 `30000`
+- [skills/tool_set.rs](/root/beebotos/crates/agents/src/skills/tool_set.rs:437) tool timeout 默认 `30000`
+- [skills/tool_set.rs](/root/beebotos/crates/agents/src/skills/tool_set.rs:530) 另一处 tool schema 默认 `30000`
+- [skills/code_executor.rs](/root/beebotos/crates/agents/src/skills/code_executor.rs:237) `timeout_ms: 30000`
+- [skills/security.rs](/root/beebotos/crates/agents/src/skills/security.rs:46) `timeout_secs: 30`
+- [skills/link_handler.rs](/root/beebotos/crates/agents/src/skills/link_handler.rs:85) HTTP 抓取 timeout `30s`
+- [foreign-rt/src/script_task.rs](/root/beebotos/crates/foreign-rt/src/script_task.rs:253) script timeout `30s`
+- [foreign-rt/src/wasm_path/pyodide.rs](/root/beebotos/crates/foreign-rt/src/wasm_path/pyodide.rs:234) Pyodide timeout `30s`
+- [foreign-rt/src/wasm_path/quickjs.rs](/root/beebotos/crates/foreign-rt/src/wasm_path/quickjs.rs:242) QuickJS timeout `30s`
+- [foreign-rt/src/process_path/mod.rs](/root/beebotos/crates/foreign-rt/src/process_path/mod.rs:432) process timeout `30s`
+
+**网关 / HTTP / Web 30s**
+- [apps/web/src/api/gateway.rs](/root/beebotos/apps/web/src/api/gateway.rs:30) web gateway API timeout `30000`
+- [apps/web/src/server/config.rs](/root/beebotos/apps/web/src/server/config.rs:38) proxy timeout 默认 `30`
+- [apps/gateway/src/clients/beehub.rs](/root/beebotos/apps/gateway/src/clients/beehub.rs:28) HTTP client timeout `30s`
+- [apps/gateway/src/clients/clawhub.rs](/root/beebotos/apps/gateway/src/clients/clawhub.rs:28) HTTP client timeout `30s`
+- [apps/gateway/src/main.rs](/root/beebotos/apps/gateway/src/main.rs:1893) HTTP server shutdown timeout `30s`
+- [apps/gateway/src/handlers/http/foreign_runtime.rs](/root/beebotos/apps/gateway/src/handlers/http/foreign_runtime.rs:326) foreign runtime default timeout `30`
+- [apps/gateway/src/handlers/http/webhooks.rs](/root/beebotos/apps/gateway/src/handlers/http/webhooks.rs:689) webhook timeout `30`
+
+**通讯 / 网络层 30s**
+- [session/websocket.rs](/root/beebotos/crates/agents/src/session/websocket.rs:179) websocket auth timeout `30s`
+- [communication/channel/websocket_client.rs](/root/beebotos/crates/agents/src/communication/channel/websocket_client.rs:64) connect timeout `30s`
+- [communication/channel/matrix_channel.rs](/root/beebotos/crates/agents/src/communication/channel/matrix_channel.rs:20) sync timeout `30000`
+- [communication/channel/trait.rs](/root/beebotos/crates/agents/src/communication/channel/trait.rs:411) channel timeout 默认 `30`
+- [a2a/transport.rs](/root/beebotos/crates/agents/src/a2a/transport.rs:56) A2A connect timeout `30s`
+- [media/downloader.rs](/root/beebotos/crates/agents/src/media/downloader.rs:249) download connect timeout `30s`
+
+**我的判断**
+这次优先要改的是 [agent_impl.rs](/root/beebotos/crates/agents/src/agent_impl.rs:4407) 的 `LLM_TURN_TIMEOUT_SECS`。如果你想让复杂 ReAct 任务稳定完成，建议至少改到 `120` 或 `180`；如果要和当前 `[models] request_timeout = 180` 对齐，就改成 `180` 比较顺。
+
+上面30S超时清单，都修改为180S
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+这里有一处心跳间隔原本也是 30 秒。我会照你的要求统一改成 180 秒，不过提醒一下：心跳/健康检查间隔变长会让断线或故障发现更慢。先按你的确认执行。
+
+已按要求先停掉 `beeShop` 再编译。
+
+结果：
+- 已停止 `beeShop` 相关服务：admin/shop/supplier 的 Vite 进程、Java 后端。
+- 确认端口 `8080 / 8081 / 8082 / 8890` 已释放。
+- 之前残留的 `cargo/rustc` 编译进程也已清掉。
+- 重新执行 `cargo check`，通过了，只有既有 warning，没有编译错误。
+
+这次 30s 已统一改为 180s，核心位置包括：
+- ReAct 单轮 LLM：`LLM_TURN_TIMEOUT_SECS = 180`
+- ReAct forced final answer：`FINAL_ANSWER_TIMEOUT_SECS = 180`
+- LLM failover attempt timeout：`attempt_timeout_secs = 180`
+- gateway/web/foreign runtime/tool/channel/webhook/Docker healthcheck 等清单内 30s 项也已同步。
+
+最终复查只剩一个 `timeout_seconds = 300`，它是视频生成 300 秒，不是 30 秒，所以保留未动。
+
 

@@ -354,7 +354,7 @@ impl LLMProvider for KimiProvider {
         let mut stream = response.bytes_stream();
 
         tokio::spawn(async move {
-            let idle_timeout = std::time::Duration::from_secs(30);
+            let idle_timeout = std::time::Duration::from_secs(180);
             let mut buffer = String::new();
             loop {
                 match tokio::time::timeout(idle_timeout, stream.next()).await {
@@ -398,7 +398,7 @@ impl LLMProvider for KimiProvider {
                     },
                     Ok(None) => break,
                     Err(_) => {
-                        warn!("Kimi stream idle timeout (no data for 30s), closing stream");
+                        warn!("Kimi stream idle timeout (no data for 180s), closing stream");
                         break;
                     }
                 }

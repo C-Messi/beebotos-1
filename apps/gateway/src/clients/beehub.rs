@@ -25,7 +25,7 @@ impl BeeHubClient {
         let api_key = std::env::var("BEEHUB_API_KEY").ok();
 
         let http = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(180))
             .build()
             .map_err(|e| HubError::Network(e.to_string()))?;
 
@@ -39,7 +39,7 @@ impl BeeHubClient {
     /// Create with custom configuration
     pub fn with_config(base_url: String, api_key: Option<String>) -> Result<Self, HubError> {
         let http = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(180))
             .build()
             .map_err(|e| HubError::Network(e.to_string()))?;
 

@@ -176,8 +176,8 @@ impl Default for WsSessionManagerConfig {
         Self {
             bind_addr: "0.0.0.0:8080".to_string(),
             connection_timeout: Duration::from_secs(300), // 5 minutes
-            auth_timeout: Duration::from_secs(30),        // 30 seconds
-            heartbeat_interval: Duration::from_secs(30),  // 30 seconds
+            auth_timeout: Duration::from_secs(180),       // 180 seconds
+            heartbeat_interval: Duration::from_secs(180), // 180 seconds
             max_connections_per_ip: 10,
             max_total_connections: 1000,
             enable_heartbeat: true,
@@ -704,8 +704,8 @@ mod tests {
         let config = WsSessionManagerConfig::default();
         assert_eq!(config.bind_addr, "0.0.0.0:8080");
         assert_eq!(config.connection_timeout, Duration::from_secs(300));
-        assert_eq!(config.auth_timeout, Duration::from_secs(30));
-        assert_eq!(config.heartbeat_interval, Duration::from_secs(30));
+        assert_eq!(config.auth_timeout, Duration::from_secs(180));
+        assert_eq!(config.heartbeat_interval, Duration::from_secs(180));
         assert_eq!(config.max_connections_per_ip, 10);
         assert_eq!(config.max_total_connections, 1000);
         assert!(config.enable_heartbeat);

@@ -16,7 +16,7 @@ cache_max_age = 3600
 # 后端 Gateway 地址
 gateway_url = "http://localhost:8000"
 # 代理超时（秒）
-timeout_secs = 30
+timeout_secs = 180
 # 是否转发原始 Host 头
 forward_host = false
 

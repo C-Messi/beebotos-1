@@ -27,7 +27,7 @@ impl Default for GatewayApiConfig {
             base_url: "http://localhost:8080/api/v1".to_string(),
             websocket_url: "ws://localhost:8080/ws".to_string(),
             auth: GatewayAuthConfig::default(),
-            timeout_ms: 30000,
+            timeout_ms: 180000,
             retry_attempts: 3,
         }
     }
@@ -279,7 +279,7 @@ mod tests {
         let config = GatewayApiConfig::default();
         assert_eq!(config.base_url, "http://localhost:8080/api/v1");
         assert_eq!(config.websocket_url, "ws://localhost:8080/ws");
-        assert_eq!(config.timeout_ms, 30000);
+        assert_eq!(config.timeout_ms, 180000);
     }
 
     #[test]

@@ -239,7 +239,7 @@ mod tests {
             input: serde_json::json!({"x": 42}),
             sandbox: Default::default(),
             permissions: vec![],
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(180),
             agent_id: Some("agent-1".to_string()),
         };
 

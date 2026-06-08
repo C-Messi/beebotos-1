@@ -224,7 +224,7 @@ impl SignalCliManager {
             state: Arc::new(RwLock::new(SignalCliState::Stopped)),
             child: Arc::new(Mutex::new(None)),
             http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(180))
                 .build()
                 .unwrap_or_default(),
             event_tx: Arc::new(Mutex::new(Some(event_tx))),

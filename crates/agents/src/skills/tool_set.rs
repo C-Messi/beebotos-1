@@ -406,7 +406,7 @@ impl SkillTool for ProcessExecTool {
     fn description(&self) -> &str {
         "Execute an external command in a subprocess (e.g. python3 script.py, node script.js). \
          Parameters: command (string), working_dir (string, optional), timeout_ms (integer, \
-         optional, default 30000)"
+         optional, default 180000)"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -415,7 +415,7 @@ impl SkillTool for ProcessExecTool {
             "properties": {
                 "command": { "type": "string", "description": "Shell command to execute" },
                 "working_dir": { "type": "string", "description": "Working directory for the command" },
-                "timeout_ms": { "type": "integer", "description": "Timeout in milliseconds", "default": 30000 }
+                "timeout_ms": { "type": "integer", "description": "Timeout in milliseconds", "default": 180000 }
             },
             "required": ["command"]
         })
@@ -434,7 +434,7 @@ impl SkillTool for ProcessExecTool {
             .unwrap_or_else(|| PathBuf::from("."));
         let work_dir = self.resolve_working_dir(params["working_dir"].as_str(), &default_dir)?;
 
-        let timeout_ms = params["timeout_ms"].as_u64().unwrap_or(30000);
+        let timeout_ms = params["timeout_ms"].as_u64().unwrap_or(180000);
 
         let mut cmd = tokio::process::Command::new(if cfg!(windows) {
             "powershell.exe"
@@ -518,7 +518,7 @@ impl SkillTool for BashShellTool {
 
     fn description(&self) -> &str {
         "Execute a bash command. Same as process_exec but explicitly for bash. Parameters: command \
-         (string), working_dir (string, optional), timeout_ms (integer, optional, default 30000)"
+         (string), working_dir (string, optional), timeout_ms (integer, optional, default 180000)"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -527,7 +527,7 @@ impl SkillTool for BashShellTool {
             "properties": {
                 "command": { "type": "string", "description": "Bash command to execute" },
                 "working_dir": { "type": "string", "description": "Working directory" },
-                "timeout_ms": { "type": "integer", "description": "Timeout in milliseconds", "default": 30000 }
+                "timeout_ms": { "type": "integer", "description": "Timeout in milliseconds", "default": 180000 }
             },
             "required": ["command"]
         })

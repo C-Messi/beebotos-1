@@ -46,14 +46,14 @@ impl HttpTransport {
     ///
     /// # Connection Pool Settings
     /// - Pool max idle per host: 10 connections
-    /// - Connection timeout: 30 seconds
+    /// - Connection timeout: 180 seconds
     /// - Pool idle timeout: 90 seconds
     pub fn new(base_url: String) -> Self {
         let client = reqwest::Client::builder()
             // Connection pool settings for high throughput
             .pool_max_idle_per_host(10)
             .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .connect_timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(180))
             .build()
             .expect("Failed to create HTTP client with connection pool");
 
@@ -216,7 +216,7 @@ impl TransportManager {
             .header("Content-Type", "application/json")
             .header("X-A2A-Version", "1.0")
             .body(payload.to_vec())
-            .timeout(tokio::time::Duration::from_secs(30))
+            .timeout(tokio::time::Duration::from_secs(180))
             .send()
             .await
             .map_err(|e| TransportError::SendFailed(format!("HTTP request failed: {}", e)))?;

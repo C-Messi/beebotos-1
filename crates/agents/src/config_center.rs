@@ -138,7 +138,7 @@ impl Default for AgentConfigCenter {
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
-                request_timeout_secs: 30,
+                request_timeout_secs: 180,
                 max_request_size_mb: 10,
                 enable_cors: true,
                 enable_compression: true,

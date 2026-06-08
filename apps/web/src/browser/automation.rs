@@ -30,7 +30,7 @@ pub struct AutomationConfig {
 impl Default for AutomationConfig {
     fn default() -> Self {
         Self {
-            default_timeout_ms: 30000,
+            default_timeout_ms: 180000,
             default_delay_ms: 100,
             continue_on_error: false,
             parallel_execution: false,
@@ -220,7 +220,7 @@ impl BatchOperation {
         self.operations.push(BrowserAction::Click {
             selector: SelectorChain::single(Selector::css(selector)),
             wait_for: None,
-            timeout_ms: 30000,
+            timeout_ms: 180000,
             delay_ms: 0,
         });
         self
@@ -242,7 +242,7 @@ impl BatchOperation {
         self.operations.push(BrowserAction::Navigate {
             url: url.into(),
             wait_until: Some(NavigationWait::NetworkIdle),
-            timeout_ms: 30000,
+            timeout_ms: 180000,
         });
         self
     }

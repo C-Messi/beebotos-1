@@ -57,8 +57,8 @@ pub struct ServiceMeshConfig {
 impl Default for ServiceMeshConfig {
     fn default() -> Self {
         Self {
-            health_check_interval_secs: 30,
-            service_timeout_secs: 30,
+            health_check_interval_secs: 180,
+            service_timeout_secs: 180,
             max_retries: 3,
             load_balance_strategy: LoadBalanceStrategy::RoundRobin,
             enable_chain_verification: true,
@@ -458,7 +458,7 @@ mod tests {
     async fn test_service_mesh_config_default() {
         let config = ServiceMeshConfig::default();
         assert_eq!(config.health_check_interval_secs, 30);
-        assert_eq!(config.service_timeout_secs, 30);
+        assert_eq!(config.service_timeout_secs, 180);
         assert_eq!(config.max_retries, 3);
         assert!(config.enable_chain_verification);
     }

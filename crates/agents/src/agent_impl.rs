@@ -750,7 +750,7 @@ impl Agent {
                     "properties": {
                         "command": { "type": "string", "description": "Shell command to run" },
                         "working_dir": { "type": "string", "description": "Optional working directory, relative to the workspace unless absolute", "default": "." },
-                        "timeout_ms": { "type": "integer", "description": "Timeout in milliseconds", "default": 30000 }
+                        "timeout_ms": { "type": "integer", "description": "Timeout in milliseconds", "default": 180000 }
                     },
                     "required": ["command"]
                 }),
@@ -1085,7 +1085,7 @@ impl Agent {
                 let workspace = self.workspace_dir();
                 let timeout_ms = get("timeout_ms")
                     .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(30000);
+                    .unwrap_or(180000);
                 let mut cmd = tokio::process::Command::new(if cfg!(windows) {
                     "powershell.exe"
                 } else {
@@ -2786,7 +2786,7 @@ impl Agent {
 
         let mut final_params = extra_params;
         final_params.insert("tool_choice".to_string(), "none".to_string());
-        const FINAL_ANSWER_TIMEOUT_SECS: u64 = 30;
+        const FINAL_ANSWER_TIMEOUT_SECS: u64 = 180;
         let turn = tokio::time::timeout(
             std::time::Duration::from_secs(FINAL_ANSWER_TIMEOUT_SECS),
             llm.call_llm_tool_turn(loop_messages, tools, Some(final_params)),
@@ -4404,7 +4404,7 @@ impl Agent {
         .await;
         // 🛡️ Circuit-breaker: abort if the same tool keeps failing.
         const MAX_CONSECUTIVE_TOOL_ERRORS: u32 = 10;
-        const LLM_TURN_TIMEOUT_SECS: u64 = 30;
+        const LLM_TURN_TIMEOUT_SECS: u64 = 180;
         let mut consecutive_tool_errors: u32 = 0;
 
         for round in 0..max_tool_rounds {

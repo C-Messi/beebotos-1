@@ -35,7 +35,7 @@ impl AppConfig {
         builder = builder.set_default("static_file.index", "index.html")?;
         builder = builder.set_default("static_file.cache_max_age", 3600i64)?;
         builder = builder.set_default("proxy.gateway_url", "http://localhost:3000")?;
-        builder = builder.set_default("proxy.timeout_secs", 30i64)?;
+        builder = builder.set_default("proxy.timeout_secs", 180i64)?;
         builder = builder.set_default("proxy.forward_host", false)?;
         builder = builder.set_default("log.level", "info")?;
         builder = builder.set_default("log.format", "compact")?;
@@ -90,7 +90,7 @@ impl AppConfig {
             },
             proxy: ProxyConfig {
                 gateway_url,
-                timeout_secs: 30,
+                timeout_secs: 180,
                 forward_host: false,
             },
             log: LogConfig {
@@ -159,7 +159,7 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             gateway_url: "http://localhost:3000".to_string(),
-            timeout_secs: 30,
+            timeout_secs: 180,
             forward_host: false,
         }
     }

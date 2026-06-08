@@ -323,7 +323,7 @@ pub async fn list_runtimes(
             process_available: manager
                 .is_process_available(beebotos_foreign_rt::ForeignRuntime::Python),
             default_max_memory_mb: 256,
-            default_timeout_secs: 30,
+            default_timeout_secs: 180,
         },
         RuntimeInfoResponse {
             name: "nodejs".to_string(),
@@ -332,7 +332,7 @@ pub async fn list_runtimes(
             process_available: manager
                 .is_process_available(beebotos_foreign_rt::ForeignRuntime::NodeJs),
             default_max_memory_mb: 256,
-            default_timeout_secs: 30,
+            default_timeout_secs: 180,
         },
     ];
 

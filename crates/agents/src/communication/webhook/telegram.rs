@@ -61,7 +61,7 @@ impl Default for TelegramWebhookConfig {
             secret_token: None,
             endpoint_path: "/webhook/telegram".to_string(),
             max_body_size: 10 * 1024 * 1024,
-            timeout_secs: 30,
+            timeout_secs: 180,
         }
     }
 }

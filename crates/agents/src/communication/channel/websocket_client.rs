@@ -61,8 +61,8 @@ impl Default for WebSocketConfig {
     fn default() -> Self {
         Self {
             url: String::new(),
-            connect_timeout: Duration::from_secs(30),
-            ping_interval: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(180),
+            ping_interval: Duration::from_secs(180),
             pong_timeout: Duration::from_secs(60),
             reconnect_interval: Duration::from_secs(5),
             max_reconnect_attempts: Some(10),

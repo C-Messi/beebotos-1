@@ -264,7 +264,7 @@ impl MattermostChannelClient {
     /// Create a new Mattermost channel
     pub fn new(config: MattermostChannelConfig) -> Result<Self> {
         let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(180))
             .build()
             .map_err(|e| {
                 AgentError::configuration(format!("Failed to create HTTP client: {}", e))
@@ -615,7 +615,7 @@ impl Channel for MattermostChannelClient {
         let seq = self.seq.clone();
 
         tokio::spawn(async move {
-            let mut heartbeat = interval(Duration::from_secs(30));
+            let mut heartbeat = interval(Duration::from_secs(180));
 
             loop {
                 tokio::select! {
