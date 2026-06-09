@@ -373,11 +373,16 @@ fn video_task_status_label(status: &str) -> &'static str {
     match status {
         "blocked" => "待配置",
         "completed" => "视频已生成",
-        "failed" | "expired" | "cancelled" => "生成失败",
+        "cancelled" => "已取消",
+        "failed" | "expired" => "生成失败",
         "queued" => "排队中",
         "running" => "生成中",
         _ => "状态已更新",
     }
+}
+
+fn can_request_video_cancel(task: &VideoTaskResponse) -> bool {
+    matches!(task.status.as_str(), "queued" | "running")
 }
 
 fn video_marketing_status_from_state(
@@ -464,6 +469,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
     let (video_tasks, set_video_tasks) = signal::<Vec<VideoTaskResponse>>(restored_video_tasks);
     let (video_error, set_video_error) = signal::<Option<String>>(None);
     let (video_loading, set_video_loading) = signal(restored_live_task.is_some());
+    let (canceling_video_task_id, set_canceling_video_task_id) = signal::<Option<String>>(None);
     let video_service = create_ai_store_manager_service(use_app_state().api_client());
     let video_service = StoredValue::new(video_service);
 
@@ -627,6 +633,29 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
             set_video_loading.set(false);
         });
     };
+
+    let cancel_video = Callback::new(move |id: String| {
+        if id.trim().is_empty() {
+            return;
+        }
+
+        let service = video_service.get_value();
+        set_canceling_video_task_id.set(Some(id.clone()));
+        set_video_error.set(None);
+
+        spawn_local(async move {
+            match service.cancel_video_task(&id).await {
+                Ok(updated) => {
+                    set_task_status.set(video_task_status_label(&updated.status).to_string());
+                    set_video_tasks.update(|queue| upsert_video_task(queue, updated));
+                }
+                Err(err) => {
+                    set_video_error.set(Some(err.to_string()));
+                }
+            }
+            set_canceling_video_task_id.set(None);
+        });
+    });
 
     view! {
         <Title text="AI 视频营销 - BeeBotOS" />
@@ -857,10 +886,20 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                         }.into_any()
                     } else {
                         let options = generation_options.get();
+                        let canceling_id = canceling_video_task_id.get();
                         view! {
                             <div class="ai-video-queue-list">
                                 {tasks.into_iter().map(|task| {
-                                    view! { <VideoTaskCard task=task options=options.clone() /> }
+                                    let is_canceling =
+                                        canceling_id.as_deref() == Some(task.id.as_str());
+                                    view! {
+                                        <VideoTaskCard
+                                            task=task
+                                            options=options.clone()
+                                            is_canceling=is_canceling
+                                            on_cancel=cancel_video
+                                        />
+                                    }
                                 }).collect_view()}
                             </div>
                         }.into_any()
@@ -947,8 +986,14 @@ fn ResultItem(result: VideoMarketingResult) -> impl IntoView {
 }
 
 #[component]
-fn VideoTaskCard(task: VideoTaskResponse, options: VideoGenerationOptions) -> impl IntoView {
+fn VideoTaskCard(
+    task: VideoTaskResponse,
+    options: VideoGenerationOptions,
+    is_canceling: bool,
+    #[prop(into)] on_cancel: Callback<String>,
+) -> impl IntoView {
     let status_label = video_task_status_label(&task.status);
+    let can_cancel = can_request_video_cancel(&task);
     view! {
         <article class="ai-video-task-card">
             <div>
@@ -974,6 +1019,21 @@ fn VideoTaskCard(task: VideoTaskResponse, options: VideoGenerationOptions) -> im
             <p>{task.message.clone()}</p>
             {task.updated_at.clone().map(|updated_at| view! {
                 <small>{format!("更新：{}", updated_at)}</small>
+            })}
+            {can_cancel.then(|| {
+                let task_id = task.id.clone();
+                view! {
+                    <div class="ai-video-task-actions">
+                        <button
+                            type="button"
+                            class="btn btn-secondary ai-video-task-cancel"
+                            disabled=is_canceling
+                            on:click=move |_| on_cancel.run(task_id.clone())
+                        >
+                            {if is_canceling { "取消中..." } else { "取消生成" }}
+                        </button>
+                    </div>
+                }
             })}
         </article>
     }
@@ -1152,6 +1212,24 @@ mod tests {
     #[test]
     fn duration_options_include_longer_seedance_clip() {
         assert_eq!(VIDEO_DURATION_OPTIONS, ["5", "8", "12", "15"]);
+    }
+
+    #[test]
+    fn cancelled_video_task_uses_cancelled_label() {
+        assert_eq!(video_task_status_label("cancelled"), "已取消");
+    }
+
+    #[test]
+    fn can_request_cancel_for_live_video_tasks_only() {
+        let mut task = sample_video_task("task-1", "queued", None);
+
+        assert!(can_request_video_cancel(&task));
+        task.status = "running".to_string();
+        assert!(can_request_video_cancel(&task));
+        task.status = "completed".to_string();
+        assert!(!can_request_video_cancel(&task));
+        task.status = "cancelled".to_string();
+        assert!(!can_request_video_cancel(&task));
     }
 
     #[test]

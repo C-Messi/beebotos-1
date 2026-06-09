@@ -174,6 +174,13 @@ impl AiStoreManagerService {
             .await
     }
 
+    pub async fn cancel_video_task(&self, id: &str) -> Result<VideoTaskResponse, ApiError> {
+        self.client
+            .delete(&format!("/ai-store-manager/video-tasks/{}", id))
+            .await?;
+        self.get_video_task(id).await
+    }
+
     pub async fn list_video_tasks(&self) -> Result<Vec<VideoTaskResponse>, ApiError> {
         self.client
             .invalidate_cache("GET:/ai-store-manager/video-tasks");

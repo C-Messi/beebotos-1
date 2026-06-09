@@ -1255,6 +1255,40 @@ fn video_task_status_url(base_url: &str, id: &str) -> String {
     format!("{}/{}", video_task_url(base_url), id)
 }
 
+async fn fetch_video_task_from_upstream(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    id: &str,
+    model: &str,
+) -> Result<VideoTaskResponse, GatewayError> {
+    let response = client
+        .get(video_task_status_url(base_url, id))
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|err| GatewayError::internal(format!("视频任务查询失败: {}", err)))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let upstream_error = response
+            .json::<VolcengineApiErrorEnvelope>()
+            .await
+            .ok()
+            .and_then(|envelope| envelope.error);
+        let mut fallback =
+            video_upstream_unavailable_response(model, status, upstream_error.as_ref());
+        fallback.id = id.to_string();
+        return Ok(fallback);
+    }
+
+    let upstream = response
+        .json::<VolcengineVideoTaskStatusResponse>()
+        .await
+        .map_err(|err| GatewayError::internal(format!("视频任务响应解析失败: {}", err)))?;
+    Ok(video_status_to_response(upstream, model))
+}
+
 fn video_task_list_url(base_url: &str, page_size: usize) -> String {
     format!(
         "{}?page_num=1&page_size={}",
@@ -1405,6 +1439,21 @@ fn video_status_to_response(
         updated_at: Some(Utc::now().to_rfc3339()),
         reference_image_count: None,
     }
+}
+
+fn video_cancelled_response(mut task: VideoTaskResponse) -> VideoTaskResponse {
+    task.status = "cancelled".to_string();
+    task.message = "Seedance 视频任务已取消。".to_string();
+    task.preview_url = None;
+    task.queue_position = None;
+    task.updated_at = Some(Utc::now().to_rfc3339());
+    task
+}
+
+fn video_cancel_not_supported_response(mut task: VideoTaskResponse) -> VideoTaskResponse {
+    task.message = "任务已进入生成中，火山方舟不支持强制取消。".to_string();
+    task.updated_at = Some(Utc::now().to_rfc3339());
+    task
 }
 
 fn video_list_item_to_response(
@@ -2645,6 +2694,87 @@ pub async fn get_video_task(
     Ok(Json(task))
 }
 
+pub async fn cancel_video_task(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<VideoTaskResponse>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+    let config = BeeBotOSConfig::load()
+        .map_err(|err| GatewayError::internal(format!("加载视频生成配置失败: {}", err)))?;
+    let model = config.video_generation.model.clone();
+    let api_key = match config
+        .video_generation
+        .api_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+    {
+        Some(api_key) => api_key,
+        None => {
+            let mut response = video_generation_config_required_response(&model);
+            response.id = id;
+            return Ok(Json(response));
+        }
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            config.video_generation.timeout_seconds,
+        ))
+        .build()
+        .map_err(|err| GatewayError::internal(format!("视频生成客户端创建失败: {}", err)))?;
+
+    let current = fetch_video_task_from_upstream(
+        &client,
+        &config.video_generation.base_url,
+        &api_key,
+        &id,
+        &model,
+    )
+    .await?;
+    if current.status != "queued" {
+        let task = if current.status == "running" {
+            video_cancel_not_supported_response(current)
+        } else {
+            current
+        };
+        update_video_task_history(&state.db, &user.user_id, &task).await?;
+        return Ok(Json(task));
+    }
+
+    let response = client
+        .delete(video_task_status_url(
+            &config.video_generation.base_url,
+            &id,
+        ))
+        .bearer_auth(&api_key)
+        .send()
+        .await
+        .map_err(|err| GatewayError::internal(format!("视频任务取消失败: {}", err)))?;
+
+    if response.status().is_success() {
+        let task = video_cancelled_response(current);
+        update_video_task_history(&state.db, &user.user_id, &task).await?;
+        return Ok(Json(task));
+    }
+
+    let refreshed = fetch_video_task_from_upstream(
+        &client,
+        &config.video_generation.base_url,
+        &api_key,
+        &id,
+        &model,
+    )
+    .await?;
+    let task = if refreshed.status == "running" {
+        video_cancel_not_supported_response(refreshed)
+    } else {
+        refreshed
+    };
+    update_video_task_history(&state.db, &user.user_id, &task).await?;
+    Ok(Json(task))
+}
+
 pub async fn get_graphic_image(
     user: AuthUser,
     Path(id): Path<String>,
@@ -2843,6 +2973,29 @@ mod tests {
         assert_eq!(response.status, "blocked");
         assert!(response.message.contains("模型未开通"));
         assert!(response.message.contains("doubao-seedance-2.0"));
+    }
+
+    #[test]
+    fn video_cancelled_response_preserves_task_metadata() {
+        let queued = sample_video_task_response("task-1", "queued");
+
+        let cancelled = video_cancelled_response(queued);
+
+        assert_eq!(cancelled.status, "cancelled");
+        assert!(cancelled.message.contains("已取消"));
+        assert_eq!(cancelled.resolution.as_deref(), Some("720p"));
+        assert_eq!(cancelled.ratio.as_deref(), Some("9:16"));
+        assert_eq!(cancelled.duration_seconds, Some(12));
+    }
+
+    #[test]
+    fn running_video_cancel_response_stays_running() {
+        let running = sample_video_task_response("task-1", "running");
+
+        let response = video_cancel_not_supported_response(running);
+
+        assert_eq!(response.status, "running");
+        assert!(response.message.contains("不支持强制取消"));
     }
 
     #[tokio::test]

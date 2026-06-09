@@ -3028,7 +3028,8 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         )
         .route(
             "/api/v1/ai-store-manager/video-tasks/:id",
-            get(handlers::http::ai_store_manager::get_video_task),
+            get(handlers::http::ai_store_manager::get_video_task)
+                .delete(handlers::http::ai_store_manager::cancel_video_task),
         )
         .layer(from_fn_with_state(gateway_state.clone(), auth_middleware))
         .layer(TimeoutLayer::new(video_generation_request_timeout));
