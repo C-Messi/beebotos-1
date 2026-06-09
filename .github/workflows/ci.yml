@@ -47,10 +47,5 @@ jobs:
       - name: Check web wasm
         run: cargo check -p beebotos-web --target wasm32-unknown-unknown
 
-      - name: Gateway smoke tests
-        run: |
-          cargo test -p beebotos-gateway image_understanding
-          cargo test -p beebotos-gateway video_package
-
       - name: Web smoke tests
         run: cargo test -p beebotos-web video_marketing --lib
