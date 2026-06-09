@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - linc/**
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check gateway
+        run: cargo check -p beebotos-gateway
+
+      - name: Check web wasm
+        run: cargo check -p beebotos-web --target wasm32-unknown-unknown
+
+      - name: Gateway smoke tests
+        run: |
+          cargo test -p beebotos-gateway image_understanding
+          cargo test -p beebotos-gateway video_package
+
+      - name: Web smoke tests
+        run: cargo test -p beebotos-web video_marketing --lib
