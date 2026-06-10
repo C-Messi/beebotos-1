@@ -1112,6 +1112,19 @@ body {
     gap: 10px;
 }
 
+.ai-video-task-restore {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: end;
+    margin-bottom: 12px;
+}
+
+.ai-video-task-restore .btn {
+    min-height: 40px;
+    white-space: nowrap;
+}
+
 .ai-video-result-item {
     background: var(--bg-glass);
     border: 1px solid var(--border-light);
@@ -1313,6 +1326,7 @@ body {
 
 @media (max-width: 768px) {
     .ai-video-marketing-workspace,
+    .ai-video-task-restore,
     .ai-video-task-card,
     .ai-video-preview-card {
         grid-template-columns: 1fr;

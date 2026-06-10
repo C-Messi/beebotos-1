@@ -19,7 +19,6 @@ use crate::config::BeeBotOSConfig;
 use crate::error::GatewayError;
 use crate::AppState;
 
-const VIDEO_TASK_LIST_LIMIT: usize = 6;
 const VIDEO_TASK_HISTORY_LIMIT: i64 = 20;
 const VIDEO_ASSET_DIR: &str = "data/ai-video-marketing/videos";
 const VIDEO_ASSET_ROUTE: &str = "/api/v1/ai-store-manager/video-assets";
@@ -128,20 +127,6 @@ struct VolcengineVideoTaskCreateResponse {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 struct VolcengineVideoTaskStatusResponse {
-    id: String,
-    model: Option<String>,
-    status: String,
-    content: Option<VolcengineVideoTaskContent>,
-    error: Option<VolcengineVideoTaskError>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-struct VolcengineVideoTaskListResponse {
-    items: Vec<VolcengineVideoTaskListItem>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-struct VolcengineVideoTaskListItem {
     id: String,
     model: Option<String>,
     status: String,
@@ -1255,6 +1240,10 @@ fn video_task_status_url(base_url: &str, id: &str) -> String {
     format!("{}/{}", video_task_url(base_url), id)
 }
 
+fn should_refresh_video_task_history(history: &[VideoTaskResponse]) -> bool {
+    !history.is_empty()
+}
+
 async fn fetch_video_task_from_upstream(
     client: &reqwest::Client,
     base_url: &str,
@@ -1287,14 +1276,6 @@ async fn fetch_video_task_from_upstream(
         .await
         .map_err(|err| GatewayError::internal(format!("视频任务响应解析失败: {}", err)))?;
     Ok(video_status_to_response(upstream, model))
-}
-
-fn video_task_list_url(base_url: &str, page_size: usize) -> String {
-    format!(
-        "{}?page_num=1&page_size={}",
-        video_task_url(base_url),
-        page_size
-    )
 }
 
 fn video_generation_config_required_response(model: &str) -> VideoTaskResponse {
@@ -1454,22 +1435,6 @@ fn video_cancel_not_supported_response(mut task: VideoTaskResponse) -> VideoTask
     task.message = "任务已进入生成中，火山方舟不支持强制取消。".to_string();
     task.updated_at = Some(Utc::now().to_rfc3339());
     task
-}
-
-fn video_list_item_to_response(
-    item: VolcengineVideoTaskListItem,
-    fallback_model: &str,
-) -> VideoTaskResponse {
-    video_status_to_response(
-        VolcengineVideoTaskStatusResponse {
-            id: item.id,
-            model: item.model,
-            status: item.status,
-            content: item.content,
-            error: item.error,
-        },
-        fallback_model,
-    )
 }
 
 pub fn create_graphic_package(req: &CreateGraphicPackageRequest) -> GraphicPackageResponse {
@@ -2505,50 +2470,17 @@ pub async fn list_video_tasks(
     require_any_role(&user, &["user", "admin"])?;
     let history =
         list_video_task_history(&state.db, &user.user_id, VIDEO_TASK_HISTORY_LIMIT).await?;
-    if !history.is_empty() {
-        let config = match BeeBotOSConfig::load() {
-            Ok(config) => config,
-            Err(err) => {
-                warn!(error = %err, "video task history returned without refresh");
-                return Ok(Json(history));
-            }
-        };
-        let api_key = match config
-            .video_generation
-            .api_key
-            .clone()
-            .filter(|key| !key.trim().is_empty())
-        {
-            Some(api_key) => api_key,
-            None => return Ok(Json(history)),
-        };
-        let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                config.video_generation.timeout_seconds,
-            ))
-            .build()
-        {
-            Ok(client) => client,
-            Err(err) => {
-                warn!(error = %err, "video task history returned without refresh client");
-                return Ok(Json(history));
-            }
-        };
-        let history = refresh_video_task_history(
-            &state.db,
-            &user.user_id,
-            history,
-            &client,
-            &config,
-            &api_key,
-        )
-        .await?;
+    if !should_refresh_video_task_history(&history) {
         return Ok(Json(history));
     }
 
-    let config = BeeBotOSConfig::load()
-        .map_err(|err| GatewayError::internal(format!("加载视频生成配置失败: {}", err)))?;
-    let model = config.video_generation.model.clone();
+    let config = match BeeBotOSConfig::load() {
+        Ok(config) => config,
+        Err(err) => {
+            warn!(error = %err, "video task history returned without refresh");
+            return Ok(Json(history));
+        }
+    };
     let api_key = match config
         .video_generation
         .api_key
@@ -2556,77 +2488,31 @@ pub async fn list_video_tasks(
         .filter(|key| !key.trim().is_empty())
     {
         Some(api_key) => api_key,
-        None => return Ok(Json(Vec::new())),
+        None => return Ok(Json(history)),
     };
-
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
             config.video_generation.timeout_seconds,
         ))
         .build()
-        .map_err(|err| GatewayError::internal(format!("视频生成客户端创建失败: {}", err)))?;
-
-    let response = client
-        .get(video_task_list_url(
-            &config.video_generation.base_url,
-            VIDEO_TASK_LIST_LIMIT,
-        ))
-        .bearer_auth(&api_key)
-        .send()
-        .await
-        .map_err(|err| GatewayError::internal(format!("视频任务列表查询失败: {}", err)))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let upstream_error = response
-            .json::<VolcengineApiErrorEnvelope>()
-            .await
-            .ok()
-            .and_then(|envelope| envelope.error);
-        return Ok(Json(vec![video_upstream_unavailable_response(
-            &model,
-            status,
-            upstream_error.as_ref(),
-        )]));
-    }
-
-    let list = response
-        .json::<VolcengineVideoTaskListResponse>()
-        .await
-        .map_err(|err| GatewayError::internal(format!("视频任务列表响应解析失败: {}", err)))?;
-
-    let mut tasks = Vec::new();
-    for item in list.items.into_iter().take(VIDEO_TASK_LIST_LIMIT) {
-        let id = item.id.clone();
-        let detail = client
-            .get(video_task_status_url(
-                &config.video_generation.base_url,
-                &id,
-            ))
-            .bearer_auth(&api_key)
-            .send()
-            .await
-            .ok()
-            .filter(|response| response.status().is_success());
-
-        if let Some(detail) = detail {
-            if let Ok(upstream) = detail.json::<VolcengineVideoTaskStatusResponse>().await {
-                let task = video_status_to_response(upstream, &model);
-                let task =
-                    cache_video_task_preview(&default_video_asset_root(), &client, task).await;
-                update_video_task_history(&state.db, &user.user_id, &task).await?;
-                tasks.push(task);
-                continue;
-            }
+    {
+        Ok(client) => client,
+        Err(err) => {
+            warn!(error = %err, "video task history returned without refresh client");
+            return Ok(Json(history));
         }
+    };
+    let history = refresh_video_task_history(
+        &state.db,
+        &user.user_id,
+        history,
+        &client,
+        &config,
+        &api_key,
+    )
+    .await?;
 
-        let task = video_list_item_to_response(item, &model);
-        let task = cache_video_task_preview(&default_video_asset_root(), &client, task).await;
-        update_video_task_history(&state.db, &user.user_id, &task).await?;
-        tasks.push(task);
-    }
-
-    Ok(Json(tasks))
+    Ok(Json(history))
 }
 
 pub async fn get_video_task(
@@ -2915,14 +2801,6 @@ mod tests {
     }
 
     #[test]
-    fn video_task_list_url_uses_agent_plan_generation_endpoint() {
-        assert_eq!(
-            video_task_list_url("https://ark.cn-beijing.volces.com/api/plan/v3", 6),
-            "https://ark.cn-beijing.volces.com/api/plan/v3/contents/generations/tasks?page_num=1&page_size=6"
-        );
-    }
-
-    #[test]
     fn seedance_status_response_maps_succeeded_to_completed_preview() {
         let upstream = VolcengineVideoTaskStatusResponse {
             id: "task-1".to_string(),
@@ -3126,6 +3004,13 @@ mod tests {
             tasks[0].preview_url.as_deref(),
             Some("https://cdn.example/upstream.mp4")
         );
+    }
+
+    #[test]
+    fn empty_video_task_history_does_not_import_global_upstream_tasks() {
+        let history = Vec::new();
+
+        assert!(!should_refresh_video_task_history(&history));
     }
 
     #[test]

@@ -381,6 +381,10 @@ fn video_task_status_label(status: &str) -> &'static str {
     }
 }
 
+fn video_task_poll_error_status() -> &'static str {
+    "状态刷新失败"
+}
+
 fn can_request_video_cancel(task: &VideoTaskResponse) -> bool {
     matches!(task.status.as_str(), "queued" | "running")
 }
@@ -469,6 +473,8 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
     let (video_tasks, set_video_tasks) = signal::<Vec<VideoTaskResponse>>(restored_video_tasks);
     let (video_error, set_video_error) = signal::<Option<String>>(None);
     let (video_loading, set_video_loading) = signal(restored_live_task.is_some());
+    let (restore_video_task_id, set_restore_video_task_id) = signal(String::new());
+    let (restore_video_loading, set_restore_video_loading) = signal(false);
     let (canceling_video_task_id, set_canceling_video_task_id) = signal::<Option<String>>(None);
     let video_service = create_ai_store_manager_service(use_app_state().api_client());
     let video_service = StoredValue::new(video_service);
@@ -516,7 +522,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                     }
                     Err(err) => {
                         set_video_error.set(Some(err.to_string()));
-                        set_task_status.set("生成失败".to_string());
+                        set_task_status.set(video_task_poll_error_status().to_string());
                         break;
                     }
                 }
@@ -619,7 +625,7 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                             }
                             Err(err) => {
                                 set_video_error.set(Some(err.to_string()));
-                                set_task_status.set("生成失败".to_string());
+                                set_task_status.set(video_task_poll_error_status().to_string());
                                 break;
                             }
                         }
@@ -631,6 +637,34 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                 }
             }
             set_video_loading.set(false);
+        });
+    };
+
+    let restore_video_task = move || {
+        let id = restore_video_task_id.get().trim().to_string();
+        if id.is_empty() {
+            set_video_error.set(Some("请输入任务 ID".to_string()));
+            return;
+        }
+
+        let service = video_service.get_value();
+        set_restore_video_loading.set(true);
+        set_video_error.set(None);
+        set_task_status.set("状态刷新中".to_string());
+
+        spawn_local(async move {
+            match service.get_video_task(&id).await {
+                Ok(updated) => {
+                    set_task_status.set(video_task_status_label(&updated.status).to_string());
+                    set_video_tasks.update(|queue| upsert_video_task(queue, updated));
+                    set_restore_video_task_id.set(String::new());
+                }
+                Err(err) => {
+                    set_video_error.set(Some(format!("任务恢复失败：{}", err)));
+                    set_task_status.set(video_task_poll_error_status().to_string());
+                }
+            }
+            set_restore_video_loading.set(false);
         });
     };
 
@@ -875,6 +909,25 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
             <section class="ai-video-marketing-section">
                 <div class="section-title compact">
                     <h2>"生成队列"</h2>
+                </div>
+                <div class="ai-video-task-restore">
+                    <label class="ai-video-field">
+                        <span>"任务 ID"</span>
+                        <input
+                            type="text"
+                            placeholder="cgt-..."
+                            prop:value=Signal::derive(move || restore_video_task_id.get())
+                            on:input=move |event| set_restore_video_task_id.set(event_target_value(&event))
+                        />
+                    </label>
+                    <button
+                        type="button"
+                        class="btn btn-secondary"
+                        disabled=move || restore_video_loading.get()
+                        on:click=move |_| restore_video_task()
+                    >
+                        {move || if restore_video_loading.get() { "恢复中..." } else { "恢复任务" }}
+                    </button>
                 </div>
                 {move || {
                     let tasks = video_tasks.get();
@@ -1217,6 +1270,11 @@ mod tests {
     #[test]
     fn cancelled_video_task_uses_cancelled_label() {
         assert_eq!(video_task_status_label("cancelled"), "已取消");
+    }
+
+    #[test]
+    fn video_task_poll_error_does_not_claim_generation_failed() {
+        assert_eq!(video_task_poll_error_status(), "状态刷新失败");
     }
 
     #[test]
