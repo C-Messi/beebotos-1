@@ -61,6 +61,7 @@ BEEBOTOS_PACKAGE_TARGET=x86_64-pc-windows-gnu pwsh ./beebotos-dev.ps1 pack all
 `pack all` 会编译并打包：
 
 - `beebotos-gateway.exe`
+- `beebotos-launcher.exe`
 - `web-server.exe`
 - `beehub.exe`
 - Web 前端静态文件
@@ -73,6 +74,7 @@ BEEBOTOS_PACKAGE_TARGET=x86_64-pc-windows-gnu pwsh ./beebotos-dev.ps1 pack all
 ```text
 beebotos/
 ├── beebotos-gateway.exe
+├── beebotos-launcher.exe
 ├── web-server.exe
 ├── beehub.exe
 ├── beebotos-run.ps1
@@ -103,9 +105,10 @@ beebotos/
 | 路径 | 用途 |
 | --- | --- |
 | `beebotos-gateway.exe` | Gateway 主服务，负责 API、Agent runtime、SkillRegistry 等 |
+| `beebotos-launcher.exe` | 用户入口，负责配置 key、启动/停止服务、打开 Web 和日志 |
 | `web-server.exe` | 本地 Web 静态文件服务器，默认端口 `8090` |
 | `beehub.exe` | BeeHub 服务产物 |
-| `beebotos-run.ps1` | Windows 生产启动/停止/状态脚本 |
+| `beebotos-run.ps1` | Windows 内部运行脚本，由 Launcher 和卸载器调用，普通用户无需直接操作 |
 | `config/` | Gateway 和 Web Server 配置 |
 | `migrations_sqlite/` | SQLite 数据库迁移，缺失会导致数据库初始化失败 |
 | `skills/` | 内置默认 Markdown skills，启动时会加载到 SkillRegistry |
@@ -197,8 +200,9 @@ workflows -> data/workflows -> data/workflows/local
 
 ### 脚本特性
 
+- **用户目录安装**：默认安装到 `%LOCALAPPDATA%\Programs\BeeBotOS`，Launcher 可直接写入安装目录 `.env`，配置 key 不需要管理员权限。
 - **自动创建数据目录**：安装时自动创建 `{app}\data`、`{app}\data\run`、`{app}\data\logs`、`{app}\data\skills`、`{app}\data\workspace`。
-- **启动菜单项**：包含启动、停止、查看状态、打开 Web 四个快捷方式。
+- **启动菜单项**：包含 Launcher、启动、停止、查看状态、打开 Web 快捷方式；用户入口均指向 `beebotos-launcher.exe`。
 - **卸载前自动停止服务**：通过 `beebotos-run.ps1 stop all` 确保进程被正确终止。
 - **🛡️ 卸载保留用户数据库**：详见下方「卸载时保留数据库」章节。
 
@@ -234,9 +238,10 @@ Name: "{app}\data\workspace"
 
 ```iss
 [Icons]
-Name: "{autoprograms}\BeeBotOS\启动 BeeBotOS"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\beebotos-run.ps1"" start all"; WorkingDir: "{app}"
-Name: "{autoprograms}\BeeBotOS\停止 BeeBotOS"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\beebotos-run.ps1"" stop all"; WorkingDir: "{app}"
-Name: "{autoprograms}\BeeBotOS\查看状态"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -NoExit -File ""{app}\beebotos-run.ps1"" status"; WorkingDir: "{app}"
+Name: "{autoprograms}\BeeBotOS\BeeBotOS Launcher"; Filename: "{app}\beebotos-launcher.exe"; WorkingDir: "{app}"
+Name: "{autoprograms}\BeeBotOS\启动 BeeBotOS"; Filename: "{app}\beebotos-launcher.exe"; Parameters: "--start"; WorkingDir: "{app}"
+Name: "{autoprograms}\BeeBotOS\停止 BeeBotOS"; Filename: "{app}\beebotos-launcher.exe"; Parameters: "--stop"; WorkingDir: "{app}"
+Name: "{autoprograms}\BeeBotOS\查看状态"; Filename: "{app}\beebotos-launcher.exe"; Parameters: "--status"; WorkingDir: "{app}"
 Name: "{autoprograms}\BeeBotOS\BeeBotOS Web"; Filename: "http://localhost:8090"
 ```
 
@@ -300,7 +305,7 @@ Get-ChildItem -Recurse dist\check\beebotos\workflows | Select-Object FullName
 
 必须确认：
 
-- `dist/beebotos` 下有三个 `.exe`。
+- `dist/beebotos` 下有 `beebotos-gateway.exe`、`beebotos-launcher.exe`、`web-server.exe` 和 `beehub.exe`。
 - `dist/beebotos/skills` 存在并包含默认 skill 文件。
 - `dist/beebotos/workflows` 存在并包含默认 workflow 文件。
 - `dist/beebotos/migrations_sqlite` 存在。

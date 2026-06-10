@@ -46,6 +46,7 @@ jobs:
         run: |
           $required = @(
             "dist\beebotos\beebotos-gateway.exe",
+            "dist\beebotos\beebotos-launcher.exe",
             "dist\beebotos\web-server.exe",
             "dist\beebotos\beebotos-run.ps1",
             "dist\beebotos\config\beebotos.toml",

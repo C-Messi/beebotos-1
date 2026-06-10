@@ -93,6 +93,14 @@ $Services = @(
         Binary = $null
         Port = 0
         Desc = "CLI Tool (install only)"
+    },
+    @{
+        Name = "launcher"
+        Package = "beebotos-launcher"
+        BuildCmd = "cargo build --release -p beebotos-launcher"
+        Binary = $null
+        Port = 0
+        Desc = "Windows Launcher"
     }
 )
 
@@ -347,7 +355,7 @@ function Pack-Release($target = "all") {
         Print-Info "Packaging native Windows target"
     }
 
-    $buildList = if ($target -eq "all") { @("gateway", "web", "beehub") } else { @($target) }
+    $buildList = if ($target -eq "all") { @("gateway", "web", "beehub", "launcher") } else { @($target) }
     foreach ($svcName in $buildList) {
         if ($svcName -eq "cli") { continue }
         if (-not (Build-Service $svcName $cargoTarget)) {
@@ -384,6 +392,9 @@ function Pack-Release($target = "all") {
         } else {
             Print-Warn "beehub.exe not found, skipping"
         }
+    }
+    if ($target -eq "all" -or $target -eq "launcher") {
+        if (-not (Copy-RequiredFile (Get-BinaryPath "beebotos-launcher" $cargoTarget) $outDir)) { exit 1 }
     }
 
     if (Test-Path (Join-Path $ProjectRoot "config")) {
@@ -444,7 +455,8 @@ function Show-Menu {
     Write-Host "     1.2) Build Web"
     Write-Host "     1.3) Build CLI"
     Write-Host "     1.4) Build BeeHub"
-    Write-Host "     1.5) Build All"
+    Write-Host "     1.5) Build Launcher"
+    Write-Host "     1.6) Build All"
     Write-Host ""
     Write-Host "  2) Start"
     Write-Host "     2.1) Start Gateway"
@@ -488,8 +500,9 @@ function Handle-Menu {
             "1.2" { Build-Service "web" }
             "1.3" { Build-Service "cli" }
             "1.4" { Build-Service "beehub" }
-            "1.5" {
-                foreach ($svc in @("gateway", "web", "cli", "beehub")) {
+            "1.5" { Build-Service "launcher" }
+            "1.6" {
+                foreach ($svc in @("gateway", "web", "cli", "beehub", "launcher")) {
                     Build-Service $svc | Out-Null
                 }
             }
@@ -546,7 +559,7 @@ function Handle-Cli($action, $target = "all") {
 
     switch ($action) {
         "build" {
-            $list = if ($target -eq "all") { @("gateway", "web", "cli", "beehub") } else { @($target) }
+            $list = if ($target -eq "all") { @("gateway", "web", "cli", "beehub", "launcher") } else { @($target) }
             foreach ($svc in $list) { Build-Service $svc | Out-Null }
         }
         "start" {

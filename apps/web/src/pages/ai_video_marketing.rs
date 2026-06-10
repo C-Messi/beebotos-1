@@ -15,7 +15,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::api::{
-    create_ai_store_manager_service, CreateVideoPackageRequest, CreateVideoTaskRequest,
+    create_ai_store_manager_service, ApiError, CreateVideoPackageRequest, CreateVideoTaskRequest,
     ReferenceImageRequest, VideoPackageResponse, VideoTaskResponse,
 };
 use crate::state::use_app_state;
@@ -417,6 +417,11 @@ fn upsert_video_task(queue: &mut Vec<VideoTaskResponse>, task: VideoTaskResponse
     save_video_task_queue(queue);
 }
 
+fn remove_video_task_from_queue(queue: &mut Vec<VideoTaskResponse>, id: &str) {
+    queue.retain(|task| task.id != id);
+    save_video_task_queue(queue);
+}
+
 fn merge_video_task_update(
     mut updated: VideoTaskResponse,
     previous: &VideoTaskResponse,
@@ -445,9 +450,39 @@ fn merge_video_task_update(
 fn completed_video_previews(tasks: &[VideoTaskResponse]) -> Vec<VideoTaskResponse> {
     tasks
         .iter()
-        .filter(|task| task.status == "completed" && task.preview_url.is_some())
+        .filter(|task| {
+            task.status == "completed" && task.preview_url.is_some() && !task.local_video_deleted
+        })
         .cloned()
         .collect()
+}
+
+fn video_task_display_message(task: &VideoTaskResponse) -> &str {
+    if task.local_video_deleted {
+        "本地视频已删除"
+    } else {
+        task.message.as_str()
+    }
+}
+
+fn should_confirm_remove_video_task(task: &VideoTaskResponse) -> bool {
+    should_poll_video_task(task)
+}
+
+fn should_remove_video_task_after_error(err: &ApiError) -> bool {
+    matches!(err, ApiError::NotFound)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn confirm_video_action(message: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| window.confirm_with_message(message).ok())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn confirm_video_action(_message: &str) -> bool {
+    true
 }
 
 #[component]
@@ -476,6 +511,9 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
     let (restore_video_task_id, set_restore_video_task_id) = signal(String::new());
     let (restore_video_loading, set_restore_video_loading) = signal(false);
     let (canceling_video_task_id, set_canceling_video_task_id) = signal::<Option<String>>(None);
+    let (removing_video_task_id, set_removing_video_task_id) = signal::<Option<String>>(None);
+    let (local_video_action_task_id, set_local_video_action_task_id) =
+        signal::<Option<String>>(None);
     let video_service = create_ai_store_manager_service(use_app_state().api_client());
     let video_service = StoredValue::new(video_service);
 
@@ -688,6 +726,85 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                 }
             }
             set_canceling_video_task_id.set(None);
+        });
+    });
+
+    let remove_video_task = Callback::new(move |task: VideoTaskResponse| {
+        if task.id.trim().is_empty() {
+            return;
+        }
+        if should_confirm_remove_video_task(&task)
+            && !confirm_video_action("任务仍会在火山继续生成并可能消耗额度，仅从本机队列移除。")
+        {
+            return;
+        }
+
+        let id = task.id.clone();
+        let service = video_service.get_value();
+        set_removing_video_task_id.set(Some(id.clone()));
+        set_video_error.set(None);
+
+        spawn_local(async move {
+            match service.remove_video_task(&id).await {
+                Ok(()) => {
+                    set_video_tasks.update(|queue| remove_video_task_from_queue(queue, &id));
+                    set_task_status.set(video_marketing_status_from_state(
+                        &package.get_untracked(),
+                        &video_tasks.get_untracked(),
+                    ));
+                }
+                Err(err) if should_remove_video_task_after_error(&err) => {
+                    set_video_tasks.update(|queue| remove_video_task_from_queue(queue, &id));
+                    set_task_status.set(video_marketing_status_from_state(
+                        &package.get_untracked(),
+                        &video_tasks.get_untracked(),
+                    ));
+                }
+                Err(err) => set_video_error.set(Some(err.to_string())),
+            }
+            set_removing_video_task_id.set(None);
+        });
+    });
+
+    let delete_local_video = Callback::new(move |id: String| {
+        if id.trim().is_empty()
+            || !confirm_video_action("将删除本机缓存的视频文件，远端任务和队列记录不会删除。")
+        {
+            return;
+        }
+
+        let service = video_service.get_value();
+        set_local_video_action_task_id.set(Some(id.clone()));
+        set_video_error.set(None);
+
+        spawn_local(async move {
+            match service.delete_video_task_local_video(&id).await {
+                Ok(updated) => {
+                    set_video_tasks.update(|queue| upsert_video_task(queue, updated));
+                }
+                Err(err) => set_video_error.set(Some(err.to_string())),
+            }
+            set_local_video_action_task_id.set(None);
+        });
+    });
+
+    let restore_local_video = Callback::new(move |id: String| {
+        if id.trim().is_empty() {
+            return;
+        }
+
+        let service = video_service.get_value();
+        set_local_video_action_task_id.set(Some(id.clone()));
+        set_video_error.set(None);
+
+        spawn_local(async move {
+            match service.restore_video_task_local_video(&id).await {
+                Ok(updated) => {
+                    set_video_tasks.update(|queue| upsert_video_task(queue, updated));
+                }
+                Err(err) => set_video_error.set(Some(err.to_string())),
+            }
+            set_local_video_action_task_id.set(None);
         });
     });
 
@@ -940,17 +1057,28 @@ pub fn AiVideoMarketingPage() -> impl IntoView {
                     } else {
                         let options = generation_options.get();
                         let canceling_id = canceling_video_task_id.get();
+                        let removing_id = removing_video_task_id.get();
+                        let local_video_action_id = local_video_action_task_id.get();
                         view! {
                             <div class="ai-video-queue-list">
                                 {tasks.into_iter().map(|task| {
                                     let is_canceling =
                                         canceling_id.as_deref() == Some(task.id.as_str());
+                                    let is_removing =
+                                        removing_id.as_deref() == Some(task.id.as_str());
+                                    let is_local_video_action =
+                                        local_video_action_id.as_deref() == Some(task.id.as_str());
                                     view! {
                                         <VideoTaskCard
                                             task=task
                                             options=options.clone()
                                             is_canceling=is_canceling
+                                            is_removing=is_removing
+                                            is_local_video_action=is_local_video_action
                                             on_cancel=cancel_video
+                                            on_remove=remove_video_task
+                                            on_delete_local_video=delete_local_video
+                                            on_restore_local_video=restore_local_video
                                         />
                                     }
                                 }).collect_view()}
@@ -1043,10 +1171,20 @@ fn VideoTaskCard(
     task: VideoTaskResponse,
     options: VideoGenerationOptions,
     is_canceling: bool,
+    is_removing: bool,
+    is_local_video_action: bool,
     #[prop(into)] on_cancel: Callback<String>,
+    #[prop(into)] on_remove: Callback<VideoTaskResponse>,
+    #[prop(into)] on_delete_local_video: Callback<String>,
+    #[prop(into)] on_restore_local_video: Callback<String>,
 ) -> impl IntoView {
     let status_label = video_task_status_label(&task.status);
     let can_cancel = can_request_video_cancel(&task);
+    let can_delete_local_video =
+        task.status == "completed" && task.preview_url.is_some() && !task.local_video_deleted;
+    let can_restore_local_video = task.status == "completed" && task.local_video_deleted;
+    let task_id = task.id.clone();
+    let task_for_remove = task.clone();
     view! {
         <article class="ai-video-task-card">
             <div>
@@ -1069,25 +1207,59 @@ fn VideoTaskCard(
                 <span>"参考图"</span>
                 <strong>{reference_image_count_label(task.reference_image_count)}</strong>
             </div>
-            <p>{task.message.clone()}</p>
+            <p>{video_task_display_message(&task).to_string()}</p>
             {task.updated_at.clone().map(|updated_at| view! {
                 <small>{format!("更新：{}", updated_at)}</small>
             })}
-            {can_cancel.then(|| {
-                let task_id = task.id.clone();
-                view! {
-                    <div class="ai-video-task-actions">
+            <div class="ai-video-task-actions">
+                {can_cancel.then(|| {
+                    let task_id = task_id.clone();
+                    view! {
                         <button
                             type="button"
                             class="btn btn-secondary ai-video-task-cancel"
-                            disabled=is_canceling
+                            disabled=is_canceling || is_removing || is_local_video_action
                             on:click=move |_| on_cancel.run(task_id.clone())
                         >
                             {if is_canceling { "取消中..." } else { "取消生成" }}
                         </button>
-                    </div>
-                }
-            })}
+                    }
+                })}
+                {can_delete_local_video.then(|| {
+                    let task_id = task_id.clone();
+                    view! {
+                        <button
+                            type="button"
+                            class="btn btn-secondary"
+                            disabled=is_canceling || is_removing || is_local_video_action
+                            on:click=move |_| on_delete_local_video.run(task_id.clone())
+                        >
+                            {if is_local_video_action { "删除中..." } else { "删除本地视频" }}
+                        </button>
+                    }
+                })}
+                {can_restore_local_video.then(|| {
+                    let task_id = task_id.clone();
+                    view! {
+                        <button
+                            type="button"
+                            class="btn btn-secondary"
+                            disabled=is_canceling || is_removing || is_local_video_action
+                            on:click=move |_| on_restore_local_video.run(task_id.clone())
+                        >
+                            {if is_local_video_action { "恢复中..." } else { "恢复视频" }}
+                        </button>
+                    }
+                })}
+                <button
+                    type="button"
+                    class="btn btn-secondary"
+                    disabled=is_canceling || is_removing || is_local_video_action
+                    on:click=move |_| on_remove.run(task_for_remove.clone())
+                >
+                    {if is_removing { "移出中..." } else { "移出队列" }}
+                </button>
+            </div>
         </article>
     }
 }
@@ -1365,6 +1537,43 @@ mod tests {
     }
 
     #[test]
+    fn completed_video_previews_skip_deleted_local_videos() {
+        let mut deleted = sample_video_task(
+            "task-1",
+            "completed",
+            Some("/api/v1/video-assets/task-1.mp4"),
+        );
+        deleted.local_video_deleted = true;
+        let tasks = vec![
+            deleted,
+            sample_video_task(
+                "task-2",
+                "completed",
+                Some("/api/v1/video-assets/task-2.mp4"),
+            ),
+        ];
+
+        let previews = completed_video_previews(&tasks);
+
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].id, "task-2");
+    }
+
+    #[test]
+    fn deleted_local_video_uses_explicit_card_message() {
+        let mut task = sample_video_task("task-1", "completed", None);
+        task.local_video_deleted = true;
+
+        assert_eq!(video_task_display_message(&task), "本地视频已删除");
+    }
+
+    #[test]
+    fn missing_remote_queue_record_still_allows_local_queue_removal() {
+        assert!(should_remove_video_task_after_error(&ApiError::NotFound));
+        assert!(!should_remove_video_task_after_error(&ApiError::Forbidden));
+    }
+
+    #[test]
     fn normalized_video_task_queue_keeps_latest_unique_tasks() {
         let tasks = vec![
             sample_video_task("task-1", "completed", Some("https://cdn.example/video.mp4")),
@@ -1432,6 +1641,7 @@ mod tests {
             status: status.to_string(),
             message: status.to_string(),
             preview_url: preview_url.map(str::to_string),
+            local_video_deleted: false,
             resolution: Some("720p".to_string()),
             ratio: Some("9:16".to_string()),
             duration_seconds: Some(8),

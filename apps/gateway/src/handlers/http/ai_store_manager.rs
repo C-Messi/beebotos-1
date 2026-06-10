@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
@@ -67,6 +68,8 @@ pub struct VideoTaskResponse {
     pub status: String,
     pub message: String,
     pub preview_url: Option<String>,
+    #[serde(default)]
+    pub local_video_deleted: bool,
     pub resolution: Option<String>,
     pub ratio: Option<String>,
     pub duration_seconds: Option<u8>,
@@ -392,6 +395,7 @@ async fn init_video_task_history_schema(db: &SqlitePool) -> Result<(), GatewayEr
             status TEXT NOT NULL,
             message TEXT NOT NULL,
             preview_url TEXT,
+            local_video_deleted INTEGER NOT NULL DEFAULT 0,
             resolution TEXT,
             ratio TEXT,
             duration_seconds INTEGER,
@@ -420,6 +424,21 @@ async fn init_video_task_history_schema(db: &SqlitePool) -> Result<(), GatewayEr
         if !err.to_string().contains("duplicate column name") {
             return Err(GatewayError::internal(format!(
                 "初始化视频任务历史字段失败: {}",
+                err
+            )));
+        }
+    }
+
+    if let Err(err) = sqlx::query(
+        "ALTER TABLE ai_video_marketing_tasks ADD COLUMN local_video_deleted INTEGER NOT NULL \
+         DEFAULT 0",
+    )
+    .execute(db)
+    .await
+    {
+        if !err.to_string().contains("duplicate column name") {
+            return Err(GatewayError::internal(format!(
+                "初始化视频任务本地视频字段失败: {}",
                 err
             )));
         }
@@ -469,11 +488,11 @@ async fn insert_video_task_history(
         r#"
         INSERT INTO ai_video_marketing_tasks (
             id, user_id, product, platform, prompt, model, provider, status, message,
-            preview_url, resolution, ratio, duration_seconds, generate_audio, watermark,
-            queue_position, submitted_at, updated_at, reference_image_count, created_at,
-            last_synced_at
+            preview_url, local_video_deleted, resolution, ratio, duration_seconds, generate_audio,
+            watermark, queue_position, submitted_at, updated_at, reference_image_count,
+            created_at, last_synced_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
         ON CONFLICT(id) DO UPDATE SET
             user_id = excluded.user_id,
             product = excluded.product,
@@ -484,6 +503,7 @@ async fn insert_video_task_history(
             status = excluded.status,
             message = excluded.message,
             preview_url = excluded.preview_url,
+            local_video_deleted = excluded.local_video_deleted,
             resolution = excluded.resolution,
             ratio = excluded.ratio,
             duration_seconds = excluded.duration_seconds,
@@ -506,6 +526,11 @@ async fn insert_video_task_history(
     .bind(&task.status)
     .bind(&task.message)
     .bind(task.preview_url.as_deref())
+    .bind(if task.local_video_deleted {
+        1_i64
+    } else {
+        0_i64
+    })
     .bind(resolution)
     .bind(ratio)
     .bind(duration_seconds as i64)
@@ -544,18 +569,25 @@ async fn update_video_task_history(
         r#"
         INSERT INTO ai_video_marketing_tasks (
             id, user_id, product, platform, prompt, model, provider, status, message,
-            preview_url, resolution, ratio, duration_seconds, generate_audio, watermark,
-            queue_position, submitted_at, updated_at, reference_image_count, created_at,
-            last_synced_at
+            preview_url, local_video_deleted, resolution, ratio, duration_seconds, generate_audio,
+            watermark, queue_position, submitted_at, updated_at, reference_image_count,
+            created_at, last_synced_at
         )
-        VALUES (?1, ?2, '', '', '', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 0, ?11, ?12, ?13, ?14, ?15, ?16)
+        VALUES (?1, ?2, '', '', '', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, 0, ?12, ?13, ?14, ?15, ?16, ?17)
         ON CONFLICT(id) DO UPDATE SET
             user_id = excluded.user_id,
             model = excluded.model,
             provider = excluded.provider,
             status = excluded.status,
             message = excluded.message,
-            preview_url = excluded.preview_url,
+            preview_url = CASE
+                WHEN ai_video_marketing_tasks.local_video_deleted = 1 AND excluded.local_video_deleted = 0 THEN NULL
+                ELSE excluded.preview_url
+            END,
+            local_video_deleted = CASE
+                WHEN ai_video_marketing_tasks.local_video_deleted = 1 AND excluded.local_video_deleted = 0 THEN 1
+                ELSE excluded.local_video_deleted
+            END,
             resolution = COALESCE(excluded.resolution, ai_video_marketing_tasks.resolution),
             ratio = COALESCE(excluded.ratio, ai_video_marketing_tasks.ratio),
             duration_seconds = COALESCE(excluded.duration_seconds, ai_video_marketing_tasks.duration_seconds),
@@ -576,6 +608,11 @@ async fn update_video_task_history(
     .bind(&task.status)
     .bind(&task.message)
     .bind(task.preview_url.as_deref())
+    .bind(if task.local_video_deleted {
+        1_i64
+    } else {
+        0_i64
+    })
     .bind(task.resolution.as_deref())
     .bind(task.ratio.as_deref())
     .bind(duration_seconds)
@@ -602,7 +639,7 @@ async fn list_video_task_history(
         r#"
         SELECT id, provider, model, status, message, preview_url, resolution, ratio,
                duration_seconds, queue_position, submitted_at, updated_at,
-               reference_image_count
+               reference_image_count, local_video_deleted
         FROM ai_video_marketing_tasks
         WHERE user_id = ?1
         ORDER BY COALESCE(updated_at, created_at) DESC, created_at DESC
@@ -624,6 +661,7 @@ async fn list_video_task_history(
             status: row.get("status"),
             message: row.get("message"),
             preview_url: row.get("preview_url"),
+            local_video_deleted: row.get::<i64, _>("local_video_deleted") != 0,
             resolution: row.get("resolution"),
             ratio: row.get("ratio"),
             duration_seconds: row
@@ -639,6 +677,105 @@ async fn list_video_task_history(
                 .map(|count| count as u8),
         })
         .collect())
+}
+
+async fn get_video_task_history(
+    db: &SqlitePool,
+    user_id: &str,
+    id: &str,
+) -> Result<Option<VideoTaskResponse>, GatewayError> {
+    init_video_task_history_schema(db).await?;
+    let mut tasks = sqlx::query(
+        r#"
+        SELECT id, provider, model, status, message, preview_url, resolution, ratio,
+               duration_seconds, queue_position, submitted_at, updated_at,
+               reference_image_count, local_video_deleted
+        FROM ai_video_marketing_tasks
+        WHERE user_id = ?1 AND id = ?2
+        LIMIT 1
+        "#,
+    )
+    .bind(user_id)
+    .bind(id)
+    .fetch_all(db)
+    .await
+    .map_err(|err| GatewayError::internal(format!("读取视频任务历史失败: {}", err)))?
+    .into_iter()
+    .map(|row| VideoTaskResponse {
+        id: row.get("id"),
+        provider: row.get("provider"),
+        model: row.get("model"),
+        status: row.get("status"),
+        message: row.get("message"),
+        preview_url: row.get("preview_url"),
+        local_video_deleted: row.get::<i64, _>("local_video_deleted") != 0,
+        resolution: row.get("resolution"),
+        ratio: row.get("ratio"),
+        duration_seconds: row
+            .get::<Option<i64>, _>("duration_seconds")
+            .map(|duration| duration as u8),
+        queue_position: row
+            .get::<Option<i64>, _>("queue_position")
+            .map(|position| position as u32),
+        submitted_at: row.get("submitted_at"),
+        updated_at: row.get("updated_at"),
+        reference_image_count: row
+            .get::<Option<i64>, _>("reference_image_count")
+            .map(|count| count as u8),
+    })
+    .collect::<Vec<_>>();
+
+    Ok(tasks.pop())
+}
+
+async fn remove_video_task_history(
+    db: &SqlitePool,
+    user_id: &str,
+    id: &str,
+) -> Result<(), GatewayError> {
+    init_video_task_history_schema(db).await?;
+    sqlx::query("DELETE FROM ai_video_marketing_tasks WHERE user_id = ?1 AND id = ?2")
+        .bind(user_id)
+        .bind(id)
+        .execute(db)
+        .await
+        .map_err(|err| GatewayError::internal(format!("移出视频任务队列失败: {}", err)))?;
+    Ok(())
+}
+
+async fn set_video_task_local_video_deleted(
+    db: &SqlitePool,
+    user_id: &str,
+    id: &str,
+    deleted: bool,
+    preview_url: Option<&str>,
+) -> Result<(), GatewayError> {
+    init_video_task_history_schema(db).await?;
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        UPDATE ai_video_marketing_tasks
+        SET local_video_deleted = ?3,
+            preview_url = ?4,
+            message = CASE
+                WHEN ?3 = 1 THEN '本地视频已删除。'
+                WHEN status = 'completed' AND message = '本地视频已删除。' THEN 'Seedance 视频已生成。'
+                ELSE message
+            END,
+            updated_at = ?5,
+            last_synced_at = ?5
+        WHERE user_id = ?1 AND id = ?2
+        "#,
+    )
+    .bind(user_id)
+    .bind(id)
+    .bind(if deleted { 1_i64 } else { 0_i64 })
+    .bind(preview_url)
+    .bind(&now)
+    .execute(db)
+    .await
+    .map_err(|err| GatewayError::internal(format!("更新本地视频状态失败: {}", err)))?;
+    Ok(())
 }
 
 fn new_graphic_record_id() -> String {
@@ -915,7 +1052,10 @@ fn merge_video_task_history_refresh(
     mut refreshed: VideoTaskResponse,
     previous: &VideoTaskResponse,
 ) -> VideoTaskResponse {
-    if refreshed.preview_url.is_none() {
+    if previous.local_video_deleted {
+        refreshed.local_video_deleted = true;
+        refreshed.preview_url = None;
+    } else if refreshed.preview_url.is_none() {
         refreshed.preview_url = previous.preview_url.clone();
     }
     if refreshed.resolution.is_none() {
@@ -1012,6 +1152,10 @@ async fn cache_video_task_preview(
     mut task: VideoTaskResponse,
 ) -> VideoTaskResponse {
     if task.status != "completed" {
+        return task;
+    }
+    if task.local_video_deleted {
+        task.preview_url = None;
         return task;
     }
 
@@ -1289,6 +1433,7 @@ fn video_generation_config_required_response(model: &str) -> VideoTaskResponse {
                   并配置后即可提交真实任务。"
             .to_string(),
         preview_url: None,
+        local_video_deleted: false,
         resolution: None,
         ratio: None,
         duration_seconds: None,
@@ -1315,6 +1460,7 @@ fn video_upstream_unavailable_response(
         status: if blocked { "blocked" } else { "failed" }.to_string(),
         message,
         preview_url: None,
+        local_video_deleted: false,
         resolution: None,
         ratio: None,
         duration_seconds: None,
@@ -1372,6 +1518,7 @@ fn video_create_to_response(
         status: "queued".to_string(),
         message: "Seedance 视频任务已提交，正在排队生成。".to_string(),
         preview_url: None,
+        local_video_deleted: false,
         resolution: Some(req.resolution.trim().to_string()),
         ratio: Some(req.ratio.trim().to_string()),
         duration_seconds: Some(req.duration_seconds),
@@ -1412,6 +1559,7 @@ fn video_status_to_response(
         status: status.to_string(),
         message,
         preview_url,
+        local_video_deleted: false,
         resolution: None,
         ratio: None,
         duration_seconds: None,
@@ -2521,6 +2669,7 @@ pub async fn get_video_task(
     Path(id): Path<String>,
 ) -> Result<Json<VideoTaskResponse>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
+    let previous = get_video_task_history(&state.db, &user.user_id, &id).await?;
     let config = BeeBotOSConfig::load()
         .map_err(|err| GatewayError::internal(format!("加载视频生成配置失败: {}", err)))?;
     let model = config.video_generation.model.clone();
@@ -2532,6 +2681,9 @@ pub async fn get_video_task(
     {
         Some(api_key) => api_key,
         None => {
+            if let Some(task) = previous {
+                return Ok(Json(task));
+            }
             let mut response = video_generation_config_required_response(&model);
             response.id = id;
             return Ok(Json(response));
@@ -2573,10 +2725,27 @@ pub async fn get_video_task(
         .json::<VolcengineVideoTaskStatusResponse>()
         .await
         .map_err(|err| GatewayError::internal(format!("视频任务响应解析失败: {}", err)))?;
-    let task = video_status_to_response(upstream, &model);
+    let task = if let Some(previous) = previous {
+        merge_video_task_history_refresh(video_status_to_response(upstream, &model), &previous)
+    } else {
+        video_status_to_response(upstream, &model)
+    };
     let task = cache_video_task_preview(&default_video_asset_root(), &client, task).await;
     update_video_task_history(&state.db, &user.user_id, &task).await?;
 
+    Ok(Json(task))
+}
+
+pub async fn remove_video_task(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<VideoTaskResponse>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+    let task = get_video_task_history(&state.db, &user.user_id, &id)
+        .await?
+        .ok_or_else(|| GatewayError::not_found("video task", &id))?;
+    remove_video_task_history(&state.db, &user.user_id, &id).await?;
     Ok(Json(task))
 }
 
@@ -2657,6 +2826,112 @@ pub async fn cancel_video_task(
     } else {
         refreshed
     };
+    update_video_task_history(&state.db, &user.user_id, &task).await?;
+    Ok(Json(task))
+}
+
+pub async fn delete_video_task_local_video(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<VideoTaskResponse>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+    let mut task = get_video_task_history(&state.db, &user.user_id, &id)
+        .await?
+        .ok_or_else(|| GatewayError::not_found("video task", &id))?;
+    if task.status != "completed" {
+        return Err(GatewayError::bad_request("只能删除已生成视频的本地缓存"));
+    }
+
+    let path = video_asset_path(&default_video_asset_root(), &id);
+    if let Err(err) = tokio::fs::remove_file(&path).await {
+        if err.kind() != ErrorKind::NotFound {
+            return Err(GatewayError::internal(format!("删除本地视频失败: {}", err)));
+        }
+    }
+
+    set_video_task_local_video_deleted(&state.db, &user.user_id, &id, true, None).await?;
+    task.preview_url = None;
+    task.local_video_deleted = true;
+    task.message = "本地视频已删除。".to_string();
+    task.updated_at = Some(Utc::now().to_rfc3339());
+    Ok(Json(task))
+}
+
+pub async fn restore_video_task_local_video(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<VideoTaskResponse>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+    let previous = get_video_task_history(&state.db, &user.user_id, &id)
+        .await?
+        .ok_or_else(|| GatewayError::not_found("video task", &id))?;
+    if previous.status != "completed" {
+        return Err(GatewayError::bad_request("只能恢复已生成视频的本地缓存"));
+    }
+
+    let local_url = video_asset_url(&id);
+    if video_asset_path(&default_video_asset_root(), &id).exists() {
+        set_video_task_local_video_deleted(
+            &state.db,
+            &user.user_id,
+            &id,
+            false,
+            Some(local_url.as_str()),
+        )
+        .await?;
+        let mut task = previous;
+        task.local_video_deleted = false;
+        task.preview_url = Some(local_url);
+        task.updated_at = Some(Utc::now().to_rfc3339());
+        return Ok(Json(task));
+    }
+
+    let config = BeeBotOSConfig::load()
+        .map_err(|err| GatewayError::internal(format!("加载视频生成配置失败: {}", err)))?;
+    let model = config.video_generation.model.clone();
+    let api_key = match config
+        .video_generation
+        .api_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+    {
+        Some(api_key) => api_key,
+        None => {
+            let mut response = video_generation_config_required_response(&model);
+            response.id = id;
+            return Ok(Json(response));
+        }
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            config.video_generation.timeout_seconds,
+        ))
+        .build()
+        .map_err(|err| GatewayError::internal(format!("视频生成客户端创建失败: {}", err)))?;
+
+    let mut previous_for_restore = previous;
+    previous_for_restore.local_video_deleted = false;
+    let task = fetch_video_task_from_upstream(
+        &client,
+        &config.video_generation.base_url,
+        &api_key,
+        &id,
+        &model,
+    )
+    .await?;
+    let mut task = merge_video_task_history_refresh(task, &previous_for_restore);
+    task.local_video_deleted = false;
+    let task = cache_video_task_preview(&default_video_asset_root(), &client, task).await;
+    set_video_task_local_video_deleted(
+        &state.db,
+        &user.user_id,
+        &id,
+        false,
+        task.preview_url.as_deref(),
+    )
+    .await?;
     update_video_task_history(&state.db, &user.user_id, &task).await?;
     Ok(Json(task))
 }
@@ -3006,6 +3281,78 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn removing_video_task_history_forgets_only_current_user() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        init_video_task_history_schema(&db).await.unwrap();
+
+        let task = sample_video_task_response("task-1", "completed");
+        update_video_task_history(&db, "user-1", &task)
+            .await
+            .unwrap();
+        update_video_task_history(&db, "user-2", &task)
+            .await
+            .unwrap();
+
+        remove_video_task_history(&db, "user-1", "task-1")
+            .await
+            .unwrap();
+
+        assert!(list_video_task_history(&db, "user-1", 20)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            list_video_task_history(&db, "user-2", 20)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn restoring_video_task_local_video_state_clears_deleted_message() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        init_video_task_history_schema(&db).await.unwrap();
+
+        let task = sample_video_task_response("task-1", "completed");
+        update_video_task_history(&db, "user-1", &task)
+            .await
+            .unwrap();
+        set_video_task_local_video_deleted(&db, "user-1", "task-1", true, None)
+            .await
+            .unwrap();
+        set_video_task_local_video_deleted(
+            &db,
+            "user-1",
+            "task-1",
+            false,
+            Some("/api/v1/ai-store-manager/video-assets/task-1.mp4"),
+        )
+        .await
+        .unwrap();
+
+        let restored = get_video_task_history(&db, "user-1", "task-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!restored.local_video_deleted);
+        assert_eq!(restored.message, "Seedance 视频已生成。");
+        assert_eq!(
+            restored.preview_url.as_deref(),
+            Some("/api/v1/ai-store-manager/video-assets/task-1.mp4")
+        );
+    }
+
     #[test]
     fn empty_video_task_history_does_not_import_global_upstream_tasks() {
         let history = Vec::new();
@@ -3040,6 +3387,21 @@ mod tests {
         assert_eq!(merged.ratio.as_deref(), Some("9:16"));
         assert_eq!(merged.duration_seconds, Some(12));
         assert_eq!(merged.submitted_at.as_deref(), Some("2026-06-03T08:00:00Z"));
+    }
+
+    #[test]
+    fn refreshed_video_task_history_preserves_local_video_deleted_state() {
+        let mut previous = sample_video_task_response("task-1", "completed");
+        previous.preview_url = None;
+        previous.local_video_deleted = true;
+
+        let mut refreshed = sample_video_task_response("task-1", "completed");
+        refreshed.preview_url = Some("https://cdn.example/fresh.mp4".to_string());
+
+        let merged = merge_video_task_history_refresh(refreshed, &previous);
+
+        assert!(merged.local_video_deleted);
+        assert!(merged.preview_url.is_none());
     }
 
     #[test]
@@ -3293,6 +3655,7 @@ mod tests {
             status: status.to_string(),
             message: status.to_string(),
             preview_url: None,
+            local_video_deleted: false,
             resolution: Some("720p".to_string()),
             ratio: Some("9:16".to_string()),
             duration_seconds: Some(12),

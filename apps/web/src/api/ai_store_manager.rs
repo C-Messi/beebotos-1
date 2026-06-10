@@ -31,6 +31,8 @@ pub struct VideoTaskResponse {
     pub status: String,
     pub message: String,
     pub preview_url: Option<String>,
+    #[serde(default)]
+    pub local_video_deleted: bool,
     pub resolution: Option<String>,
     pub ratio: Option<String>,
     pub duration_seconds: Option<u8>,
@@ -176,9 +178,39 @@ impl AiStoreManagerService {
 
     pub async fn cancel_video_task(&self, id: &str) -> Result<VideoTaskResponse, ApiError> {
         self.client
+            .post(&format!("/ai-store-manager/video-tasks/{}/cancel", id), &())
+            .await
+    }
+
+    pub async fn remove_video_task(&self, id: &str) -> Result<(), ApiError> {
+        self.client
             .delete(&format!("/ai-store-manager/video-tasks/{}", id))
             .await?;
+        self.client
+            .invalidate_cache("GET:/ai-store-manager/video-tasks");
+        Ok(())
+    }
+
+    pub async fn delete_video_task_local_video(
+        &self,
+        id: &str,
+    ) -> Result<VideoTaskResponse, ApiError> {
+        self.client
+            .delete(&format!("/ai-store-manager/video-tasks/{}/local-video", id))
+            .await?;
         self.get_video_task(id).await
+    }
+
+    pub async fn restore_video_task_local_video(
+        &self,
+        id: &str,
+    ) -> Result<VideoTaskResponse, ApiError> {
+        self.client
+            .post(
+                &format!("/ai-store-manager/video-tasks/{}/local-video/restore", id),
+                &(),
+            )
+            .await
     }
 
     pub async fn list_video_tasks(&self) -> Result<Vec<VideoTaskResponse>, ApiError> {
