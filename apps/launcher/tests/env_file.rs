@@ -7,7 +7,7 @@ use beebotos_launcher::{
 fn load_env_config_reads_known_keys_only() {
     let content = "\
 # keep this comment
-DOUBAO_API_KEY=text-key
+DEEPSEEK_API_KEY=text-key
 IMAGE_GENERATION_API_KEY=image-key
 VIDEO_GENERATION_API_KEY=video-key
 UNKNOWN_KEY=keep-me
@@ -25,7 +25,7 @@ fn render_env_config_preserves_comments_and_unknown_keys() {
     let content = "\
 # keep this comment
 UNKNOWN_KEY=keep-me
-DOUBAO_API_KEY=old-text
+DEEPSEEK_API_KEY=old-text
 ";
     let config = EnvConfig {
         text_model_key: "new-text".to_string(),

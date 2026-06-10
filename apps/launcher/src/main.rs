@@ -224,10 +224,12 @@ fn run_ui(root: PathBuf) -> anyhow::Result<()> {
             show_action_result(
                 &events_window,
                 "启动 BeeBotOS",
-                run_runner(&events_root, "start").and_then(|output| {
-                    open::that(WEB_CONSOLE_URL).context("打开 Web 控制台失败")?;
-                    Ok(output)
-                }),
+                save_inputs(&events_root, &text_input, &image_input, &video_input)
+                    .and_then(|_| run_runner(&events_root, "start"))
+                    .and_then(|output| {
+                        open::that(WEB_CONSOLE_URL).context("打开 Web 控制台失败")?;
+                        Ok(output)
+                    }),
             );
         } else if &handle == &stop_button {
             show_action_result(
@@ -239,10 +241,12 @@ fn run_ui(root: PathBuf) -> anyhow::Result<()> {
             show_action_result(
                 &events_window,
                 "重启 BeeBotOS",
-                run_runner(&events_root, "restart").and_then(|output| {
-                    open::that(WEB_CONSOLE_URL).context("打开 Web 控制台失败")?;
-                    Ok(output)
-                }),
+                save_inputs(&events_root, &text_input, &image_input, &video_input)
+                    .and_then(|_| run_runner(&events_root, "restart"))
+                    .and_then(|output| {
+                        open::that(WEB_CONSOLE_URL).context("打开 Web 控制台失败")?;
+                        Ok(output)
+                    }),
             );
         } else if &handle == &open_button {
             show_action_result(
@@ -270,6 +274,21 @@ fn run_ui(root: PathBuf) -> anyhow::Result<()> {
     nwg::dispatch_thread_events();
     nwg::unbind_event_handler(&handler);
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn save_inputs(
+    root: &Path,
+    text_input: &native_windows_gui::TextInput,
+    image_input: &native_windows_gui::TextInput,
+    video_input: &native_windows_gui::TextInput,
+) -> anyhow::Result<()> {
+    let config = EnvConfig {
+        text_model_key: text_input.text(),
+        image_generation_key: image_input.text(),
+        video_generation_key: video_input.text(),
+    };
+    write_env_file(&env_path(root), &config)
 }
 
 #[cfg(target_os = "windows")]

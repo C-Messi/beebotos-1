@@ -254,6 +254,16 @@ function Start-Service($name) {
 
     # web-server needs correct static-path and gateway-url to work properly
     $startArgs = @{}
+    if ($name -eq "gateway") {
+        if ([string]::IsNullOrWhiteSpace($env:BEEHUB_URL)) {
+            $env:BEEHUB_URL = "http://localhost:8080"
+        }
+    }
+    if ($name -eq "beehub") {
+        if ([string]::IsNullOrWhiteSpace($env:BEEHUB_PORT)) {
+            $env:BEEHUB_PORT = "8080"
+        }
+    }
     if ($name -eq "web") {
         # 准备临时静态目录，使用 trunk 生成的 apps/web/dist
         $tempStaticDir = Join-Path $ProjectRoot "data\temp-web-static"
@@ -271,7 +281,7 @@ function Start-Service($name) {
         Print-Info "Gateway URL: http://localhost:8000"
     }
 
-    $proc = Start-Process -FilePath $binaryPath @startArgs -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -WindowStyle Hidden
+    $proc = Start-Process -FilePath $binaryPath @startArgs -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -WorkingDirectory $ProjectRoot -WindowStyle Hidden
     $proc.Id | Set-Content $pidFile -NoNewline
 
     Start-Sleep -Seconds 1
@@ -398,7 +408,14 @@ function Pack-Release($target = "all") {
     }
 
     if (Test-Path (Join-Path $ProjectRoot "config")) {
-        Copy-Item -Recurse (Join-Path $ProjectRoot "config") $outDir
+        $configDest = Join-Path $outDir "config"
+        New-Item -ItemType Directory -Force -Path $configDest | Out-Null
+        foreach ($configName in @("beebotos.toml", "web-server.toml")) {
+            $configSource = Join-Path $ProjectRoot "config\$configName"
+            if (Test-Path $configSource) {
+                Copy-Item $configSource $configDest
+            }
+        }
         # 调整 web-server 生产配置：静态文件路径指向当前目录
         $prodConfig = Join-Path $outDir "config\web-server.toml"
         if (Test-Path $prodConfig) {

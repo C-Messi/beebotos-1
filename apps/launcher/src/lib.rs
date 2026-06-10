@@ -1,6 +1,6 @@
 use std::path::Path;
 
-pub const TEXT_MODEL_KEY: &str = "DOUBAO_API_KEY";
+pub const TEXT_MODEL_KEY: &str = "DEEPSEEK_API_KEY";
 pub const IMAGE_GENERATION_KEY: &str = "IMAGE_GENERATION_API_KEY";
 pub const VIDEO_GENERATION_KEY: &str = "VIDEO_GENERATION_API_KEY";
 pub const ALLOW_NETWORK_KEY: &str = "BEE_ALLOW_NETWORK";
