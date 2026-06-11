@@ -156,3 +156,6 @@ fn format_env_value(value: &str) -> String {
     }
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
+
+#[cfg(target_os = "windows")]
+pub mod windows;
