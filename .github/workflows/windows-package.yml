@@ -1,0 +1,80 @@
+name: Windows Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - linc/**
+    tags:
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Build Windows package
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install protoc
+        run: choco install protoc --yes --no-progress
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown,x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Trunk
+        run: cargo install trunk --locked
+
+      - name: Package release
+        shell: pwsh
+        run: .\beebotos-dev.ps1 pack all
+
+      - name: Verify package
+        shell: pwsh
+        run: |
+          $required = @(
+            "dist\beebotos\beebotos-gateway.exe",
+            "dist\beebotos\beebotos-launcher.exe",
+            "dist\beebotos\web-server.exe",
+            "dist\beebotos\beebotos-run.ps1",
+            "dist\beebotos\config\beebotos.toml",
+            "dist\beebotos\config\web-server.toml",
+            "dist\beebotos\migrations_sqlite",
+            "dist\beebotos\skills",
+            "dist\beebotos\workflows",
+            "dist\beebotos\index.html"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) {
+              throw "Missing package item: $path"
+            }
+          }
+          if (-not (Get-ChildItem dist -Filter "beebotos-*.zip")) {
+            throw "Missing packaged zip in dist"
+          }
+
+      - name: Upload Windows zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: beebotos-windows-zip
+          path: dist/beebotos-*.zip
+          if-no-files-found: error
+
+      - name: Upload Windows package directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: beebotos-windows-directory
+          path: dist/beebotos
+          if-no-files-found: error

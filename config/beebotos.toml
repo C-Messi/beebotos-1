@@ -58,7 +58,7 @@ retry_count = 3
 timeout_ms = 60000
 
 [models]
-default_provider = "doubao"
+default_provider = "deepseek"
 fallback_chain = []
 max_tokens = 8192
 request_timeout = 180

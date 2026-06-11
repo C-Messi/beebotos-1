@@ -3028,7 +3028,20 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         )
         .route(
             "/api/v1/ai-store-manager/video-tasks/:id",
-            get(handlers::http::ai_store_manager::get_video_task),
+            get(handlers::http::ai_store_manager::get_video_task)
+                .delete(handlers::http::ai_store_manager::remove_video_task),
+        )
+        .route(
+            "/api/v1/ai-store-manager/video-tasks/:id/cancel",
+            post(handlers::http::ai_store_manager::cancel_video_task),
+        )
+        .route(
+            "/api/v1/ai-store-manager/video-tasks/:id/local-video",
+            delete(handlers::http::ai_store_manager::delete_video_task_local_video),
+        )
+        .route(
+            "/api/v1/ai-store-manager/video-tasks/:id/local-video/restore",
+            post(handlers::http::ai_store_manager::restore_video_task_local_video),
         )
         .layer(from_fn_with_state(gateway_state.clone(), auth_middleware))
         .layer(TimeoutLayer::new(video_generation_request_timeout));

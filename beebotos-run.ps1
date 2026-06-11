@@ -57,6 +57,32 @@ $Services = @(
     @{ Name = "beehub";  Binary = "beehub.exe";           Port = 8080; Desc = "BeeHub Service" }
 )
 
+function Import-EnvFile {
+    $envFile = Join-Path $ScriptDir ".env"
+    if (-not (Test-Path $envFile)) { return }
+
+    foreach ($line in Get-Content $envFile) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) { continue }
+        $parts = $trimmed.Split("=", 2)
+        if ($parts.Count -ne 2) { continue }
+        $key = $parts[0].Trim()
+        $value = $parts[1].Trim().Trim('"').Trim("'")
+        if (-not [string]::IsNullOrWhiteSpace($key)) {
+            Set-Item -Path "Env:$key" -Value $value
+        }
+    }
+}
+
+Import-EnvFile
+
+if ([string]::IsNullOrWhiteSpace($env:BEEHUB_PORT)) {
+    $env:BEEHUB_PORT = "8080"
+}
+if ([string]::IsNullOrWhiteSpace($env:BEEHUB_URL)) {
+    $env:BEEHUB_URL = "http://localhost:$($env:BEEHUB_PORT)"
+}
+
 function Test-IsRunning($name) {
     $pidFile = Join-Path $RunDir "$name.pid"
     if (Test-Path $pidFile) {
@@ -102,10 +128,17 @@ function Start-ServiceByName($name) {
         RedirectStandardOutput = $logFile
         RedirectStandardError  = $errFile
         PassThru               = $true
+        WorkingDirectory       = $ScriptDir
         WindowStyle            = "Hidden"
     }
     if ($name -eq "web") {
-        $procParams.ArgumentList = @("--config", "config\web-server.toml", "--static-path", ".")
+        $webConfigPath = Join-Path $ScriptDir "config\web-server.toml"
+        $procParams.ArgumentList = @(
+            "--config",
+            "`"$webConfigPath`"",
+            "--static-path",
+            "`"$ScriptDir`""
+        )
     }
     $proc = Start-Process @procParams
     $proc.Id | Set-Content $pidFile -NoNewline
@@ -150,7 +183,7 @@ function Stop-ServiceByName($name) {
 function Restart-ServiceByName($name) {
     Stop-ServiceByName $name
     Start-Sleep -Seconds 1
-    Start-ServiceByName $name | Out-Null
+    return Start-ServiceByName $name
 }
 
 function Show-Status {
@@ -177,11 +210,15 @@ $target = if ($args.Count -gt 1) { $args[1] } else { "all" }
 switch ($action) {
     "start" {
         switch ($target) {
-            "gateway" { Start-ServiceByName "gateway" | Out-Null }
-            "web"     { Start-ServiceByName "web"     | Out-Null }
-            "beehub"  { Start-ServiceByName "beehub"  | Out-Null }
+            "gateway" { if (-not (Start-ServiceByName "gateway")) { exit 1 } }
+            "web"     { if (-not (Start-ServiceByName "web"))     { exit 1 } }
+            "beehub"  { if (-not (Start-ServiceByName "beehub"))  { exit 1 } }
             "all" {
-                foreach ($svc in $Services) { Start-ServiceByName $svc.Name | Out-Null }
+                $ok = $true
+                foreach ($svc in $Services) {
+                    if (-not (Start-ServiceByName $svc.Name)) { $ok = $false }
+                }
+                if (-not $ok) { exit 1 }
             }
             default {
                 Write-Host "Usage: $($MyInvocation.MyCommand.Name) start [gateway|web|beehub|all]" -ForegroundColor Red
@@ -205,11 +242,15 @@ switch ($action) {
     }
     "restart" {
         switch ($target) {
-            "gateway" { Restart-ServiceByName "gateway" }
-            "web"     { Restart-ServiceByName "web" }
-            "beehub"  { Restart-ServiceByName "beehub" }
+            "gateway" { if (-not (Restart-ServiceByName "gateway")) { exit 1 } }
+            "web"     { if (-not (Restart-ServiceByName "web"))     { exit 1 } }
+            "beehub"  { if (-not (Restart-ServiceByName "beehub"))  { exit 1 } }
             "all" {
-                foreach ($svc in $Services) { Restart-ServiceByName $svc.Name }
+                $ok = $true
+                foreach ($svc in $Services) {
+                    if (-not (Restart-ServiceByName $svc.Name)) { $ok = $false }
+                }
+                if (-not $ok) { exit 1 }
             }
             default {
                 Write-Host "Usage: $($MyInvocation.MyCommand.Name) restart [gateway|web|beehub|all]" -ForegroundColor Red
