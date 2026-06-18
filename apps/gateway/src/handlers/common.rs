@@ -4,6 +4,7 @@
 
 use gateway::error::GatewayError;
 use gateway::middleware::AuthUser;
+use gateway::{AgentInfo, QueryResult, StateQuery, StateStore};
 
 use crate::models::AgentRecord;
 
@@ -23,6 +24,53 @@ use crate::models::AgentRecord;
 pub fn check_ownership(user: &AuthUser, agent: &AgentRecord) -> Result<(), GatewayError> {
     if user.is_admin() || agent.owner_id.as_deref() == Some(&user.user_id) {
         Ok(())
+    } else {
+        Err(GatewayError::forbidden(
+            "You don't have permission to access this agent",
+        ))
+    }
+}
+
+/// Fetch an agent from StateStore and verify the user can access it.
+pub async fn get_authorized_agent_info(
+    state_store: &StateStore,
+    user: &AuthUser,
+    agent_id: &str,
+) -> Result<AgentInfo, GatewayError> {
+    let query_result = state_store
+        .query(StateQuery::GetAgentInfo {
+            agent_id: agent_id.to_string(),
+        })
+        .await
+        .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
+
+    let info = match query_result {
+        QueryResult::AgentInfo {
+            agent_id,
+            config,
+            current_state,
+            metadata,
+            created_at,
+            updated_at,
+            task_count,
+            success_count,
+            failure_count,
+        } => AgentInfo {
+            agent_id,
+            config,
+            current_state,
+            metadata,
+            created_at,
+            updated_at,
+            task_count,
+            success_count,
+            failure_count,
+        },
+        _ => return Err(GatewayError::not_found("Agent", agent_id)),
+    };
+
+    if user.is_admin() || info.metadata.get("owner_id").map(String::as_str) == Some(&user.user_id) {
+        Ok(info)
     } else {
         Err(GatewayError::forbidden(
             "You don't have permission to access this agent",

@@ -2477,7 +2477,7 @@ Rules:
         };
 
         let llm_interface: Arc<dyn beebotos_agents::communication::LLMCallInterface> = Arc::new(
-            crate::services::agent_runtime_manager::GatewayLLMInterface::new(
+            crate::services::gateway_llm_interface::GatewayLLMInterface::new(
                 self.llm_service.clone(),
             ),
         );
@@ -2682,7 +2682,7 @@ Rules:
         };
 
         let llm_interface: Arc<dyn beebotos_agents::communication::LLMCallInterface> = Arc::new(
-            crate::services::agent_runtime_manager::GatewayLLMInterface::new(
+            crate::services::gateway_llm_interface::GatewayLLMInterface::new(
                 self.llm_service.clone(),
             ),
         );

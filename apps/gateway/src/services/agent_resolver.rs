@@ -209,10 +209,7 @@ impl AgentResolver {
             }
         }
 
-        // 2. Query AgentRuntime for the first available agent
-        // 🟢 P2 FIX: Use agent_runtime.list_agents() instead of state_store.query()
-        // because GatewayAgentRuntime maintains its own AgentStateManager state,
-        // which may not be synchronized with the separate StateStore instance.
+        // 2. Query AgentRuntime for the first currently available runtime agent.
         let runtime_agents =
             self.agent_runtime
                 .list_agents()

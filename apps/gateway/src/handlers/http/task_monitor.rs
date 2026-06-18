@@ -12,7 +12,7 @@ use gateway::error::GatewayError;
 use gateway::middleware::{require_any_role, AuthUser};
 use serde_json::json;
 
-use crate::handlers::common::check_ownership;
+use crate::handlers::common::get_authorized_agent_info;
 use crate::AppState;
 
 /// Get task monitor statistics
@@ -43,14 +43,7 @@ pub async fn get_agent_task_status(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    // Check ownership
-    let agent = state
-        .agent_service
-        .get_agent(&id)
-        .await?
-        .ok_or_else(|| GatewayError::not_found("Agent", &id))?;
-
-    check_ownership(&user, &agent)?;
+    get_authorized_agent_info(&state.state_store, &user, &id).await?;
 
     let task_info = if let Some(task_monitor) = &state.task_monitor {
         let has_active = task_monitor.has_active_task(&id).await;

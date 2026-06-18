@@ -16,7 +16,7 @@ use gateway::middleware::{require_any_role, AuthUser};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::handlers::common::check_ownership;
+use crate::handlers::common::get_authorized_agent_info;
 use crate::AppState;
 
 /// Register agent on-chain identity
@@ -28,14 +28,7 @@ pub async fn register_agent_identity(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    // Verify ownership
-    let agent = state
-        .agent_service
-        .get_agent(&id)
-        .await?
-        .ok_or_else(|| GatewayError::not_found("Agent", &id))?;
-
-    check_ownership(&user, &agent)?;
+    get_authorized_agent_info(&state.state_store, &user, &id).await?;
 
     let chain_service = state.chain()?;
 
@@ -68,14 +61,7 @@ pub async fn get_agent_identity(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    // Verify ownership
-    let agent = state
-        .agent_service
-        .get_agent(&id)
-        .await?
-        .ok_or_else(|| GatewayError::not_found("Agent", &id))?;
-
-    check_ownership(&user, &agent)?;
+    get_authorized_agent_info(&state.state_store, &user, &id).await?;
 
     let identity = state.chain()?.get_agent_identity(&id).await?;
 

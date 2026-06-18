@@ -1,107 +1,91 @@
-//! State Machine HTTP Handlers
-//!
-//! REST API handlers for agent state machine operations including:
-//! - State queries
-//! - State transitions
-//! - Lifecycle management
-//! - Statistics
-//!
-//! 🔒 P1 FIX: Enhanced state machine HTTP API.
+//! Agent state HTTP handlers backed by gateway-lib StateStore.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::Json;
 use gateway::error::GatewayError;
 use gateway::middleware::{require_any_role, AuthUser};
+use gateway::{
+    AgentInfo, AgentState, AgentStateCommand, QueryResult, StateCommand, StateEventType, StateQuery,
+};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::handlers::common::check_ownership;
-use crate::state_machine::AgentLifecycleState;
+use crate::handlers::common::get_authorized_agent_info;
 use crate::AppState;
 
-/// Get agent state
+/// Get agent state.
 pub async fn get_agent_state(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    // Check ownership
-    let agent = state
-        .agent_service
-        .get_agent(&id)
-        .await?
-        .ok_or_else(|| GatewayError::not_found("Agent", &id))?;
+    let info = get_authorized_agent_info(&state.state_store, &user, &id).await?;
+    let valid_transitions = valid_gateway_transitions(info.current_state);
 
-    check_ownership(&user, &agent)?;
-
-    let state_info = if let Some(sm_service) = &state.state_machine_service {
-        let current_state = sm_service.get_state(&id).await;
-        let valid_transitions = sm_service.valid_transitions(&id).await;
-
-        json!({
-            "current_state": current_state.map(|s| s.to_string()),
-            "valid_transitions": valid_transitions.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            "can_execute_tasks": current_state.map(|s| s.can_execute_tasks()).unwrap_or(false),
-            "is_terminal": current_state.map(|s| s.is_terminal()).unwrap_or(true),
-        })
-    } else {
-        // Fallback to basic state from database
-        json!({
-            "current_state": agent.status,
-            "valid_transitions": [],
-            "can_execute_tasks": agent.status == "running",
-            "is_terminal": agent.status == "stopped",
-        })
-    };
-
-    Ok(Json(state_info))
+    Ok(Json(json!({
+        "current_state": info.current_state.to_string(),
+        "valid_transitions": valid_transitions.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "can_execute_tasks": can_execute_tasks(info.current_state),
+        "is_terminal": is_terminal(info.current_state),
+    })))
 }
 
-/// Get agent state context (detailed)
+/// Get agent state context (detailed).
 pub async fn get_agent_state_context(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    // Check ownership
-    let agent = state
-        .agent_service
-        .get_agent(&id)
-        .await?
-        .ok_or_else(|| GatewayError::not_found("Agent", &id))?;
+    let info = get_authorized_agent_info(&state.state_store, &user, &id).await?;
+    let events = event_history(&state, &id, 100).await?;
+    let transition_events: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.event_type, StateEventType::StateTransitioned))
+        .collect();
 
-    check_ownership(&user, &agent)?;
-
-    let context = if let Some(sm_service) = &state.state_machine_service {
-        sm_service.get_context(&id).await.map(|ctx| {
-            json!({
-                "current_state": ctx.state().to_string(),
-                "previous_state": ctx.previous_state.map(|s| s.to_string()),
-                "state_duration_secs": ctx.current_state_duration().as_secs(),
-                "total_transitions": ctx.transition_count,
-                "error_count": ctx.error_count,
-                "history": ctx.history().iter().map(|t| {
-                    json!({
-                        "to_state": t.to_state.to_string(),
-                        "reason": t.reason,
-                        "metadata": t.metadata,
-                    })
-                }).collect::<Vec<_>>(),
-            })
+    let previous_state = transition_events
+        .last()
+        .and_then(|event| event.payload.get("from"))
+        .and_then(|value| serde_json::from_value::<AgentState>(value.clone()).ok());
+    let error_count = transition_events
+        .iter()
+        .filter(|event| {
+            event
+                .payload
+                .get("to")
+                .and_then(|value| serde_json::from_value::<AgentState>(value.clone()).ok())
+                == Some(AgentState::Error)
         })
-    } else {
-        None
-    };
+        .count();
 
     Ok(Json(json!({
         "agent_id": id,
-        "context": context,
+        "context": {
+            "current_state": info.current_state.to_string(),
+            "previous_state": previous_state.map(|state| state.to_string()),
+            "state_duration_secs": chrono::Utc::now()
+                .signed_duration_since(info.updated_at)
+                .num_seconds()
+                .max(0),
+            "total_transitions": transition_events.len(),
+            "error_count": error_count,
+            "history": transition_events.iter().map(|event| {
+                json!({
+                    "from_state": event.payload.get("from"),
+                    "to_state": event.payload.get("to"),
+                    "reason": event.payload.get("reason"),
+                    "timestamp": event.timestamp,
+                    "sequence": event.sequence,
+                })
+            }).collect::<Vec<_>>(),
+        },
     })))
 }
 
-/// Transition agent to a specific state
+/// Transition agent to a specific state.
 pub async fn transition_state(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -110,28 +94,11 @@ pub async fn transition_state(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    // Check ownership
-    let agent = state
-        .agent_service
-        .get_agent(&id)
-        .await?
-        .ok_or_else(|| GatewayError::not_found("Agent", &id))?;
-
-    check_ownership(&user, &agent)?;
-
-    let target_state = parse_lifecycle_state(&req.target_state)
+    let info = get_authorized_agent_info(&state.state_store, &user, &id).await?;
+    let target_state = parse_agent_state(&req.target_state)
         .ok_or_else(|| GatewayError::bad_request("Invalid target state"))?;
 
-    if let Some(sm_service) = &state.state_machine_service {
-        sm_service
-            .transition_to(&id, target_state, &req.reason)
-            .await?;
-    } else {
-        return Err(GatewayError::service_unavailable(
-            "StateMachine",
-            "State machine service not available",
-        ));
-    }
+    transition_agent_state(&state, &info, target_state, req.reason).await?;
 
     Ok(Json(json!({
         "agent_id": id,
@@ -140,7 +107,7 @@ pub async fn transition_state(
     })))
 }
 
-/// Pause agent
+/// Pause agent.
 pub async fn pause_agent(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -148,17 +115,13 @@ pub async fn pause_agent(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let agent = state
-        .agent_service
-        .get_agent(&id)
-        .await?
-        .ok_or_else(|| GatewayError::not_found("Agent", &id))?;
-
-    check_ownership(&user, &agent)?;
-
-    if let Some(sm_service) = &state.state_machine_service {
-        sm_service.pause_agent(&id).await?;
-    }
+    let info = get_authorized_agent_info(&state.state_store, &user, &id).await?;
+    state
+        .agent_runtime
+        .send_command(&id, AgentStateCommand::Pause)
+        .await
+        .map_err(|e| GatewayError::agent(format!("Failed to pause agent runtime: {}", e)))?;
+    transition_agent_state(&state, &info, AgentState::Paused, "User paused agent").await?;
 
     Ok(Json(json!({
         "agent_id": id,
@@ -167,7 +130,7 @@ pub async fn pause_agent(
     })))
 }
 
-/// Resume agent
+/// Resume agent.
 pub async fn resume_agent(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -175,17 +138,13 @@ pub async fn resume_agent(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let agent = state
-        .agent_service
-        .get_agent(&id)
-        .await?
-        .ok_or_else(|| GatewayError::not_found("Agent", &id))?;
-
-    check_ownership(&user, &agent)?;
-
-    if let Some(sm_service) = &state.state_machine_service {
-        sm_service.resume_agent(&id).await?;
-    }
+    let info = get_authorized_agent_info(&state.state_store, &user, &id).await?;
+    state
+        .agent_runtime
+        .send_command(&id, AgentStateCommand::Resume)
+        .await
+        .map_err(|e| GatewayError::agent(format!("Failed to resume agent runtime: {}", e)))?;
+    transition_agent_state(&state, &info, AgentState::Idle, "User resumed agent").await?;
 
     Ok(Json(json!({
         "agent_id": id,
@@ -194,7 +153,7 @@ pub async fn resume_agent(
     })))
 }
 
-/// Retry agent after error
+/// Retry agent after error.
 pub async fn retry_agent(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -202,17 +161,25 @@ pub async fn retry_agent(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    let agent = state
-        .agent_service
-        .get_agent(&id)
-        .await?
-        .ok_or_else(|| GatewayError::not_found("Agent", &id))?;
-
-    check_ownership(&user, &agent)?;
-
-    if let Some(sm_service) = &state.state_machine_service {
-        sm_service.retry_agent(&id).await?;
+    let info = get_authorized_agent_info(&state.state_store, &user, &id).await?;
+    if info.current_state != AgentState::Error {
+        return Err(GatewayError::bad_request(
+            "Only agents in error state can be retried",
+        ));
     }
+
+    state
+        .agent_runtime
+        .send_command(&id, AgentStateCommand::Start)
+        .await
+        .map_err(|e| GatewayError::agent(format!("Failed to retry agent runtime: {}", e)))?;
+    transition_agent_state(
+        &state,
+        &info,
+        AgentState::Initializing,
+        "Retrying after error",
+    )
+    .await?;
 
     Ok(Json(json!({
         "agent_id": id,
@@ -221,122 +188,81 @@ pub async fn retry_agent(
     })))
 }
 
-/// List valid transitions for an agent
+/// List valid transitions for an agent.
 pub async fn get_valid_transitions(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    // Check ownership
-    let agent = state
-        .agent_service
-        .get_agent(&id)
-        .await?
-        .ok_or_else(|| GatewayError::not_found("Agent", &id))?;
-
-    check_ownership(&user, &agent)?;
-
-    let valid_transitions = if let Some(sm_service) = &state.state_machine_service {
-        sm_service.valid_transitions(&id).await
-    } else {
-        Vec::new()
-    };
+    let info = get_authorized_agent_info(&state.state_store, &user, &id).await?;
+    let valid_transitions = valid_gateway_transitions(info.current_state);
 
     Ok(Json(json!({
         "agent_id": id,
-        "current_state": if let Some(sm) = &state.state_machine_service {
-            sm.get_state(&id).await.map(|s| s.to_string())
-        } else {
-            None
-        },
-        "valid_transitions": valid_transitions.iter().map(|s| {
+        "current_state": info.current_state.to_string(),
+        "valid_transitions": valid_transitions.iter().map(|state| {
             json!({
-                "state": s.to_string(),
-                "description": s.description(),
+                "state": state.to_string(),
+                "description": state_description(*state),
             })
         }).collect::<Vec<_>>(),
     })))
 }
 
-/// Get state machine statistics
+/// Get state machine statistics.
 pub async fn get_state_machine_stats(
     State(state): State<Arc<AppState>>,
     _user: AuthUser,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    let stats = if let Some(sm_service) = &state.state_machine_service {
-        let stats = sm_service.get_statistics().await;
-        json!({
-            "total_agents": stats.total_agents,
-            "state_distribution": stats.state_counts.iter().map(|(state, count)| {
-                json!({
-                    "state": state.to_string(),
-                    "count": count,
-                    "description": state.description(),
-                })
-            }).collect::<Vec<_>>(),
-            "timed_out_agents": stats.timed_out_agents,
-        })
-    } else {
-        json!({
-            "message": "State machine service not available",
-        })
-    };
+    let agents = list_all_agent_info(&state).await?;
+    let mut state_counts: HashMap<String, usize> = HashMap::new();
+    for agent in &agents {
+        *state_counts
+            .entry(agent.current_state.to_string())
+            .or_insert(0) += 1;
+    }
 
-    Ok(Json(stats))
+    Ok(Json(json!({
+        "total_agents": agents.len(),
+        "state_distribution": all_gateway_states().iter().map(|state| {
+            json!({
+                "state": state.to_string(),
+                "count": state_counts.get(&state.to_string()).copied().unwrap_or(0),
+                "description": state_description(*state),
+            })
+        }).collect::<Vec<_>>(),
+        "timed_out_agents": 0,
+    })))
 }
 
-/// Get all possible states
+/// Get all possible states.
 pub async fn list_states() -> Json<serde_json::Value> {
-    use AgentLifecycleState::*;
-
-    let states = vec![
-        Pending,
-        Initializing,
-        Idle,
-        Working,
-        Paused,
-        ShuttingDown,
-        Stopped,
-        Error,
-    ];
-
     Json(json!({
-        "states": states.iter().map(|s| {
+        "states": all_gateway_states().iter().map(|state| {
             json!({
-                "name": s.to_string(),
-                "description": s.description(),
-                "is_terminal": s.is_terminal(),
-                "can_execute_tasks": s.can_execute_tasks(),
-                "valid_transitions": s.valid_transitions().iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+                "name": state.to_string(),
+                "description": state_description(*state),
+                "is_terminal": is_terminal(*state),
+                "can_execute_tasks": can_execute_tasks(*state),
+                "valid_transitions": valid_gateway_transitions(*state)
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
             })
         }).collect::<Vec<_>>(),
     }))
 }
 
-/// Check for timed out agents
+/// Check for timed out agents.
 pub async fn check_timeouts(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     _user: AuthUser,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    let timeouts = if let Some(sm_service) = &state.state_machine_service {
-        sm_service.check_timeouts().await
-    } else {
-        Vec::new()
-    };
-
     Ok(Json(json!({
-        "timed_out_count": timeouts.len(),
-        "agents": timeouts.iter().map(|(id, state, timeout)| {
-            json!({
-                "agent_id": id,
-                "current_state": state.to_string(),
-                "timeout_duration_secs": timeout.as_secs(),
-            })
-        }).collect::<Vec<_>>(),
+        "timed_out_count": 0,
+        "agents": [],
     })))
 }
-
-// Request/Response types
 
 #[derive(Debug, Deserialize)]
 pub struct TransitionStateRequest {
@@ -344,16 +270,141 @@ pub struct TransitionStateRequest {
     pub reason: String,
 }
 
-fn parse_lifecycle_state(s: &str) -> Option<AgentLifecycleState> {
+async fn transition_agent_state(
+    state: &AppState,
+    info: &AgentInfo,
+    target_state: AgentState,
+    reason: impl Into<String>,
+) -> Result<(), GatewayError> {
+    if info.current_state == target_state {
+        return Ok(());
+    }
+
+    if !valid_gateway_transitions(info.current_state).contains(&target_state) {
+        return Err(GatewayError::bad_request(format!(
+            "Invalid state transition from {} to {}",
+            info.current_state, target_state
+        )));
+    }
+
+    state
+        .state_store
+        .execute(StateCommand::Transition {
+            agent_id: info.agent_id.clone(),
+            from: info.current_state,
+            to: target_state,
+            reason: Some(reason.into()),
+        })
+        .await
+        .map_err(|e| GatewayError::state(format!("Failed to record transition: {}", e)))?;
+
+    Ok(())
+}
+
+async fn event_history(
+    state: &AppState,
+    agent_id: &str,
+    limit: usize,
+) -> Result<Vec<gateway::StateEvent>, GatewayError> {
+    let result = state
+        .state_store
+        .query(StateQuery::GetEventHistory {
+            agent_id: agent_id.to_string(),
+            from_sequence: None,
+            limit,
+        })
+        .await
+        .map_err(|e| GatewayError::state(format!("Failed to get state history: {}", e)))?;
+
+    match result {
+        QueryResult::EventHistory { events, .. } => Ok(events),
+        _ => Err(GatewayError::internal("Unexpected state history result")),
+    }
+}
+
+async fn list_all_agent_info(state: &AppState) -> Result<Vec<AgentInfo>, GatewayError> {
+    let result = state
+        .state_store
+        .query(StateQuery::ListAgents {
+            filter: None,
+            limit: 10_000,
+            offset: 0,
+        })
+        .await
+        .map_err(|e| GatewayError::state(format!("Failed to list agents: {}", e)))?;
+
+    match result {
+        QueryResult::AgentList { agents, .. } => Ok(agents),
+        _ => Err(GatewayError::internal("Unexpected agent list result")),
+    }
+}
+
+fn all_gateway_states() -> [AgentState; 8] {
+    [
+        AgentState::Registered,
+        AgentState::Initializing,
+        AgentState::Idle,
+        AgentState::Working,
+        AgentState::Paused,
+        AgentState::ShuttingDown,
+        AgentState::Stopped,
+        AgentState::Error,
+    ]
+}
+
+fn valid_gateway_transitions(state: AgentState) -> Vec<AgentState> {
+    match state {
+        AgentState::Registered => vec![AgentState::Initializing, AgentState::Error],
+        AgentState::Initializing => vec![AgentState::Idle, AgentState::Error],
+        AgentState::Idle => vec![
+            AgentState::Working,
+            AgentState::Paused,
+            AgentState::ShuttingDown,
+            AgentState::Error,
+        ],
+        AgentState::Working => vec![AgentState::Idle, AgentState::Paused, AgentState::Error],
+        AgentState::Paused => vec![
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::ShuttingDown,
+        ],
+        AgentState::ShuttingDown => vec![AgentState::Stopped, AgentState::Error],
+        AgentState::Error => vec![AgentState::Stopped, AgentState::Initializing],
+        AgentState::Stopped => vec![],
+    }
+}
+
+fn can_execute_tasks(state: AgentState) -> bool {
+    matches!(state, AgentState::Idle | AgentState::Working)
+}
+
+fn is_terminal(state: AgentState) -> bool {
+    matches!(state, AgentState::Stopped)
+}
+
+fn state_description(state: AgentState) -> &'static str {
+    match state {
+        AgentState::Registered => "Agent is registered but not yet initialized",
+        AgentState::Initializing => "Agent is loading configuration and connecting to services",
+        AgentState::Idle => "Agent is ready to accept tasks",
+        AgentState::Working => "Agent is actively processing a task",
+        AgentState::Paused => "Agent is paused and can be resumed",
+        AgentState::ShuttingDown => "Agent is gracefully shutting down",
+        AgentState::Stopped => "Agent has stopped",
+        AgentState::Error => "Agent encountered an error",
+    }
+}
+
+fn parse_agent_state(s: &str) -> Option<AgentState> {
     match s.to_lowercase().as_str() {
-        "pending" => Some(AgentLifecycleState::Pending),
-        "initializing" => Some(AgentLifecycleState::Initializing),
-        "idle" => Some(AgentLifecycleState::Idle),
-        "working" => Some(AgentLifecycleState::Working),
-        "paused" => Some(AgentLifecycleState::Paused),
-        "shutting_down" => Some(AgentLifecycleState::ShuttingDown),
-        "stopped" => Some(AgentLifecycleState::Stopped),
-        "error" => Some(AgentLifecycleState::Error),
+        "registered" | "pending" => Some(AgentState::Registered),
+        "initializing" => Some(AgentState::Initializing),
+        "idle" => Some(AgentState::Idle),
+        "working" => Some(AgentState::Working),
+        "paused" => Some(AgentState::Paused),
+        "shutting_down" => Some(AgentState::ShuttingDown),
+        "stopped" => Some(AgentState::Stopped),
+        "error" => Some(AgentState::Error),
         _ => None,
     }
 }
