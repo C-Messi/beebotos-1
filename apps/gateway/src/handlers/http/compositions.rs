@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::error::GatewayError;
-use crate::services::agent_runtime_manager::GatewayLLMInterface;
+use crate::services::gateway_llm_interface::GatewayLLMInterface;
 use crate::AppState;
 
 /// Create composition request (YAML or JSON)

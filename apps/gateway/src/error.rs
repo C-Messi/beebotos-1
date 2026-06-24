@@ -138,7 +138,7 @@ impl From<AppError> for GatewayError {
 ///
 /// Usage:
 /// ```rust
-/// let result = agent_runtime_manager
+/// let result = agent_runtime
 ///     .execute_task(&id, task)
 ///     .await
 ///     .map_err(convert_agent_error)?;

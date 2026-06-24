@@ -58,7 +58,6 @@ mod message_bus;
 mod middleware;
 mod models;
 mod services;
-mod state_machine;
 mod telemetry;
 mod updater;
 
@@ -82,31 +81,10 @@ use gateway::{RuntimeConfig as AgentRuntimeConfig, SandboxLevel, StateStore, Sta
 use tracing::{error, info, warn};
 
 use crate::config::{AppConfig, BeeBotOSConfig};
-use crate::handlers::http::agents;
 use crate::services::agent_resolver::AgentResolver;
-use crate::services::agent_runtime_manager::AgentRuntimeManager;
-// Channel Manager integration
-use crate::services::agent_service::AgentService;
 use crate::services::message_processor::MessageProcessor;
 
-/// Agent runtime info managed by this gateway
-///
-/// Tracks agent state in memory. Kernel integration is handled by AgentService.
-#[derive(Debug, Clone)]
-pub struct AgentRuntimeInfo {
-    pub id: String,
-    pub name: String,
-    pub status: String,
-    pub created_at: u64,
-    pub capabilities: Vec<String>,
-    /// Kernel information from AgentService
-    pub kernel_info: Option<crate::services::agent_service::AgentKernelInfo>,
-}
-
 /// Application state combining gateway-lib infrastructure with business state
-///
-/// Agent lifecycle is managed by AgentService which internally uses
-/// beebotos-kernel.
 ///
 /// 🔒 P0 FIX: Unified state management - using StateStore (CQRS) as single
 /// source of truth, removed duplicate in-memory HashMap.
@@ -121,17 +99,6 @@ pub struct AppState {
     pub state_store: Arc<gateway::StateStore>,
     /// Agent runtime (trait-based, decoupled from concrete implementation)
     pub agent_runtime: Arc<dyn gateway::AgentRuntime>,
-    /// Agent service for business logic (includes kernel integration)
-    /// DEPRECATED: Migrate to agent_runtime
-    pub agent_service: AgentService,
-    /// Agent runtime manager bridging gateway with beebotos_agents
-    /// DEPRECATED: Migrate to agent_runtime
-    pub agent_runtime_manager: Arc<AgentRuntimeManager>,
-    /// Unified state manager handle
-    /// DEPRECATED: Migrate to state_store
-    pub state_manager: beebotos_agents::StateManagerHandle,
-    /// Enhanced state machine service
-    pub state_machine_service: Option<Arc<crate::services::StateMachineService>>,
     /// Task monitor service for kernel fault awareness
     pub task_monitor: Option<Arc<crate::services::TaskMonitorService>>,
     /// Chain service for blockchain interactions
@@ -466,7 +433,7 @@ impl AppState {
                 ) as Arc<dyn beebotos_agents::ReActTraceSink>
             });
         let mut gateway_llm_interface =
-            crate::services::agent_runtime_manager::GatewayLLMInterface::new(llm_service.clone());
+            crate::services::gateway_llm_interface::GatewayLLMInterface::new(llm_service.clone());
         if let Some(ref sink) = react_trace_sink {
             gateway_llm_interface = gateway_llm_interface.with_react_trace_sink(sink.clone());
         }
@@ -621,9 +588,7 @@ impl AppState {
             gateway_runtime = gateway_runtime.with_react_trace_sink(sink.clone());
         }
 
-        // Attach system info provider after runtime is created so we can share
-        // the runtime's own state manager for agent inventory queries.
-        let gateway_state_manager = gateway_runtime.state_manager();
+        // Attach system info provider after runtime is created.
         gateway_runtime =
             gateway_runtime.with_system_info_provider(Arc::new(GatewaySystemInfoProvider::new(
                 cron_job_service
@@ -632,7 +597,7 @@ impl AppState {
                 webchat_service
                     .clone()
                     .expect("WebchatService must be initialized before AgentRuntime"),
-                gateway_state_manager,
+                state_store.clone(),
                 Some(cron_registration_tx),
             )));
 
@@ -645,52 +610,14 @@ impl AppState {
         let agent_runtime: Arc<dyn gateway::AgentRuntime> = Arc::new(gateway_runtime);
         info!("✅ AgentRuntime (trait-based) initialized with SkillRegistry and MCP");
 
-        // Legacy: Agent runtime manager bridges gateway with beebotos_agents
-        let mut agent_runtime_manager = AgentRuntimeManager::new_with_default_state_manager(
-            Some(kernel.clone()),
-            config.clone(),
-            llm_service.clone(),
-            memory_system.clone(),
-            Some(skill_registry.clone()),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to initialize AgentRuntimeManager: {}", e))?;
-        if let Some(ref sink) = react_trace_sink {
-            agent_runtime_manager = agent_runtime_manager.with_react_trace_sink(sink.clone());
-        }
-        let agent_runtime_manager = Arc::new(agent_runtime_manager);
-
-        // Legacy: AgentService now owns the kernel integration
-        let agent_service = AgentService::new(
-            db.clone(),
-            kernel.clone(),
-            agent_runtime_manager.clone(),
-            config.clone(),
-        );
-
         // Initialize webhook state (handlers registered later with dispatcher)
         let webhook_state = Arc::new(RwLock::new(
             handlers::http::webhooks::WebhookHandlerState::new(),
         ));
 
-        // Legacy: Get state manager handle from runtime manager
-        let state_manager = agent_runtime_manager.state_manager();
-
-        // Initialize enhanced state machine service
-        let state_machine_service = {
-            let service = Arc::new(crate::services::StateMachineService::new(
-                state_manager.clone(),
-            ));
-            info!("✅ StateMachineService initialized");
-            Some(service)
-        };
-
         // Initialize task monitor service for kernel fault awareness
         let task_monitor = {
-            let monitor = Arc::new(crate::services::TaskMonitorService::new(
-                kernel.clone(),
-                state_machine_service.clone(),
-            ));
+            let monitor = Arc::new(crate::services::TaskMonitorService::new(kernel.clone()));
             info!("✅ TaskMonitorService initialized");
             Some(monitor)
         };
@@ -906,10 +833,6 @@ impl AppState {
             db,
             state_store,
             agent_runtime,
-            agent_service,
-            agent_runtime_manager,
-            state_manager,
-            state_machine_service,
             task_monitor,
             chain_service,
             wallet_service,
@@ -964,7 +887,7 @@ impl AppState {
 struct GatewaySystemInfoProvider {
     cron_job_service: Arc<crate::services::CronJobService>,
     webchat_service: Arc<crate::services::webchat_service::WebchatService>,
-    state_manager: Arc<beebotos_agents::state_manager::AgentStateManager>,
+    state_store: Arc<gateway::StateStore>,
     cron_registration_tx:
         Option<tokio::sync::mpsc::UnboundedSender<crate::services::cron_job_service::CronJob>>,
 }
@@ -973,7 +896,7 @@ impl GatewaySystemInfoProvider {
     fn new(
         cron_job_service: Arc<crate::services::CronJobService>,
         webchat_service: Arc<crate::services::webchat_service::WebchatService>,
-        state_manager: Arc<beebotos_agents::state_manager::AgentStateManager>,
+        state_store: Arc<gateway::StateStore>,
         cron_registration_tx: Option<
             tokio::sync::mpsc::UnboundedSender<crate::services::cron_job_service::CronJob>,
         >,
@@ -981,7 +904,7 @@ impl GatewaySystemInfoProvider {
         Self {
             cron_job_service,
             webchat_service,
-            state_manager,
+            state_store,
             cron_registration_tx,
         }
     }
@@ -1107,25 +1030,32 @@ impl beebotos_agents::system_info::SystemInfoProvider for GatewaySystemInfoProvi
     async fn list_agents(
         &self,
     ) -> Result<Vec<beebotos_agents::system_info::AgentSummaryInfo>, String> {
-        let agent_ids = self.state_manager.list_agents().await;
-        let mut results = Vec::with_capacity(agent_ids.len());
+        let result = self
+            .state_store
+            .query(gateway::StateQuery::ListAgents {
+                filter: None,
+                limit: 10_000,
+                offset: 0,
+            })
+            .await
+            .map_err(|e| format!("Failed to list agents: {}", e))?;
 
-        for id in agent_ids {
-            if let Ok(record) = self.state_manager.get_record(&id).await {
-                results.push(beebotos_agents::system_info::AgentSummaryInfo {
-                    agent_id: id,
-                    state: record.state.to_string(),
-                    registered_at: Some(record.registered_at.to_rfc3339()),
-                    state_changed_at: Some(record.state_changed_at.to_rfc3339()),
-                    total_tasks: record.stats.total_tasks,
-                    successful_tasks: record.stats.successful_tasks,
-                    failed_tasks: record.stats.failed_tasks,
-                    last_error: record.last_error,
-                });
-            }
+        match result {
+            gateway::QueryResult::AgentList { agents, .. } => Ok(agents
+                .into_iter()
+                .map(|agent| beebotos_agents::system_info::AgentSummaryInfo {
+                    agent_id: agent.agent_id,
+                    state: agent.current_state.to_string(),
+                    registered_at: Some(agent.created_at.to_rfc3339()),
+                    state_changed_at: Some(agent.updated_at.to_rfc3339()),
+                    total_tasks: agent.task_count,
+                    successful_tasks: agent.success_count,
+                    failed_tasks: agent.failure_count,
+                    last_error: None,
+                })
+                .collect()),
+            _ => Err("Unexpected agent list result".to_string()),
         }
-
-        Ok(results)
     }
 }
 
@@ -2350,7 +2280,6 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
     // Protected API routes
     let api_routes = Router::new()
         // Agent API
-        .route("/api/v1/agents/:id", put(agents::update_agent))
         .route(
             "/api/v1/agents/:id/logs",
             get(handlers::http::agent_logs::get_agent_logs),
@@ -2458,6 +2387,10 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
         )
         .route(
             "/api/v1/agents/:id",
+            put(handlers::http::agents_v2::update_agent_v2),
+        )
+        .route(
+            "/api/v1/agents/:id",
             delete(handlers::http::agents_v2::delete_agent_v2),
         )
         .route(
@@ -2502,10 +2435,13 @@ pub fn create_router(app_state: Arc<AppState>, gateway_state: Arc<GatewayState>)
             post(handlers::http::agents_v2::unbind_agent_channel_v2),
         )
         // Capability API
-        .route("/api/v1/capabilities", get(agents::list_capability_types))
+        .route(
+            "/api/v1/capabilities",
+            get(handlers::http::capabilities::list_capability_types),
+        )
         .route(
             "/api/v1/capabilities/validate",
-            post(agents::validate_capabilities),
+            post(handlers::http::capabilities::validate_capabilities),
         )
         // Chain API
         .route(
@@ -3091,8 +3027,19 @@ async fn system_status_handler(
     // Use full health check for detailed status
     let health = health::check_system_full(&state).await;
 
-    // Get agent count from unified state manager (single source of truth)
-    let agent_count = state.state_manager.list_agents().await.len();
+    // Get agent count from StateStore (single source of truth)
+    let agent_count = match state
+        .state_store
+        .query(gateway::StateQuery::ListAgents {
+            filter: None,
+            limit: 1,
+            offset: 0,
+        })
+        .await
+    {
+        Ok(gateway::QueryResult::AgentList { total, .. }) => total,
+        _ => 0,
+    };
 
     Ok(axum::Json(serde_json::json!({
         "service": "beebotos-gateway",
@@ -3470,6 +3417,21 @@ mod tests {
         let gateway_state = Arc::new(GatewayState::new(gateway_config, rate_limiter));
 
         let _router = create_router(app_state, gateway_state);
+    }
+
+    #[test]
+    fn agent_update_route_uses_v2_handler() {
+        let source = include_str!("main.rs");
+        let legacy_update_route = concat!("put(", "agents::", "update_agent", ")");
+
+        assert!(
+            source.contains("put(handlers::http::agents_v2::update_agent_v2)"),
+            "PUT /api/v1/agents/:id should route through the AgentRuntime + StateStore handler"
+        );
+        assert!(
+            !source.contains(legacy_update_route),
+            "PUT /api/v1/agents/:id must stay on the AgentRuntime + StateStore handler"
+        );
     }
 
     // ------------------------------------------------------------------

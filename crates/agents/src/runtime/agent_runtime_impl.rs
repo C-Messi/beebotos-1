@@ -1080,11 +1080,45 @@ impl AgentRuntime for GatewayAgentRuntime {
     async fn stop(&self, agent_id: &AgentId) -> Result<()> {
         info!(agent_id = %agent_id, "Stopping agent");
 
-        // Transition state
-        self.state_manager
-            .transition(agent_id, StateTransition::Shutdown)
+        let current_state = self
+            .state_manager
+            .get_state(agent_id)
             .await
-            .map_err(|e| GatewayError::agent(format!("Failed to stop agent: {}", e)))?;
+            .map_err(|e| GatewayError::agent(format!("Failed to get agent state: {}", e)))?;
+
+        match current_state {
+            AgentState::Stopped => {}
+            AgentState::Registered => {
+                self.state_manager
+                    .transition(agent_id, StateTransition::Start)
+                    .await
+                    .map_err(|e| GatewayError::agent(format!("Failed to stop agent: {}", e)))?;
+                self.state_manager
+                    .transition(agent_id, StateTransition::Shutdown)
+                    .await
+                    .map_err(|e| GatewayError::agent(format!("Failed to stop agent: {}", e)))?;
+                self.state_manager
+                    .transition(agent_id, StateTransition::Stopped)
+                    .await
+                    .map_err(|e| GatewayError::agent(format!("Failed to stop agent: {}", e)))?;
+            }
+            AgentState::ShuttingDown => {
+                self.state_manager
+                    .transition(agent_id, StateTransition::Stopped)
+                    .await
+                    .map_err(|e| GatewayError::agent(format!("Failed to stop agent: {}", e)))?;
+            }
+            _ => {
+                self.state_manager
+                    .transition(agent_id, StateTransition::Shutdown)
+                    .await
+                    .map_err(|e| GatewayError::agent(format!("Failed to stop agent: {}", e)))?;
+                self.state_manager
+                    .transition(agent_id, StateTransition::Stopped)
+                    .await
+                    .map_err(|e| GatewayError::agent(format!("Failed to stop agent: {}", e)))?;
+            }
+        }
 
         // Remove from active tasks
         self.agent_tasks.write().await.remove(agent_id);
@@ -1309,9 +1343,107 @@ impl AgentRuntime for GatewayAgentRuntime {
         })
     }
 
-    async fn update_config(&self, agent_id: &AgentId, _config: GatewayAgentConfig) -> Result<()> {
-        // TODO: Implement config update
-        warn!(agent_id = %agent_id, "Config update not yet implemented");
+    async fn update_config(&self, agent_id: &AgentId, config: GatewayAgentConfig) -> Result<()> {
+        info!(agent_id = %agent_id, "Updating agent config");
+
+        let agent_config = self.convert_config(&config);
+        let now = Utc::now();
+        let mut updated_active_handle = false;
+
+        {
+            let mut tasks = self.agent_tasks.write().await;
+            if let Some(handle) = tasks.get_mut(agent_id) {
+                handle.config = agent_config.clone();
+                updated_active_handle = true;
+            }
+        }
+
+        if !updated_active_handle {
+            self.state_manager
+                .get_state(agent_id)
+                .await
+                .map_err(|_| GatewayError::not_found("agent", agent_id))?;
+        }
+
+        self.state_manager
+            .update_metadata(agent_id, "name", config.name.clone())
+            .await
+            .map_err(|e| GatewayError::agent(format!("Failed to update metadata: {}", e)))?;
+        self.state_manager
+            .update_metadata(agent_id, "version", config.version.clone())
+            .await
+            .map_err(|e| GatewayError::agent(format!("Failed to update metadata: {}", e)))?;
+        self.state_manager
+            .update_metadata(
+                agent_id,
+                "capabilities",
+                agent_config.capabilities.join(","),
+            )
+            .await
+            .map_err(|e| GatewayError::agent(format!("Failed to update metadata: {}", e)))?;
+        self.state_manager
+            .update_metadata(
+                agent_id,
+                "model_config",
+                serde_json::to_string(&agent_config.models).unwrap_or_default(),
+            )
+            .await
+            .map_err(|e| GatewayError::agent(format!("Failed to update metadata: {}", e)))?;
+        self.state_manager
+            .update_metadata(
+                agent_id,
+                "memory_config",
+                serde_json::to_string(&agent_config.memory).unwrap_or_default(),
+            )
+            .await
+            .map_err(|e| GatewayError::agent(format!("Failed to update metadata: {}", e)))?;
+        self.state_manager
+            .update_metadata(
+                agent_id,
+                "personality_config",
+                serde_json::to_string(&agent_config.personality).unwrap_or_default(),
+            )
+            .await
+            .map_err(|e| GatewayError::agent(format!("Failed to update metadata: {}", e)))?;
+
+        if let Some(persistence) = self.state_manager.persistence() {
+            let created_at = match persistence.load_config(agent_id).await {
+                Ok(Some(existing)) => existing.created_at,
+                Ok(None) => now,
+                Err(e) => {
+                    warn!(
+                        agent_id = %agent_id,
+                        "Failed to load existing persisted config timestamp: {}",
+                        e
+                    );
+                    now
+                }
+            };
+            let persisted_config = crate::state_manager::PersistedAgentConfig {
+                agent_id: agent_id.clone(),
+                name: agent_config.name.clone(),
+                description: agent_config.description.clone(),
+                version: agent_config.version.clone(),
+                capabilities: agent_config.capabilities.clone(),
+                model_config: agent_config.models.clone(),
+                memory_config: agent_config.memory.clone(),
+                personality_config: agent_config.personality.clone(),
+                created_at,
+                updated_at: now,
+            };
+
+            persistence
+                .save_config(&persisted_config)
+                .await
+                .map_err(|e| GatewayError::agent(format!("Failed to persist config: {}", e)))?;
+        }
+
+        self.state_manager
+            .persist_state(agent_id)
+            .await
+            .map_err(|e| GatewayError::agent(format!("Failed to persist state: {}", e)))?;
+
+        info!(agent_id = %agent_id, "Agent config updated");
         Ok(())
     }
 

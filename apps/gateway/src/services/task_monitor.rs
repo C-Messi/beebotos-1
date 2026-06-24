@@ -16,7 +16,6 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, instrument, warn};
 
 use crate::error::AppError;
-use crate::state_machine::AgentLifecycleState;
 
 /// Task monitor service for tracking kernel task lifecycle
 #[allow(dead_code)]
@@ -25,8 +24,6 @@ pub struct TaskMonitorService {
     event_tx: mpsc::Sender<TaskEvent>,
     /// Active task monitors
     active_monitors: Arc<RwLock<HashMap<String, TaskMonitorHandle>>>,
-    /// State machine service reference (for state updates)
-    state_machine_service: Option<Arc<crate::services::StateMachineService>>,
     /// Kernel reference
     kernel: Arc<Kernel>,
     /// Background processor handle
@@ -90,19 +87,12 @@ impl TaskMonitorHandle {
 
 impl TaskMonitorService {
     /// Create new task monitor service
-    pub fn new(
-        kernel: Arc<Kernel>,
-        state_machine_service: Option<Arc<crate::services::StateMachineService>>,
-    ) -> Self {
+    pub fn new(kernel: Arc<Kernel>) -> Self {
         let (event_tx, event_rx) = mpsc::channel(100);
 
         // Start background event processor
         let active_monitors = Arc::new(RwLock::new(HashMap::new()));
-        let processor = Self::start_event_processor(
-            event_rx,
-            active_monitors.clone(),
-            state_machine_service.clone(),
-        );
+        let processor = Self::start_event_processor(event_rx, active_monitors.clone());
 
         // 🟢 P1 FIX: Store the processor handle directly during construction
         // so shutdown() can abort it. The previous code used a local variable
@@ -110,7 +100,6 @@ impl TaskMonitorService {
         Self {
             event_tx,
             active_monitors,
-            state_machine_service,
             kernel,
             processor_handle: Mutex::new(Some(processor)),
         }
@@ -243,7 +232,6 @@ impl TaskMonitorService {
     fn start_event_processor(
         mut event_rx: mpsc::Receiver<TaskEvent>,
         active_monitors: Arc<RwLock<HashMap<String, TaskMonitorHandle>>>,
-        state_machine_service: Option<Arc<crate::services::StateMachineService>>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
@@ -264,70 +252,8 @@ impl TaskMonitorService {
                         agent_id.clone()
                     }
                 };
-
-                // Update state machine
-                if let Some(sm_service) = &state_machine_service {
-                    match Self::handle_event(sm_service, &event).await {
-                        Ok(()) => {}
-                        Err(e) => {
-                            error!("Failed to handle task event: {}", e);
-                        }
-                    }
-                }
             }
         })
-    }
-
-    /// Handle task event and update state machine
-    async fn handle_event(
-        sm_service: &Arc<crate::services::StateMachineService>,
-        event: &TaskEvent,
-    ) -> Result<(), AppError> {
-        match event {
-            TaskEvent::Started { agent_id, .. } => {
-                info!("Agent {} task started", agent_id);
-                // State should already be Initializing from spawn
-            }
-            TaskEvent::Completed {
-                agent_id,
-                duration_ms,
-                ..
-            } => {
-                info!("Agent {} task completed in {}ms", agent_id, duration_ms);
-                // Transition from Working to Idle
-                if sm_service.get_state(agent_id).await == Some(AgentLifecycleState::Working) {
-                    sm_service.complete_task(agent_id, true).await?;
-                }
-            }
-            TaskEvent::Failed {
-                agent_id, error, ..
-            } => {
-                error!("Agent {} task failed: {}", agent_id, error);
-                // Transition to Error state
-                sm_service.report_error(agent_id, error.clone()).await?;
-            }
-            TaskEvent::Cancelled { agent_id, .. } => {
-                info!("Agent {} task cancelled", agent_id);
-                // Transition to Stopped
-                sm_service.stop_agent(agent_id).await?;
-            }
-            TaskEvent::TimedOut {
-                agent_id,
-                timeout_secs,
-                ..
-            } => {
-                error!("Agent {} task timed out after {}s", agent_id, timeout_secs);
-                // Transition to Error with timeout message
-                sm_service
-                    .report_error(
-                        agent_id,
-                        format!("Task timed out after {} seconds", timeout_secs),
-                    )
-                    .await?;
-            }
-        }
-
-        Ok(())
     }
 
     /// Get service statistics

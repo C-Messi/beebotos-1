@@ -13,8 +13,8 @@ use axum::Json;
 use gateway::error::GatewayError;
 use gateway::middleware::{require_any_role, AuthUser};
 use gateway::{
-    AgentConfigBuilder, AgentState, AgentStateCommand, LlmConfig, MemoryConfig, QueryResult,
-    StateCommand, StateQuery, TaskConfig,
+    AgentCapability, AgentConfig, AgentConfigBuilder, AgentInfo, AgentState, AgentStateCommand,
+    LlmConfig, MemoryConfig, QueryResult, StateCommand, StateQuery, TaskConfig,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 
 use crate::models::{
     AgentResponse, CreateAgentRequest, ModelInfo, PaginatedResponse, PaginationParams,
+    UpdateAgentRequest,
 };
 use crate::AppState;
 
@@ -64,6 +65,145 @@ fn check_v2_ownership(
     }
 }
 
+async fn get_authorized_agent_info(
+    state: &AppState,
+    user: &AuthUser,
+    agent_id: &str,
+) -> Result<AgentInfo, GatewayError> {
+    let query_result = state
+        .state_store
+        .query(StateQuery::GetAgentInfo {
+            agent_id: agent_id.to_string(),
+        })
+        .await
+        .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
+
+    match query_result {
+        QueryResult::AgentInfo {
+            agent_id,
+            config,
+            current_state,
+            metadata,
+            created_at,
+            updated_at,
+            task_count,
+            success_count,
+            failure_count,
+        } => {
+            check_v2_ownership(user, &metadata)?;
+            Ok(AgentInfo {
+                agent_id,
+                config,
+                current_state,
+                metadata,
+                created_at,
+                updated_at,
+                task_count,
+                success_count,
+                failure_count,
+            })
+        }
+        _ => Err(GatewayError::not_found("Agent", agent_id)),
+    }
+}
+
+fn agent_info_to_response(info: AgentInfo) -> AgentResponse {
+    AgentResponse {
+        id: info.agent_id,
+        name: info.config.name,
+        description: Some(info.config.description),
+        status: info.current_state.to_string(),
+        capabilities: info
+            .config
+            .capabilities
+            .into_iter()
+            .map(|c| c.name)
+            .collect(),
+        model: ModelInfo {
+            provider: info.config.llm_config.provider,
+            name: info.config.llm_config.model,
+        },
+        created_at: info.created_at,
+        updated_at: info.updated_at,
+        last_heartbeat: None,
+    }
+}
+
+fn capability_from_name(name: String) -> AgentCapability {
+    AgentCapability {
+        name,
+        version: "1.0".to_string(),
+        params: HashMap::new(),
+    }
+}
+
+fn apply_update_request(
+    mut config: AgentConfig,
+    req: UpdateAgentRequest,
+) -> Result<AgentConfig, GatewayError> {
+    if req.status.is_some() {
+        return Err(GatewayError::bad_request(
+            "Agent status changes must use lifecycle endpoints",
+        ));
+    }
+
+    if let Some(name) = req.name {
+        if name.trim().is_empty() {
+            return Err(GatewayError::validation(vec![
+                gateway::error::ValidationError {
+                    field: "name".to_string(),
+                    message: "Name is required".to_string(),
+                    code: "required".to_string(),
+                },
+            ]));
+        }
+        config.name = name;
+    }
+
+    if let Some(description) = req.description {
+        config.description = description;
+    }
+
+    if let Some(capabilities) = req.capabilities {
+        config.capabilities = capabilities.into_iter().map(capability_from_name).collect();
+    }
+
+    if let Some(provider) = req.model_provider {
+        config.llm_config.provider = provider;
+    }
+
+    if let Some(model) = req.model_name {
+        config.llm_config.model = model;
+    }
+
+    Ok(config)
+}
+
+async fn set_agent_state(
+    state: &AppState,
+    agent_id: &str,
+    from: AgentState,
+    to: AgentState,
+    reason: impl Into<String>,
+) -> Result<(), GatewayError> {
+    if from == to {
+        return Ok(());
+    }
+
+    state
+        .state_store
+        .execute(StateCommand::Transition {
+            agent_id: agent_id.to_string(),
+            from,
+            to,
+            reason: Some(reason.into()),
+        })
+        .await
+        .map_err(|e| GatewayError::state(format!("Failed to record transition: {}", e)))?;
+
+    Ok(())
+}
+
 /// List all agents with pagination (V2)
 ///
 /// Uses StateStore (CQRS) for efficient querying.
@@ -101,29 +241,7 @@ pub async fn list_agents_v2(
     };
     let total = agents.len();
 
-    // Convert to response models
-    let responses: Vec<AgentResponse> = agents
-        .into_iter()
-        .map(|info| AgentResponse {
-            id: info.agent_id,
-            name: info.config.name,
-            description: Some(info.config.description),
-            status: info.current_state.to_string(),
-            capabilities: info
-                .config
-                .capabilities
-                .into_iter()
-                .map(|c| c.name)
-                .collect(),
-            model: ModelInfo {
-                provider: info.config.llm_config.provider,
-                name: info.config.llm_config.model,
-            },
-            created_at: info.created_at,
-            updated_at: info.updated_at,
-            last_heartbeat: None,
-        })
-        .collect();
+    let responses: Vec<AgentResponse> = agents.into_iter().map(agent_info_to_response).collect();
 
     Ok(Json(PaginatedResponse::new(
         responses,
@@ -230,49 +348,40 @@ pub async fn get_agent_v2(
 ) -> Result<Json<AgentResponse>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    // 🟢 P1 FIX: Use StateStore to query agent info
-    let query_result = state
+    let info = get_authorized_agent_info(&state, &user, &id).await?;
+
+    Ok(Json(agent_info_to_response(info)))
+}
+
+/// Update agent configuration (V2)
+pub async fn update_agent_v2(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateAgentRequest>,
+) -> Result<Json<AgentResponse>, GatewayError> {
+    require_any_role(&user, &["user", "admin"])?;
+
+    let info = get_authorized_agent_info(&state, &user, &id).await?;
+    let updated_config = apply_update_request(info.config.clone(), req)?;
+
+    state
+        .agent_runtime
+        .update_config(&id, updated_config.clone())
+        .await
+        .map_err(|e| GatewayError::agent(format!("Failed to update agent runtime: {}", e)))?;
+
+    state
         .state_store
-        .query(StateQuery::GetAgentInfo {
+        .execute(StateCommand::UpdateConfig {
             agent_id: id.clone(),
+            config: updated_config,
         })
         .await
-        .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
+        .map_err(|e| GatewayError::state(format!("Failed to update agent config: {}", e)))?;
 
-    let info = match &query_result {
-        QueryResult::AgentInfo { metadata, .. } => {
-            // 🟢 P0 FIX: Check ownership from metadata
-            check_v2_ownership(&user, metadata)?;
-            query_result
-        }
-        _ => return Err(GatewayError::not_found("Agent", &id)),
-    };
-
-    let info = match info {
-        QueryResult::AgentInfo {
-            config,
-            current_state,
-            created_at,
-            updated_at,
-            ..
-        } => AgentResponse {
-            id: id.clone(),
-            name: config.name,
-            description: Some(config.description),
-            status: current_state.to_string(),
-            capabilities: config.capabilities.into_iter().map(|c| c.name).collect(),
-            model: ModelInfo {
-                provider: config.llm_config.provider,
-                name: config.llm_config.model,
-            },
-            created_at,
-            updated_at,
-            last_heartbeat: None,
-        },
-        _ => return Err(GatewayError::not_found("Agent", &id)),
-    };
-
-    Ok(Json(info))
+    let updated = get_authorized_agent_info(&state, &user, &id).await?;
+    Ok(Json(agent_info_to_response(updated)))
 }
 
 /// Delete agent (V2)
@@ -283,19 +392,7 @@ pub async fn delete_agent_v2(
 ) -> Result<impl IntoResponse, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    // 🟢 P0 FIX: Verify ownership before deletion
-    let query_result = state
-        .state_store
-        .query(StateQuery::GetAgentInfo {
-            agent_id: id.clone(),
-        })
-        .await
-        .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
-    if let QueryResult::AgentInfo { metadata, .. } = &query_result {
-        check_v2_ownership(&user, metadata)?;
-    } else {
-        return Err(GatewayError::not_found("Agent", &id));
-    }
+    let _info = get_authorized_agent_info(&state, &user, &id).await?;
 
     // 🟢 P1 FIX: Use AgentRuntime trait to stop agent
     state
@@ -330,38 +427,36 @@ pub async fn start_agent_v2(
 ) -> Result<impl IntoResponse, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    // 🟢 P0 FIX: Verify ownership before starting
-    let query_result = state
-        .state_store
-        .query(StateQuery::GetAgentInfo {
-            agent_id: id.clone(),
-        })
-        .await
-        .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
-    if let QueryResult::AgentInfo { metadata, .. } = &query_result {
-        check_v2_ownership(&user, metadata)?;
-    } else {
-        return Err(GatewayError::not_found("Agent", &id));
+    let info = get_authorized_agent_info(&state, &user, &id).await?;
+    let state_before = info.current_state;
+
+    let runtime_status = state.agent_runtime.status(&id).await.ok();
+    match runtime_status.map(|status| status.state) {
+        Some(AgentState::Registered) | Some(AgentState::Error) => {
+            state
+                .agent_runtime
+                .send_command(&id, AgentStateCommand::Start)
+                .await
+                .map_err(|e| GatewayError::agent(format!("Failed to start agent: {}", e)))?;
+        }
+        Some(AgentState::Stopped) | Some(AgentState::ShuttingDown) | None => {
+            state
+                .agent_runtime
+                .spawn(info.config)
+                .await
+                .map_err(|e| GatewayError::agent(format!("Failed to spawn agent: {}", e)))?;
+        }
+        Some(_) => {}
     }
 
-    // 🟢 P1 FIX: Use AgentRuntime trait
-    state
-        .agent_runtime
-        .send_command(&id, AgentStateCommand::Start)
-        .await
-        .map_err(|e| GatewayError::agent(format!("Failed to start agent: {}", e)))?;
-
-    // 🟢 P1 FIX: Record state transition in StateStore
-    state
-        .state_store
-        .execute(StateCommand::Transition {
-            agent_id: id.clone(),
-            from: AgentState::Registered,
-            to: AgentState::Working,
-            reason: Some("User requested start".to_string()),
-        })
-        .await
-        .map_err(|e| GatewayError::state(format!("Failed to record transition: {}", e)))?;
+    set_agent_state(
+        &state,
+        &id,
+        state_before,
+        AgentState::Idle,
+        "User requested start",
+    )
+    .await?;
 
     Ok((
         StatusCode::OK,
@@ -380,26 +475,23 @@ pub async fn stop_agent_v2(
 ) -> Result<impl IntoResponse, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    // 🟢 P0 FIX: Verify ownership before stopping
-    let query_result = state
-        .state_store
-        .query(StateQuery::GetAgentInfo {
-            agent_id: id.clone(),
-        })
-        .await
-        .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
-    if let QueryResult::AgentInfo { metadata, .. } = &query_result {
-        check_v2_ownership(&user, metadata)?;
-    } else {
-        return Err(GatewayError::not_found("Agent", &id));
-    }
+    let info = get_authorized_agent_info(&state, &user, &id).await?;
+    let state_before = info.current_state;
 
-    // 🟢 P1 FIX: Use AgentRuntime trait
     state
         .agent_runtime
-        .send_command(&id, AgentStateCommand::Stop)
+        .stop(&id)
         .await
         .map_err(|e| GatewayError::agent(format!("Failed to stop agent: {}", e)))?;
+
+    set_agent_state(
+        &state,
+        &id,
+        state_before,
+        AgentState::Stopped,
+        "User requested stop",
+    )
+    .await?;
 
     Ok((
         StatusCode::OK,
@@ -418,35 +510,29 @@ pub async fn get_agent_status_v2(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    // 🟢 P0 FIX: Verify ownership before querying status
-    let query_result = state
-        .state_store
-        .query(StateQuery::GetAgentInfo {
-            agent_id: id.clone(),
-        })
-        .await
-        .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
-    if let QueryResult::AgentInfo { metadata, .. } = &query_result {
-        check_v2_ownership(&user, metadata)?;
-    } else {
-        return Err(GatewayError::not_found("Agent", &id));
-    }
+    let info = get_authorized_agent_info(&state, &user, &id).await?;
 
     // 🟢 P1 FIX: Use AgentRuntime trait
-    let status = state
-        .agent_runtime
-        .status(&id)
-        .await
-        .map_err(|e| GatewayError::agent(format!("Failed to get agent status: {}", e)))?;
+    let status = state.agent_runtime.status(&id).await.ok();
 
     Ok(Json(json!({
-        "agent_id": status.agent_id,
-        "state": status.state.to_string(),
-        "current_task": status.current_task,
-        "last_activity": status.last_activity,
-        "total_tasks": status.total_tasks,
-        "failed_tasks": status.failed_tasks,
-        "kernel_task_id": status.kernel_task_id,
+        "agent_id": id,
+        "state": status
+            .as_ref()
+            .map(|status| status.state.to_string())
+            .unwrap_or_else(|| info.current_state.to_string()),
+        "state_store_state": info.current_state.to_string(),
+        "current_task": status.as_ref().and_then(|status| status.current_task.clone()),
+        "last_activity": status.as_ref().map(|status| status.last_activity),
+        "total_tasks": status
+            .as_ref()
+            .map(|status| status.total_tasks)
+            .unwrap_or(info.task_count),
+        "failed_tasks": status
+            .as_ref()
+            .map(|status| status.failed_tasks)
+            .unwrap_or(info.failure_count),
+        "kernel_task_id": status.and_then(|status| status.kernel_task_id),
     })))
 }
 
@@ -471,19 +557,9 @@ pub async fn execute_task_v2(
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     require_any_role(&user, &["user", "admin"])?;
 
-    // 🟢 P0 FIX: Verify ownership before executing task
-    let query_result = state
-        .state_store
-        .query(StateQuery::GetAgentInfo {
-            agent_id: id.clone(),
-        })
-        .await
-        .map_err(|e| GatewayError::agent(format!("Failed to get agent: {}", e)))?;
-    if let QueryResult::AgentInfo { metadata, .. } = &query_result {
-        check_v2_ownership(&user, metadata)?;
-    } else {
-        return Err(GatewayError::not_found("Agent", &id));
-    }
+    let info = get_authorized_agent_info(&state, &user, &id).await?;
+    let state_before = info.current_state;
+    let task_id = uuid::Uuid::new_v4().to_string();
 
     let task_config = TaskConfig {
         task_type: req.task_type,
@@ -493,14 +569,53 @@ pub async fn execute_task_v2(
         stream_tx: None,
     };
 
-    // 🟢 P1 FIX: Use AgentRuntime trait to execute task
-    let result = state
-        .agent_runtime
-        .execute_task(&id, task_config)
+    if state_before == AgentState::Idle {
+        state
+            .state_store
+            .execute(StateCommand::AssignTask {
+                agent_id: id.clone(),
+                task_id: task_id.clone(),
+            })
+            .await
+            .map_err(|e| GatewayError::state(format!("Failed to assign task: {}", e)))?;
+    } else {
+        set_agent_state(
+            &state,
+            &id,
+            state_before,
+            AgentState::Working,
+            format!("Task {} assigned", task_id),
+        )
+        .await?;
+    }
+
+    let result = state.agent_runtime.execute_task(&id, task_config).await;
+    let task_success = result
+        .as_ref()
+        .map(|result| result.success)
+        .unwrap_or(false);
+    let task_output = result
+        .as_ref()
+        .ok()
+        .map(|result| result.output.clone())
+        .unwrap_or_else(|| serde_json::Value::Null);
+
+    state
+        .state_store
+        .execute(StateCommand::CompleteTask {
+            agent_id: id.clone(),
+            task_id: task_id.clone(),
+            success: task_success,
+            result: Some(task_output),
+        })
         .await
-        .map_err(|e| GatewayError::agent(format!("Failed to execute task: {}", e)))?;
+        .map_err(|e| GatewayError::state(format!("Failed to complete task: {}", e)))?;
+
+    let result =
+        result.map_err(|e| GatewayError::agent(format!("Failed to execute task: {}", e)))?;
 
     Ok(Json(json!({
+        "task_id": task_id,
         "success": result.success,
         "output": result.output,
         "execution_time_ms": result.execution_time_ms,
@@ -1095,19 +1210,68 @@ pub async fn migrate_legacy_bindings(
     ))
 }
 
-// Migration Guide Comments:
-//
-// To migrate existing handlers:
-//
-// 1. Replace `state.agent_service.xxx()` with `state.agent_runtime.xxx()` for
-//    agent lifecycle
-// 2. Replace database queries with `state.state_store.query()` for reads
-// 3. Replace state changes with `state.state_store.execute()` for writes
-// 4. Use `GatewayAgentConfig` instead of internal `AgentConfig`
-// 5. Use `AgentState` from gateway-lib instead of internal state
-//
-// Benefits:
-// - Decoupled from concrete beebotos_agents implementation
-// - Type-safe trait-based interface
-// - CQRS pattern for better performance
-// - Event sourcing for audit trail
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_config() -> AgentConfig {
+        AgentConfigBuilder::new("agent-1", "Original")
+            .description("old description")
+            .with_llm(LlmConfig {
+                provider: "openai".to_string(),
+                model: "gpt-4".to_string(),
+                api_key: None,
+                temperature: 0.7,
+                max_tokens: 2000,
+            })
+            .with_capability(capability_from_name("chat".to_string()))
+            .build()
+    }
+
+    #[test]
+    fn update_request_changes_config_without_lifecycle_state() {
+        let config = apply_update_request(
+            base_config(),
+            UpdateAgentRequest {
+                name: Some("Renamed".to_string()),
+                description: Some("new description".to_string()),
+                status: None,
+                capabilities: Some(vec!["search".to_string(), "tools".to_string()]),
+                model_provider: Some("deepseek".to_string()),
+                model_name: Some("deepseek-chat".to_string()),
+            },
+        )
+        .expect("config update should be accepted");
+
+        assert_eq!(config.name, "Renamed");
+        assert_eq!(config.description, "new description");
+        assert_eq!(config.llm_config.provider, "deepseek");
+        assert_eq!(config.llm_config.model, "deepseek-chat");
+        assert_eq!(
+            config
+                .capabilities
+                .iter()
+                .map(|cap| cap.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["search", "tools"]
+        );
+    }
+
+    #[test]
+    fn update_request_rejects_status_mutation() {
+        let err = apply_update_request(
+            base_config(),
+            UpdateAgentRequest {
+                name: None,
+                description: None,
+                status: Some("stopped".to_string()),
+                capabilities: None,
+                model_provider: None,
+                model_name: None,
+            },
+        )
+        .expect_err("status updates must go through lifecycle endpoints");
+
+        assert!(err.to_string().contains("lifecycle endpoints"));
+    }
+}
