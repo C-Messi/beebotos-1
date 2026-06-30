@@ -1,0 +1,199 @@
+name: Windows Build and Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Build target'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - gateway
+          - web
+          - beehub
+          - launcher
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    name: Build Windows Package
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x86_64
+
+      - name: Install PowerShell
+        shell: pwsh
+        run: |
+          $PSVersionTable.PSVersion
+
+      - name: Install trunk (Web WASM build)
+        run: |
+          cargo install trunk --locked
+
+      - name: Verify tools
+        shell: pwsh
+        run: |
+          rustc --version
+          cargo --version
+          trunk --version
+          Get-Command pwsh
+
+      - name: Build and package
+        shell: pwsh
+        run: |
+          $target = "${{ github.event.inputs.target }}"
+          if (-not $target) { $target = "all" }
+          
+          Write-Host "========================================" -ForegroundColor Cyan
+          Write-Host "  BeeBotOS Windows Build & Package" -ForegroundColor Cyan
+          Write-Host "  Target: $target" -ForegroundColor Cyan
+          Write-Host "========================================" -ForegroundColor Cyan
+          
+          .\beebotos-dev.ps1 pack $target
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Packaging failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+
+      - name: Verify package contents
+        shell: pwsh
+        run: |
+          Write-Host "=== Package Contents ===" -ForegroundColor Cyan
+          
+          $distDir = "dist\beebotos"
+          if (Test-Path $distDir) {
+            Get-ChildItem -Path $distDir | Format-Table Name, @{Label="Size"; Expression={$_.Length}; Align="Right"}
+            
+            # Verify required files
+            $required = @(
+              "beebotos-gateway.exe",
+              "beebotos-launcher.exe",
+              "web-server.exe",
+              "beehub.exe",
+              "beebotos-run.ps1",
+              "config\beebotos.toml",
+              "config\web-server.toml",
+              "migrations_sqlite",
+              "skills",
+              "workflows"
+            )
+            
+            $missing = @()
+            foreach ($file in $required) {
+              $path = Join-Path $distDir $file
+              if (-not (Test-Path $path)) {
+                $missing += $file
+                Write-Warning "Missing: $file"
+              } else {
+                Write-Host "  [OK] $file" -ForegroundColor Green
+              }
+            }
+            
+            if ($missing.Count -gt 0) {
+              Write-Error "Missing required files: $($missing -join ', ')"
+              exit 1
+            }
+          } else {
+            Write-Error "dist\beebotos directory not found"
+            exit 1
+          }
+          
+          # Check zip file
+          $zipFiles = Get-ChildItem -Path "dist" -Filter "beebotos-*.zip"
+          if ($zipFiles.Count -eq 0) {
+            Write-Error "No zip file found in dist directory"
+            exit 1
+          }
+          
+          Write-Host ""
+          Write-Host "=== Zip Files ===" -ForegroundColor Cyan
+          $zipFiles | Format-Table Name, @{Label="Size(MB)"; Expression={[math]::Round($_.Length / 1MB, 2)}; Align="Right"}
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: beebotos-windows-${{ github.run_number }}
+          path: dist/beebotos-*.zip
+          retention-days: 30
+
+      - name: Upload dist directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: beebotos-dist-${{ github.run_number }}
+          path: dist/beebotos/
+          retention-days: 7
+
+      - name: Create Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/beebotos-*.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Optional: Build Linux version for comparison
+  build-linux:
+    runs-on: ubuntu-latest
+    name: Build Linux Package
+    if: github.event.inputs.target == 'all' || github.event.inputs.target == ''
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-x86_64
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Install trunk
+        run: |
+          cargo install trunk --locked
+
+      - name: Build and package
+        run: |
+          chmod +x beebotos-dev.ps1
+          pwsh ./beebotos-dev.ps1 pack all
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: beebotos-linux-${{ github.run_number }}
+          path: dist/beebotos-*.zip
+          retention-days: 30
